@@ -23,6 +23,8 @@ from openjd.adaptor_runtime_client import Action
 from openjd.adaptor_runtime._utils import secure_open
 
 from .._version import version as adaptor_version
+from ..pdg_actions import EXIT_CODE_MARKER as _PDG_EXIT_CODE_MARKER
+from ..pdg_actions import PdgActions
 
 _logger = logging.getLogger(__name__)
 
@@ -42,6 +44,9 @@ _OPTIONAL_HOUDINI_INIT_KEYS = {
     "wedgenum",
     "wedge_node",
 }
+
+# The client runs these, in order, for each PDG work item.
+_PDG_ITEM_ACTIONS: tuple[str, ...] = ("pdg_set_environment", "pdg_run_command")
 
 _LICENSE_GUIDANCE = (
     "If you are using bring your own license (BYOL), check your license configuration "
@@ -92,6 +97,10 @@ class HoudiniAdaptor(Adaptor[AdaptorConfiguration]):
     _validators: AdaptorDataValidators | None = None
     _telemetry_client: TelemetryClient | None = None
     _houdini_version: str = ""
+    # The last PDG work item's exit code, or None while it runs.
+    _pdg_exit_code: int | None = None
+    # Stages PDG work items and publishes their outputs, in this process, which owns the storage.
+    _pdg_actions: PdgActions | None = None
 
     # Variables used for keeping track of produced outputs for progress reporting.
     # Will be optionally changed after the scene is set.
@@ -238,6 +247,14 @@ class HoudiniAdaptor(Adaptor[AdaptorConfiguration]):
 
             callback_list.append(RegexCallback(version_regexes, self._handle_houdini_version))
 
+            # Only a PDG session listens for the client's work item exit codes. The line must
+            # start with the marker, because the client prefixes a command's look-alike lines.
+            if self._is_pdg_session:
+                pdg_exit_regexes: list[re.Pattern] = [
+                    re.compile("^" + re.escape(_PDG_EXIT_CODE_MARKER) + "(-?[0-9]+)")
+                ]
+                callback_list.append(RegexCallback(pdg_exit_regexes, self._handle_pdg_exit_code))
+
             self._regex_callbacks = callback_list
         return self._regex_callbacks
 
@@ -303,6 +320,19 @@ class HoudiniAdaptor(Adaptor[AdaptorConfiguration]):
         self._houdini_version = match.groups()[0]
         if len(match.groups()) > 1:
             self._houdini_version += match.groups()[1]
+
+    def _handle_pdg_exit_code(self, match: re.Match) -> None:
+        """
+        Callback for stdout that indicates a PDG work item finished.
+        Args:
+            match (re.Match): The match object from the regex pattern that was matched the message
+        """
+        self._pdg_exit_code = int(match.group(1))
+
+    @property
+    def _is_pdg_session(self) -> bool:
+        """True when this session runs PDG work items instead of rendering a ROP."""
+        return "pdg" in self.init_data
 
     def _get_houdini_client_path(self) -> str:
         """
@@ -518,6 +548,11 @@ class HoudiniAdaptor(Adaptor[AdaptorConfiguration]):
             raise HoudiniNotRunningError("Cannot render because Houdini is not running.")
 
         self.validators.run_data.validate(run_data)
+        # PDG data in either the session or the task goes to the PDG path, which checks they agree.
+        if self._is_pdg_session or "pdg" in run_data:
+            self._run_pdg_item(run_data)
+            return
+
         self._is_rendering = True
         self._action_queue.enqueue_action(
             Action("start_render", {"frame_range": run_data["frame_range"]})
@@ -538,6 +573,81 @@ class HoudiniAdaptor(Adaptor[AdaptorConfiguration]):
                 "Houdini exited early and did not render successfully, please check render logs. "
                 f"Exit code {exit_code}"
             )
+
+    def _run_pdg_item(self, run_data: dict) -> None:
+        """
+        Runs one PDG work item in the Houdini client and waits until it finishes. The item's
+        exit code decides the task's outcome.
+
+        Raises:
+            RuntimeError: If the session and the run data disagree about PDG, or the item fails.
+            HoudiniNotRunningError: If Houdini exits before the item finishes.
+        """
+        # A mismatch would run a work item with no PDG actions, or a frame with no scene.
+        if not self._is_pdg_session or "pdg" not in run_data:
+            raise RuntimeError(
+                "The run data and the init data disagree: a PDG work item needs a PDG session, "
+                "and a PDG session runs only PDG work items."
+            )
+        # This process stages the payload, then the client sets the environment and runs the item.
+        pdg: PdgActions = self._get_pdg_actions()
+        args: dict = pdg.stage_payload(
+            {
+                **run_data["pdg"],
+                "pdg_dir": self.init_data["pdg"]["pdg_dir"],
+                "scene_file": self.init_data["scene_file"],
+                "path_mapping_rules": self.path_mapping_rules,
+            }
+        )
+        self._pdg_exit_code = None
+        for name in _PDG_ITEM_ACTIONS:
+            self._action_queue.enqueue_action(Action(name, args))
+
+        while self._pdg_exit_code is None and self._houdini_is_running and not self._has_exception:
+            time.sleep(0.1)  # busy wait so that on_cleanup is not called
+
+        # No exit code means Houdini stopped before the item finished.
+        exit_code: int | None = self._pdg_exit_code
+        if exit_code is None and self._houdini_client:
+            client_exit_code: int | None = self._houdini_client.returncode
+            self._get_deadline_telemetry_client().record_error(
+                {
+                    "exit_code": client_exit_code,
+                    "exception_scope": "caught",
+                    "error_operation": "on_run",
+                },
+                str(RuntimeError),
+            )
+            raise HoudiniNotRunningError(
+                "Houdini exited before the PDG work item finished, please check the logs. "
+                f"Exit code {client_exit_code}"
+            )
+        # The item's exit code is the task's outcome, and only a success publishes outputs.
+        if exit_code != 0:
+            raise RuntimeError(f"The PDG work item failed with exit code {exit_code}.")
+        if args["record_outputs"]:
+            pdg.publish_outputs()
+
+    def _get_pdg_actions(self) -> PdgActions:
+        """
+        The PDG actions for this session. Their storage reaches S3 with the session's queue role
+        credentials, which the worker agent provides through AWS_PROFILE. Only this process
+        imports the AWS libraries; the Houdini client never does.
+        """
+        # Built once per session, and imported here so a ROP session never loads them.
+        if self._pdg_actions is None:
+            import boto3
+
+            from deadline.houdini_pdg.cook import SystemClock
+            from deadline.houdini_pdg.task_storage import S3TaskStorage
+
+            # The storage uses the bucket and prefix the job named in its init data.
+            pdg: dict = self.init_data["pdg"]
+            storage: S3TaskStorage = S3TaskStorage(
+                s3_client=boto3.client("s3"), bucket=pdg["bucket"], root_prefix=pdg["root_prefix"]
+            )
+            self._pdg_actions = PdgActions(storage=storage, clock=SystemClock())
+        return self._pdg_actions
 
     def on_stop(self) -> None:
         """ """
@@ -587,7 +697,14 @@ class HoudiniAdaptor(Adaptor[AdaptorConfiguration]):
         Populates the adaptor server's action queue with actions from the init_data that the Houdini
         Client will request and perform. The action must be present in either the
         _REQUIRED_HOUDINI_INIT_KEYS or _OPTIONAL_HOUDINI_INIT_KEYS set to be added to the action queue.
+
+        A PDG session gets one action that prepares the client for work items. It loads no scene:
+        each item that cooks in the client loads the scene it names, so every item starts fresh.
         """
+        if self._is_pdg_session:
+            self._action_queue.enqueue_action(Action("pdg_session", {}))
+            return
+
         for name in _REQUIRED_HOUDINI_INIT_KEYS:
             self._action_queue.enqueue_action(Action(name, {name: self.init_data[name]}))
 
