@@ -109,7 +109,7 @@ def test_the_client_session_runs_an_item_with_only_the_namespace_folders_on_the_
         env={**os.environ, "PYTHONPATH": os.pathsep.join(namespaces)},
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert f"{EXIT_CODE_MARKER}0" in result.stdout
+    assert f"{EXIT_CODE_MARKER}0" in result.stdout, "DIAG-STDOUT<<" + result.stdout + ">>DIAG-STDERR<<" + result.stderr + ">>"
     # The item ran, and handed its outputs over for the adaptor to publish.
     record: Path = tmp_path / "pdg" / "pdgtemp" / "data" / "item.outputs.json"
     assert json.loads(record.read_text()) == {
