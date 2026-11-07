@@ -25,6 +25,7 @@ from .scene_reads import (
     ReadVerdict,
     SceneRead,
     _depends_on_work_item,
+    reads_opening,
 )
 
 _logger: logging.Logger = logging.getLogger(__name__)
@@ -655,6 +656,41 @@ def _node_file_uses(node: NodeInfo) -> List[str]:
     return uses
 
 
+def _scene_walk_file_uses(ctx: ValidationContext) -> Dict[str, List[str]]:
+    """Each way a node that is not a step touches a step's files that the scene walk shows, by node name.
+
+    A node reads a step's file when a file parm's path matches a file a step
+    writes, and writes one when a write parm or a declared output is a file a step
+    reads.
+    """
+    report: ReadReport = ctx.reads or ReadReport()
+    uses: Dict[str, List[str]] = {}
+    for match in report.node_reads:
+        if match.verdict is not ReadVerdict.EXTERNAL:
+            uses.setdefault(match.read.step, []).append(
+                f"its '{match.read.parm}' parm reads '{match.read.path}', which the step "
+                f"'{match.producer}' writes"
+            )
+    # The files each node writes, from its write parms and its items' declared
+    # outputs, and the step reads that open one of them.
+    written: Dict[str, Set[str]] = {}
+    for write in report.node_writes:
+        if write.path:
+            written.setdefault(write.step, set()).add(os.path.normpath(write.path))
+    for node in ctx.nodes:
+        files: Set[str] = written.get(node.name, set()) | {
+            _resolve(declared.path, ctx.working_dir, ctx.env)
+            for item in node.items
+            for declared in item.declared_outputs
+        }
+        opened: Tuple[SceneRead, ...] = reads_opening(files, report.step_reads, ctx.working_dir)
+        uses.setdefault(node.name, []).extend(
+            f"it writes a file that the step '{read.step}' reads through its '{read.parm}' parm"
+            for read in opened
+        )
+    return uses
+
+
 def _check_non_step_file_use(ctx: ValidationContext) -> Verdict:
     """Refuse a node that is not a step, has a step above it, and touches a step's files.
 
@@ -671,6 +707,7 @@ def _check_non_step_file_use(ctx: ValidationContext) -> Verdict:
         for parent in node.upstream:
             if parent in downstream:
                 downstream[parent].add(node.name)
+    walked: Dict[str, List[str]] = _scene_walk_file_uses(ctx)
 
     refusals: List[Refusal] = []
     advisories: List[Advisory] = []
@@ -689,7 +726,9 @@ def _check_non_step_file_use(ctx: ValidationContext) -> Verdict:
         between: str = f"below {_examples(above)}"
         if below:
             between += f" and above {_examples(below)}"
-        uses: List[str] = _node_file_uses(node)
+        # Two parms the walk reached under one node can give the same reason, so
+        # each reason is kept once.
+        uses: List[str] = list(dict.fromkeys(_node_file_uses(node) + walked.get(node.name, [])))
         if uses:
             refusals.append(
                 Refusal(

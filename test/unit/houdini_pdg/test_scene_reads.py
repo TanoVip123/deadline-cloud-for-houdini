@@ -27,7 +27,9 @@ from deadline.houdini_pdg.scene_reads import (
     ReadReport,
     ReadVerdict,
     SceneRead,
+    is_output_parm,
     match_reads,
+    reads_opening,
 )
 
 WORK: str = "/proj"
@@ -786,3 +788,92 @@ def test_prefix_matching_rules_hold_for_any_prefix(
     assert _verdicts(report.matches) == expected
     edged: Set[str] = {name for name, verdict, _ in expected if verdict is not ReadVerdict.SELF}
     assert report.data_edges == ({reader: frozenset(edged)} if edged else {})
+
+
+# -- nodes that map to no step ---------------------------------------------------
+
+
+def _with_merge() -> GraphSnapshot:
+    """Pyro Bonfire's shape, with a ``merge`` node that maps to no step."""
+    return GraphSnapshot(steps=_pyro().steps, skipped_nodes=("merge",))
+
+
+def test_a_read_by_a_node_that_is_no_step_is_matched_but_kept_apart() -> None:
+    """A non-step node's read is matched to its producer, but adds no edge and no step match.
+
+    Folding it into the step matches would let a node that maps to no step add a
+    dependency, or be judged as a step by the path checks.
+    """
+    # The merge reads pyro's cache, which would be an edge if merge were a step.
+    read: SceneRead = _read("merge", f"{WORK}/geo/pyro_cache/wedge0/p.1.vdb")
+    report: ReadReport = match_reads(_with_merge(), [read], WORK)
+    assert _verdicts(report.node_reads) == [("pyro", ReadVerdict.EDGE_ADDED, ())]
+    assert (report.matches, report.data_edges, report.unportable, report.step_reads) == (
+        (),
+        {},
+        (),
+        (),
+    )
+
+
+def test_writes_and_reads_are_sorted_between_steps_and_other_nodes() -> None:
+    """A non-step write lands in ``node_writes``, and ``step_reads`` holds every step read but no write."""
+    # One write by the merge, and one write and one read by a step.
+    node_write: SceneRead = _read("merge", f"{WORK}/mid/x.txt", parm="outputpath")
+    step_write: SceneRead = _read("karma", f"{WORK}/render/karma/k.1.exr", parm="picture")
+    step_read: SceneRead = _read("karma", "/library/hdri/sky.exr")
+    report: ReadReport = match_reads(_with_merge(), [node_write, step_write, step_read], WORK)
+    assert report.node_writes == (node_write,)
+    assert report.step_reads == (step_read,)
+    assert report.node_reads == ()
+
+
+@pytest.mark.parametrize(
+    ("node_type", "parm", "expected"),
+    [
+        ("textoutput", "filepath", True),
+        ("csvoutput", "csvfilepath", True),
+        ("geometryimport", "filepath", False),
+        ("jsonoutput", "outputfile", True),
+        ("filecopy", "destfolder", True),
+        ("invoke", "outputpath", True),
+        ("ropgeometry", "sopoutput", True),
+    ],
+)
+def test_a_write_parm_is_known_by_its_name_or_by_its_node_type(
+    node_type: str, parm: str, expected: bool
+) -> None:
+    """``filepath`` is a write on the text and CSV output nodes only, because Geometry Import reads with it."""
+    assert is_output_parm(node_type, parm) is expected
+
+
+def test_reads_opening_matches_a_file_by_path_or_by_static_prefix() -> None:
+    """A plain read matches only the exact file, and a prefix read matches the files under its prefix.
+
+    A sibling file in the same directory is not a match, so a node that writes a
+    log next to a step's input is not refused.
+    """
+    # One written file, and four step reads: the file, its sibling, a prefix that
+    # covers it, and a prefix too wide to judge.
+    files: FrozenSet[str] = frozenset({f"{WORK}/mid/x.txt"})
+    exact: SceneRead = _read("karma", f"{WORK}/mid/x.txt")
+    sibling: SceneRead = _read("karma", f"{WORK}/mid/y.txt")
+    prefixed: SceneRead = SceneRead(
+        step="karma",
+        node_path="/obj/karma",
+        parm="file",
+        raw="$HIP/mid/`@name`.txt",
+        path="",
+        static_prefix=f"{WORK}/mid/",
+    )
+    # A prefix at the working directory would match every file, so it matches none.
+    too_wide: SceneRead = SceneRead(
+        step="karma",
+        node_path="/obj/karma",
+        parm="file",
+        raw="$HIP/`@name`",
+        path="",
+        static_prefix=f"{WORK}/",
+    )
+    found: Tuple[SceneRead, ...] = reads_opening(files, [exact, sibling, prefixed, too_wide], WORK)
+    assert found == (exact, prefixed)

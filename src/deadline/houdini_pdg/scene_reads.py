@@ -19,7 +19,18 @@ import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, FrozenSet, List, Mapping, Optional, Pattern, Sequence, Set, Tuple
+from typing import (
+    AbstractSet,
+    Dict,
+    FrozenSet,
+    List,
+    Mapping,
+    Optional,
+    Pattern,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from .graph import PDG_DIR_TOKEN, GraphSnapshot
 
@@ -51,6 +62,9 @@ IGNORE_VALUE_PREFIXES: Tuple[str, ...] = ("opdef:", "oplib:", "temp:", "op:")
 OUTPUT_PARMS: FrozenSet[str] = frozenset(
     {
         "destfile",  # File Copy
+        "destfolder",  # File Copy
+        "outputfile",  # JSON Output
+        "outputpath",  # Invoke
         "copoutput",  # Composite ROP
         "sopoutput",  # Geometry ROP
         "dopoutput",  # Dynamics ROP
@@ -67,6 +81,19 @@ OUTPUT_PARMS: FrozenSet[str] = frozenset(
     }
 )
 
+#: Write parms whose name other node types use for a read, such as Geometry
+#: Import's ``filepath``. They count as writes only on these node types.
+OUTPUT_PARMS_BY_NODE_TYPE: Mapping[str, FrozenSet[str]] = {
+    "textoutput": frozenset({"filepath"}),
+    "csvoutput": frozenset({"filepath", "csvfilepath"}),
+}
+
+
+def is_output_parm(node_type: str, parm: str) -> bool:
+    """Whether ``parm`` names where a node of type ``node_type`` writes."""
+    return parm in OUTPUT_PARMS or parm in OUTPUT_PARMS_BY_NODE_TYPE.get(node_type, frozenset())
+
+
 # Prefixes that resolve on a worker: $HIP, $PDG_DIR, $PDG_TEMP, and PDG's own
 # tokens. Path mapping rewrites literal paths, not Houdini variables, so any other
 # authored prefix points at the workstation. A variable counts only as a whole
@@ -81,8 +108,10 @@ _VARIABLE: Pattern[str] = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 
 @dataclass(frozen=True)
 class SceneRead:
-    """One file-reference parm that a step's tasks evaluate."""
+    """One file-reference parm that a TOP node's work evaluates."""
 
+    #: The TOP node whose walk reached the parm. Usually a step, but a node that
+    #: maps to no step can be walked too.
     step: str
     node_path: str
     parm: str
@@ -167,6 +196,14 @@ class ReadReport:
     #: workstation path.
     unportable: Tuple[SceneRead, ...] = ()
     attribute_variables: Tuple[AttributeVariableUse, ...] = ()
+    #: Every step read that is not a write, so a check can ask which steps read a
+    #: given file.
+    step_reads: Tuple[SceneRead, ...] = ()
+    #: Reads by TOP nodes that map to no step, each matched like a step's read.
+    #: They add no data edge.
+    node_reads: Tuple[ReadMatch, ...] = ()
+    #: Write parms of TOP nodes that map to no step.
+    node_writes: Tuple[SceneRead, ...] = ()
 
 
 def match_reads(
@@ -178,48 +215,96 @@ def match_reads(
     with every test stopping at a path separator, and ignores a root at or above
     ``working_dir``, which would cover everything. A read that depends on a work
     item is matched by its static prefix instead, against every step's files.
+    Reads by nodes that map to no step are matched the same way, but kept apart in
+    ``node_reads`` and ``node_writes``.
     """
     producers: Tuple[_Producer, ...] = _output_roots(snapshot, working_dir)
     existing: Dict[str, Set[str]] = {step.name: set(step.dependencies) for step in snapshot.steps}
+    # A node that maps to no step adds no edge, so its reads are set aside here.
+    skipped: Set[str] = set(snapshot.skipped_nodes)
+    own: List[SceneRead] = [read for read in reads if read.step not in skipped]
+    others: List[SceneRead] = [read for read in reads if read.step in skipped]
 
     matches: List[ReadMatch] = []
     edges: Dict[str, Set[str]] = {}
-    for read in reads:
+    for read in own:
         if read.is_output:
             # A write is not a read. Two File Copy nodes writing one sequence at
             # different frame offsets would otherwise depend on each other.
             continue
-        if _depends_on_work_item(read.raw):
-            # Evaluated outside any work item, its path means nothing, so it is
-            # matched by its static prefix. A prefix that matches no step adds no
-            # match at all, so no check judges the meaningless path.
-            for match in _prefix_matches(read, producers, existing, working_dir):
-                matches.append(match)
-                if match.verdict in (ReadVerdict.COVERED, ReadVerdict.EDGE_ADDED):
-                    edges.setdefault(read.step, set()).add(match.producer)
-            continue
-        # A plain read has one producer, or none, and a verdict from how the
-        # reading step relates to it.
-        producer, candidates = _producer_of(read.path, producers, prefer=read.step)
-        verdict: ReadVerdict = _verdict(read.step, producer, existing)
         # Covered matches count too, so an existing edge that carries data is kept.
-        if verdict in (ReadVerdict.COVERED, ReadVerdict.EDGE_ADDED):
-            edges.setdefault(read.step, set()).add(producer)
-        matches.append(
-            ReadMatch(
-                read=read,
-                producer=producer,
-                verdict=verdict,
-                ambiguous_with=tuple(s for s in candidates if s != producer),
-            )
-        )
+        for match in _match_read(read, producers, existing, working_dir):
+            matches.append(match)
+            if match.verdict in (ReadVerdict.COVERED, ReadVerdict.EDGE_ADDED):
+                edges.setdefault(read.step, set()).add(match.producer)
 
+    # Reads by nodes that are not steps are matched the same way, but kept apart.
+    node_reads: List[ReadMatch] = [
+        match
+        for read in others
+        if not read.is_output
+        for match in _match_read(read, producers, existing, working_dir)
+    ]
     return ReadReport(
         matches=tuple(matches),
         data_edges={step: frozenset(found) for step, found in sorted(edges.items())},
-        unportable=_unportable(reads, working_dir),
-        attribute_variables=_attribute_variables(reads, snapshot),
+        unportable=_unportable(own, working_dir),
+        attribute_variables=_attribute_variables(own, snapshot),
+        step_reads=tuple(read for read in own if not read.is_output),
+        node_reads=tuple(node_reads),
+        node_writes=tuple(read for read in others if read.is_output),
     )
+
+
+def reads_opening(
+    files: AbstractSet[str], reads: Sequence[SceneRead], working_dir: str
+) -> Tuple[SceneRead, ...]:
+    """The reads that open one of ``files``, which are normalized paths.
+
+    A plain read matches by its path. A read that depends on a work item matches
+    when a file starts with its static prefix, with the same working-directory
+    guard as producer matching.
+    """
+    working: str = os.path.normpath(working_dir) if working_dir else ""
+    found: List[SceneRead] = []
+    for read in reads:
+        if not _depends_on_work_item(read.raw):
+            if read.path and os.path.normpath(read.path) in files:
+                found.append(read)
+            continue
+        # A prefix with no directory, or one that holds the working directory,
+        # would match everything, so it matches nothing.
+        prefix, directory = _normalize_prefix(read.static_prefix)
+        if not directory or (working and _is_below(working, directory)):
+            continue
+        if any(path.startswith(prefix) for path in files):
+            found.append(read)
+    return tuple(found)
+
+
+def _match_read(
+    read: SceneRead,
+    producers: Sequence[_Producer],
+    existing: Mapping[str, Set[str]],
+    working_dir: str,
+) -> List[ReadMatch]:
+    """The read's matches: by static prefix when it depends on a work item, else one by its path."""
+    if _depends_on_work_item(read.raw):
+        # Evaluated outside any work item, its path means nothing, so it is
+        # matched by its static prefix. A prefix that matches no step adds no
+        # match at all, so no check judges the meaningless path.
+        return _prefix_matches(read, producers, existing, working_dir)
+    # A plain read has one producer, or none, and a verdict from how the
+    # reading node relates to it.
+    producer, candidates = _producer_of(read.path, producers, prefer=read.step)
+    return [
+        ReadMatch(
+            read=read,
+            producer=producer,
+            verdict=_verdict(read.step, producer, existing),
+            ambiguous_with=tuple(s for s in candidates if s != producer),
+        )
+    ]
 
 
 def _depends_on_work_item(raw: str) -> bool:

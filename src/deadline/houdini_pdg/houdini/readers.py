@@ -13,7 +13,7 @@ import re
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Set, Tuple
 
 from ..graph import DeclaredFile, NodeInfo, RawItem
-from ..scene_reads import IGNORE_PARMS, IGNORE_VALUE_PREFIXES, OUTPUT_PARMS, SceneRead, SceneReads
+from ..scene_reads import IGNORE_PARMS, IGNORE_VALUE_PREFIXES, SceneRead, SceneReads, is_output_parm
 
 _logger: logging.Logger = logging.getLogger(__name__)
 
@@ -171,6 +171,7 @@ def collect_scene_reads(
             for node in reached:
                 node_path: str = _path_of(node)
                 node_name: str = _name_of(node)
+                node_type: str = _node_type_name(node)
                 for parm, raw, value, owner in _file_parms(node, node_name):
                     reads.append(
                         SceneRead(
@@ -179,7 +180,7 @@ def collect_scene_reads(
                             parm=parm,
                             raw=raw,
                             path=value,
-                            is_output=parm in OUTPUT_PARMS,
+                            is_output=is_output_parm(node_type, parm),
                             static_prefix=_static_prefix(raw, owner, expand),
                         )
                     )

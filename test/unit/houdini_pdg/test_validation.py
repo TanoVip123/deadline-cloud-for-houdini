@@ -761,7 +761,7 @@ def test_an_unused_extra_scheduler_node_causes_no_refusal() -> None:
     assert not _subjects(verdict, RefusalScenario.MULTIPLE_SCHEDULERS)
 
 
-# -- in-process nodes -----------------------------------------------------------
+# -- the in-process node: what the node's own parms show ------------------------
 
 
 def _in_process_script() -> List[NodeInfo]:
@@ -807,8 +807,14 @@ def _wedged_network() -> List[NodeInfo]:
     ]
 
 
+#: The file the ``subdivide`` step of :func:`_between_steps` writes.
+_STEP_FILE: str = os.path.join(WORKING_DIR, "geo", "sub.1.bgeo.sc")
+#: A file only the node between the steps writes.
+_MIDDLE_FILE: str = os.path.join(WORKING_DIR, "mid", "x.txt")
+
+
 def _between_steps(**middle: Any) -> List[NodeInfo]:
-    """A step that declares one output, a node ``middle`` that is not a step, and a step below it."""
+    """A step that declares :data:`_STEP_FILE`, a node ``middle`` that is not a step, and a step below it."""
     # The middle node has no items and the Generate cook type unless a test says otherwise.
     declared: Tuple[DeclaredFile, ...] = (DeclaredFile("__PDG_DIR__/geo/sub.1.bgeo.sc", ""),)
     middle.setdefault("items", ())
@@ -1036,6 +1042,84 @@ def test_an_in_process_node_is_refused_exactly_when_a_step_is_above_it(
         and any(a in by_name and by_name[a].is_schedulable for a in ancestors(n.name))
     }
     assert _subjects(validate(_ctx(nodes)), RefusalScenario.IN_PROCESS_NODE) == expected
+
+
+# -- the in-process node: what the scene walk shows -----------------------------
+
+
+def _scene_read(node: str, parm: str, path: str, **kwargs: Any) -> SceneRead:
+    """One file parm on ``node``, authored as its path unless ``raw`` is given."""
+    kwargs.setdefault("raw", path)
+    return SceneRead(step=node, node_path=f"/obj/topnet1/{node}", parm=parm, path=path, **kwargs)
+
+
+def _with_reads(nodes: List[NodeInfo], reads: Sequence[SceneRead]) -> ValidationContext:
+    """A context whose read report comes from matching ``reads`` against the snapshot."""
+    # Nothing is on disk, so the cached-output check stays out of these tests.
+    snapshot: GraphSnapshot = synthesize(nodes)
+    return _ctx(
+        nodes,
+        snapshot=snapshot,
+        reads=match_reads(snapshot, reads, WORKING_DIR),
+        working_dir=WORKING_DIR,
+        env={},
+        exists=lambda path: False,
+    )
+
+
+def test_a_file_parm_that_reads_a_steps_output_is_refused() -> None:
+    """A file parm whose path is a step's output is refused, naming the step that writes it."""
+    reads: List[SceneRead] = [_scene_read("middle", "file", _STEP_FILE)]
+    refusal: Refusal = _in_process(validate(_with_reads(_between_steps(), reads)))
+    assert f"'{_STEP_FILE}', which the step 'subdivide' writes" in refusal.detail
+
+
+def test_a_write_parm_that_a_step_reads_is_refused() -> None:
+    """A write parm whose file a step reads is refused, because the file never reaches the step."""
+    reads: List[SceneRead] = [
+        _scene_read("middle", "outputpath", _MIDDLE_FILE, is_output=True),
+        _scene_read("distort", "file", _MIDDLE_FILE),
+    ]
+    refusal: Refusal = _in_process(validate(_with_reads(_between_steps(), reads)))
+    assert "the step 'distort' reads through its 'file' parm" in refusal.detail
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        _scene_read("distort", "file", _MIDDLE_FILE),
+        _scene_read(
+            "distort",
+            "file",
+            "",
+            raw="$HIP/mid/`@name`.txt",
+            static_prefix=os.path.join(WORKING_DIR, "mid") + os.sep,
+        ),
+    ],
+)
+def test_a_declared_output_that_a_step_reads_is_refused(read: SceneRead) -> None:
+    """An item output a step reads, by its path or by its static prefix, is refused."""
+    # The middle node's one item declares the file the parametrized step read opens.
+    declared: Tuple[DeclaredFile, ...] = (DeclaredFile("__PDG_DIR__/mid/x.txt", ""),)
+    nodes: List[NodeInfo] = _between_steps(
+        items=(_item("middle_0", 0, command="", declared_outputs=declared),)
+    )
+    refusal: Refusal = _in_process(validate(_with_reads(nodes, [read])))
+    assert "the step 'distort' reads" in refusal.detail
+
+
+def test_a_node_whose_walked_files_are_not_a_steps_is_allowed() -> None:
+    """Reading a file no step writes, or writing a file next to a step's read, is allowed."""
+    # Each is the near miss of a refused case: a read no step writes, and a write
+    # next to a step's read but not the same file.
+    reads: List[SceneRead] = [
+        _scene_read("middle", "file", "/library/tex/wood.jpg"),
+        _scene_read("middle", "outputpath", _MIDDLE_FILE, is_output=True),
+        _scene_read("distort", "file", os.path.join(WORKING_DIR, "mid", "y.txt")),
+    ]
+    verdict: Verdict = validate(_with_reads(_between_steps(), reads))
+    assert not _subjects(verdict, RefusalScenario.IN_PROCESS_NODE)
+    assert not _advised(verdict, RefusalScenario.IN_PROCESS_NODE)
 
 
 # -- the path helpers ----------------------------------------------------------

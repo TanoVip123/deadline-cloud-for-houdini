@@ -1747,3 +1747,26 @@ def test_a_node_inside_a_locked_asset_is_marked() -> None:
         False,
         False,
     ]
+
+
+def test_filepath_is_a_write_on_a_text_output_node_and_a_read_elsewhere() -> None:
+    """The scene walk flags ``filepath`` as a write on Text Output and as a read on Geometry Import."""
+    # Geometry Import reads an upstream file with the same parm name, so the name
+    # alone must not make it a write.
+    writer: _Hom = _Hom(
+        "/obj/topnet1/textoutput1",
+        category="Top",
+        type_name="textoutput",
+        parms=[_file("filepath", "/proj/mid/log.txt")],
+    )
+    reader: _Hom = _Hom(
+        "/obj/topnet1/geometryimport1",
+        category="Top",
+        type_name="geometryimport",
+        parms=[_file("filepath", "/proj/geo/a.bgeo.sc")],
+    )
+    result: SceneReads = collect_scene_reads({"textoutput1": writer, "geometryimport1": reader})
+    assert [(r.step, r.is_output) for r in result.reads] == [
+        ("geometryimport1", False),
+        ("textoutput1", True),
+    ]
