@@ -484,7 +484,13 @@ def test_work_item_expressions_and_relative_paths_are_not_globbed(
     sop: FakeNode = network.topnet.add(FakeNode("/obj/geo1/file1", category="Sop"))
     # The scan keeps a reference only when it evaluates to a file, so each one does.
     for index, value in enumerate(
-        ("`@pdg_input`", "$HIP/render/v`@wedgeindex`/f.$F4.jpg", "frame.$F4.exr")
+        (
+            "`@pdg_input`",
+            "$HIP/render/v`@wedgeindex`/f.$F4.jpg",
+            "frame.$F4.exr",
+            "$HIP/@pdg_name.exr",
+            "`chs('../file')`",
+        )
     ):
         parm: Any = sop.set_parm(f"f{index}", value, kind="FileReference")
         parm.evalAsString = lambda: os.path.join(folder, "frame.0001.exr")

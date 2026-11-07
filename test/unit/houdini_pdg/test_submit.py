@@ -181,4 +181,5 @@ def test_a_wrong_working_directory_is_named_before_any_confirmation(scene: FakeH
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     ((text, buttons),) = scene.messages.calls
     assert "'working_dir'" in text and buttons == ()
+    assert scene.messages.options[0]["severity"] == "Error"
     assert _cooks(network) == []
