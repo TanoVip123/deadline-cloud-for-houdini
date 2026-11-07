@@ -1334,7 +1334,8 @@ def test_the_hosts_version_and_queue_values_reach_the_job() -> None:
     values: List[Dict[str, Any]] = sub.get_parameter_values(settings_, [])
     assert {"name": "CondaChannels", "value": "my-channel"} in values
     template: Dict[str, Any] = sub.get_job_template(settings_)
-    assert '"21.0.631"' in json.dumps(template)
+    (init_file,) = template["jobEnvironments"][0]["script"]["embeddedFiles"]
+    assert yaml.safe_load(init_file["data"])["version"] == "21.0.631"
 
 
 # ---------------------------------------------------------------- queue lookup
