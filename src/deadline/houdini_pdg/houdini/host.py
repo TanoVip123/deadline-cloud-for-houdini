@@ -2,9 +2,9 @@
 
 """``PdgHost`` over live PDG and Houdini.
 
-Only this module and the registration module import ``hou`` or ``pdg``. PDG calls
-the scheduler on its own threads, and ``hou`` is not safe there while Houdini's
-UI runs, so every scene read runs on the main thread.
+Only this module, the Submit module, and the registration module import ``hou``
+or ``pdg``. PDG calls the scheduler on its own threads, and ``hou`` is not safe
+there while Houdini's UI runs, so every scene read runs on the main thread.
 """
 
 from __future__ import annotations
