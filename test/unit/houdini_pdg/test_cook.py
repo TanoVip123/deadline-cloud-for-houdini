@@ -28,6 +28,7 @@ from typing import (
     Set,
     Tuple,
     Type,
+    TypeVar,
 )
 
 import pytest
@@ -82,6 +83,8 @@ from deadline.houdini_pdg.scene_reads import ReadReport, SceneRead, SceneReads
 from deadline.houdini_pdg.validation import RefusalScenario
 
 _T0: datetime = datetime(2026, 1, 1, tzinfo=timezone.utc)
+#: What a fake main-thread read returns.
+_T = TypeVar("_T")
 WORKING_DIR: str = "/proj/cook"
 JOB_ID: str = "job-" + "a" * 32
 PACKAGE_LOGGER: str = "deadline.houdini_pdg"
@@ -305,6 +308,15 @@ class FakeHost:
     def failure_reason(self, item_id: int) -> Tuple[str, str]:
         self.events("failure_reason", item_id)
         return self.reasons.get(item_id, ("", ""))
+
+    def houdini_version(self) -> str:
+        return "21.0"
+
+    def queue_parameter_values(self) -> List[Dict[str, Any]]:
+        return []
+
+    def on_main_thread(self, read: Callable[[], _T]) -> _T:
+        return read()
 
 
 class FakeSubmitter:

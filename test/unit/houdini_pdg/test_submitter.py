@@ -11,7 +11,19 @@ import re
 import sys
 from configparser import ConfigParser
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
+from typing import (
+    AbstractSet,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Type,
+    TypeVar,
+)
 
 import jsonschema
 import pytest
@@ -37,8 +49,15 @@ from deadline.houdini_pdg.errors import (
     PDGSchedulerError,
     QuotaExceededError,
 )
-from deadline.houdini_pdg.graph import DeclaredFile, GraphSnapshot, StepSpec, WorkItemSpec
-from deadline.houdini_pdg.ports import SceneFiles
+from deadline.houdini_pdg.graph import (
+    DeclaredFile,
+    GraphSnapshot,
+    NodeInfo,
+    StepSpec,
+    WorkItemSpec,
+)
+from deadline.houdini_pdg.ports import ItemOutcome, SceneFiles, WorkItemHandle
+from deadline.houdini_pdg.scene_reads import SceneReads
 from deadline.houdini_pdg.submitter import PdgSubmitter, PdgSubmitterSettings
 
 WORKING_DIR: str = "/proj/pdgtemp"
@@ -100,7 +119,76 @@ class FakeNode:
     def _check(self) -> None:
         # A read outside the allowed window would run off Houdini's main thread.
         if self._allowed is not None and not self._allowed[0]:
-            raise AssertionError("The node was read outside read_node.")
+            raise AssertionError("The node was read outside the host's on_main_thread.")
+
+
+#: What a fake main-thread read returns.
+_T = TypeVar("_T")
+
+
+class FakeHost:
+    """The scene side of the submitter: its files, Houdini's version, and the node's queue values.
+
+    ``allowed`` opens while ``on_main_thread`` runs a read, so a node built with the
+    same list fails any read made outside it. The cook's own methods are never used.
+    """
+
+    def __init__(
+        self,
+        *,
+        scene: Optional[SceneFiles] = None,
+        queue_values: Optional[List[Dict[str, Any]]] = None,
+        allowed: Optional[List[bool]] = None,
+    ) -> None:
+        self.scene: SceneFiles = scene or SceneFiles(hip_file="/proj/scene.hip")
+        self.queue_values: List[Dict[str, Any]] = queue_values or []
+        self.allowed: List[bool] = allowed if allowed is not None else [False]
+        self.main_thread_reads: int = 0
+
+    def scene_files(self) -> SceneFiles:
+        return self.scene
+
+    def houdini_version(self) -> str:
+        return "21.0.631"
+
+    def queue_parameter_values(self) -> List[Dict[str, Any]]:
+        return self.queue_values
+
+    def on_main_thread(self, read: Callable[[], _T]) -> _T:
+        # Count the read, and open the window a guarded node checks.
+        self.main_thread_reads += 1
+        self.allowed[0] = True
+        try:
+            return read()
+        finally:
+            self.allowed[0] = False
+
+    def read_graph(self) -> Sequence[NodeInfo]:
+        raise AssertionError("The submitter does not read the graph.")
+
+    def read_scene(self) -> SceneReads:
+        raise AssertionError("The submitter does not read the scene's file parms.")
+
+    def serialize(self, item: WorkItemHandle) -> str:
+        raise AssertionError("The submitter does not serialize work items.")
+
+    def notify(self, item: WorkItemHandle, outcome: ItemOutcome) -> None:
+        raise AssertionError("The submitter does not report work items.")
+
+    def set_working_dir(self, path: str) -> None:
+        raise AssertionError("The submitter does not set the working directory.")
+
+    def watch_generation(self, cook_set: Optional[AbstractSet[str]]) -> None:
+        raise AssertionError("The submitter does not watch generation.")
+
+    def pending_generation(self) -> Sequence[str]:
+        raise AssertionError("The submitter does not watch generation.")
+
+    def stop_watching_generation(self) -> None:
+        raise AssertionError("The submitter does not watch generation.")
+
+    def failure_reason(self, item_id: int) -> Tuple[str, str]:
+        raise AssertionError("The submitter does not read work item logs.")
 
 
 class FakeCreateJob:
@@ -195,20 +283,17 @@ def make_submitter(
     # holds native paths, as the submitter normalizes what it looks up.
     lines: List[str] = log if log is not None else []
     existing: Set[str] = {os.path.normpath(path) for path in files or set()}
-    values: List[Dict[str, Any]] = queue_values or []
     return PdgSubmitter(
         node=node or FakeNode(),
+        host=FakeHost(scene=scene, queue_values=queue_values),
         working_dir=WORKING_DIR,
         snapshot=snapshot,
         create_job=create_job or FakeCreateJob(),
         log=lines.append,
-        scene_files=lambda: scene or SceneFiles(hip_file="/proj/scene.hip"),
         file_exists=lambda path: path in existing,
         job_attachments=job_attachments or (lambda farm, queue: ("bucket-a", "DeadlineCloud")),
         cook_id=COOK_ID,
         get_setting=get_setting or workstation(),
-        houdini_version=lambda: "21.0.631",
-        queue_parameter_values=lambda node: values,
     )
 
 
@@ -836,14 +921,12 @@ def test_the_workstation_farm_and_queue_are_read_and_its_config_is_never_written
     log: List[str] = []
     PdgSubmitter(
         node=FakeNode(),
+        host=FakeHost(),
         working_dir=WORKING_DIR,
         create_job=create,
         log=log.append,
-        scene_files=lambda: SceneFiles(hip_file="/proj/scene.hip"),
         file_exists=lambda path: False,
         job_attachments=location,
-        houdini_version=lambda: "21.0.631",
-        queue_parameter_values=lambda node: [],
     ).submit(GraphSnapshot(steps=(step("a", 1),)), str(tmp_path / "bundle"))
 
     assert asked == [(FARM, QUEUE)]
@@ -1215,40 +1298,43 @@ def test_the_template_needs_a_snapshot() -> None:
         sub.get_job_template(sub.get_settings())
 
 
-def test_every_node_read_goes_through_the_injected_reader() -> None:
-    """Houdini crashes when a PDG thread reads the scene, so every node read must use read_node."""
-    # The node, the version, and the queue values all fail outside read_node.
-    allowed: List[bool] = [False]
-
-    def read_node(read: Callable[[], Any]) -> Any:
-        allowed[0] = True
-        try:
-            return read()
-        finally:
-            allowed[0] = False
-
-    def guarded(value: Any) -> Callable[..., Any]:
-        def read(*args: Any) -> Any:
-            assert allowed[0], "read outside read_node"
-            return value
-
-        return read
-
-    # Use every read path: settings, template, and parameter values.
+def test_every_node_read_goes_through_the_hosts_main_thread_reader() -> None:
+    """Houdini crashes when a PDG thread reads the scene, so every node read must use the host's on_main_thread."""
+    # The node fails any read made outside the host's reader. Use every read path:
+    # settings, template, and parameter values.
+    host: FakeHost = FakeHost()
     sub: PdgSubmitter = PdgSubmitter(
-        node=FakeNode({"priority": 10}, allowed=allowed),
+        node=FakeNode({"priority": 10}, allowed=host.allowed),
+        host=host,
         working_dir=WORKING_DIR,
         snapshot=GraphSnapshot(steps=(step("a", 1),)),
         job_attachments=lambda farm, queue: ("b", "p"),
-        read_node=read_node,
         get_setting=workstation(),
-        houdini_version=guarded("21.0.631"),
-        queue_parameter_values=guarded([]),
     )
     settings_: PdgSubmitterSettings = sub.get_settings()
     sub.get_job_template(settings_)
     sub.get_parameter_values(settings_, [])
     assert settings_.priority == 10
+    assert host.main_thread_reads >= 2
+
+
+def test_the_hosts_version_and_queue_values_reach_the_job() -> None:
+    """The submitter takes Houdini's version and the node's queue values from the host, not from Houdini directly."""
+    # A host with a distinct version and queue value, so a default could not pass.
+    host: FakeHost = FakeHost(queue_values=[{"name": "CondaChannels", "value": "my-channel"}])
+    sub: PdgSubmitter = PdgSubmitter(
+        node=FakeNode(),
+        host=host,
+        working_dir=WORKING_DIR,
+        snapshot=GraphSnapshot(steps=(step("a", 1),)),
+        job_attachments=lambda farm, queue: ("b", "p"),
+        get_setting=workstation(),
+    )
+    settings_: PdgSubmitterSettings = sub.get_settings()
+    values: List[Dict[str, Any]] = sub.get_parameter_values(settings_, [])
+    assert {"name": "CondaChannels", "value": "my-channel"} in values
+    template: Dict[str, Any] = sub.get_job_template(settings_)
+    assert '"21.0.631"' in json.dumps(template)
 
 
 # ---------------------------------------------------------------- queue lookup

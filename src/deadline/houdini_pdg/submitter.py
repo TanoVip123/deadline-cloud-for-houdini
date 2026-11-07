@@ -42,7 +42,7 @@ from .errors import (
     QuotaExceededError,
 )
 from .graph import PDG_DIR_TOKEN, PDG_TOKEN_PREFIX, GraphSnapshot, StepSpec
-from .ports import SceneFiles
+from .ports import PdgHost, SceneFiles
 
 _SESSION_ENVIRONMENT: str = "PdgSession"
 _OVERRIDE_ENVIRONMENT: str = "OverrideAdaptor"
@@ -74,24 +74,6 @@ _PDG_PARAMETER_NAMES: Set[str] = {definition["name"] for definition in _PDG_PARA
 _RESERVED_PARAMETER_NAMES: Set[str] = _PDG_PARAMETER_NAMES | _ADAPTOR_OVERRIDE_PARAM_NAMES
 
 
-def _houdini_version() -> str:
-    """The running Houdini's version, computed as the ROP computes it."""
-    from deadline.houdini_submitter.python.deadline_cloud_for_houdini.submitter import (
-        _get_houdini_version,
-    )
-
-    return _get_houdini_version()
-
-
-def _node_queue_parameter_values(node: Any) -> List[Dict[str, Any]]:
-    """The node's queue parameter values, read as the ROP reads them. Needs a Houdini session."""
-    from deadline.houdini_submitter.python.deadline_cloud_for_houdini.queue_parameters import (
-        get_queue_parameter_values_as_openjd,
-    )
-
-    return get_queue_parameter_values_as_openjd(node)
-
-
 @dataclass
 class PdgSubmitterSettings(BaseSubmitterSettings):
     """The job's settings. The shared fields use the ROP's parm names."""
@@ -119,47 +101,37 @@ class PdgSubmitter(BaseSubmitter):
         self,
         *,
         node: Any,
+        host: PdgHost,
         working_dir: str,
         snapshot: Optional[GraphSnapshot] = None,
         create_job: Callable[..., Optional[str]] = create_job_from_job_bundle,
         log: Callable[[str], None] = print,
-        scene_files: Optional[Callable[[], SceneFiles]] = None,
         file_exists: Callable[[str], bool] = os.path.isfile,
         job_attachments: Optional[Callable[[str, str], Tuple[str, str]]] = None,
         cook_id: str = "",
-        read_node: Callable[[Callable[[], Any]], Any] = lambda read: read(),
         get_setting: Callable[[str], str] = _workstation_setting,
-        houdini_version: Callable[[], str] = _houdini_version,
-        queue_parameter_values: Callable[[Any], List[Dict[str, Any]]] = (
-            _node_queue_parameter_values
-        ),
     ) -> None:
-        # Every read of ``node`` goes through ``read_node``, so a host whose scene
-        # must be read on one thread can route them there.
-        self._read_node: Callable[[Callable[[], Any]], Any] = read_node
+        # The host owns the scene: every read of ``node`` goes through its
+        # ``on_main_thread``, and it supplies the scene files and Houdini's version.
+        self._host: PdgHost = host
         self._node: Any = node
         self._working_dir: str = working_dir
         self._snapshot: Optional[GraphSnapshot] = snapshot
         self._create_job: Callable[..., Optional[str]] = create_job
         self._log: Callable[[str], None] = log
-        self._scene_files: Callable[[], SceneFiles] = scene_files or (
-            lambda: SceneFiles(hip_file="")
-        )
         self._file_exists: Callable[[str], bool] = file_exists
         self._job_attachments: Callable[[str, str], Tuple[str, str]] = (
             job_attachments or _queue_job_attachments
         )
         self._cook_id: str = cook_id or uuid.uuid4().hex
         self._get_setting: Callable[[str], str] = get_setting
-        self._houdini_version: Callable[[], str] = houdini_version
-        self._queue_parameter_values: Callable[[Any], List[Dict[str, Any]]] = queue_parameter_values
         self._location: Optional[Tuple[str, str]] = None
 
     def get_settings(self) -> PdgSubmitterSettings:
         """The job settings, read from the scheduler node with the ROP's shared reader."""
         # Read the shared parms, then refuse any numeric one a job can't carry.
         settings: PdgSubmitterSettings = PdgSubmitterSettings()
-        self._read_node(lambda: read_common_job_settings(self._node, settings))
+        self._host.on_main_thread(lambda: read_common_job_settings(self._node, settings))
         settings.priority = _whole_number(settings.priority, "priority", 0, 100)
         settings.max_failed_tasks_count = _whole_number(
             settings.max_failed_tasks_count, "failed_tasks_limit", 0, _INT32_MAX
@@ -171,7 +143,7 @@ class PdgSubmitter(BaseSubmitter):
         # its payload is stored would run without it.
         settings.initial_status = "SUSPENDED"
         # The scene's files and folders go with every task. An unnamed job takes the scene's name.
-        scene: SceneFiles = self._scene_files()
+        scene: SceneFiles = self._host.scene_files()
         settings.hip_file = scene.hip_file
         settings.scene_assets = list(scene.assets)
         settings.input_directories.extend(scene.directories)
@@ -190,8 +162,8 @@ class PdgSubmitter(BaseSubmitter):
         # The scheduler offers no host requirements, so the argument is ignored.
         template: Dict[str, Any] = _job_template(
             self._require_snapshot(),
-            houdini_version=self._read_node(self._houdini_version),
-            queue_parameter_definitions=self._read_node(
+            houdini_version=self._host.houdini_version(),
+            queue_parameter_definitions=self._host.on_main_thread(
                 lambda: read_queue_parameter_definitions(self._node)
             ),
         )
@@ -221,9 +193,7 @@ class PdgSubmitter(BaseSubmitter):
             values.append({"name": "deadline:maxWorkerCount", "value": settings.max_worker_count})
         # The values of the PDG parameters, then the node's queue parameters. The template
         # drops a node parameter with a reserved name, so its value is dropped too.
-        node_values: List[Dict[str, Any]] = self._read_node(
-            lambda: self._queue_parameter_values(self._node)
-        )
+        node_values: List[Dict[str, Any]] = self._host.queue_parameter_values()
         values += [
             {"name": "CookName", "value": settings.job_name},
             {"name": "PdgCookId", "value": self._cook_id},
