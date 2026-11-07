@@ -19,7 +19,7 @@ from .houdini_fakes import (
     install_hou,
 )
 
-from deadline.houdini_pdg.houdini.submit import submit
+from deadline.houdini_pdg.houdini.host import submit
 
 _SAVE: Tuple[str, ...] = ("Save", "Always Save", "Cancel")
 _CONFIRM: Tuple[str, ...] = ("Submit", "Cancel")

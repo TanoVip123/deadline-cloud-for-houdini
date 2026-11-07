@@ -4,7 +4,7 @@
 def callback(kwargs):
     """Submit runs the scheduler's own flow. Every other button is the ROP's."""
     if kwargs["parm"].name() == "submit":
-        from deadline.houdini_pdg.houdini.submit import submit
+        from deadline.houdini_pdg.houdini.host import submit
 
         submit(kwargs["node"])
         return

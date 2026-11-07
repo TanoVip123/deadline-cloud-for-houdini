@@ -111,5 +111,5 @@ def test_every_section_the_node_lists_exists() -> None:
 def test_the_python_module_sends_submit_to_the_schedulers_own_flow() -> None:
     """Submit must not open the ROP's dialog, so the module names the scheduler's submit."""
     module: str = _read(_NODE, "PythonModule")
-    assert "deadline.houdini_pdg.houdini.submit import submit" in module
+    assert "deadline.houdini_pdg.houdini.host import submit" in module
     compile(module, "PythonModule", "exec")
