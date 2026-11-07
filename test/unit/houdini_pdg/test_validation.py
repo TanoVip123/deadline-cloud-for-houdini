@@ -564,16 +564,18 @@ def test_a_dependency_quota_refusal_says_how_many_edges_carry_data() -> None:
 def test_a_step_without_items_is_refused_when_it_was_asked_for_or_is_needed(
     nodes: List[NodeInfo],
 ) -> None:
-    """A dropped step refuses iff the cook asked for it or a survivor needs it, leaving dynamic nodes out."""
+    """A dropped step refuses iff the cook asked for it or a survivor needs it, leaving dynamic nodes and In-Process steps out."""
     snapshot: GraphSnapshot = synthesize(nodes)
     verdict: Verdict = validate(_ctx(nodes, snapshot=snapshot))
     by_name: Dict[str, NodeInfo] = {n.name: n for n in nodes}
-    dynamic: Set[str] = {n.name for n in nodes if n.is_dynamic}
+    dynamic: Set[str] = {
+        n.name for n in nodes if n.is_dynamic or (n.is_schedulable and n.cook_type == "InProcess")
+    }
 
     # A refusal is expected exactly when a dropped step that is not dynamic was
     # requested, or a surviving step depends on a dropped one that is not dynamic.
-    # A dynamic node already has its own refusal, so it never adds this one, and a
-    # dynamic survivor is never also refused here.
+    # A dynamic node or an In-Process step already has its own refusal, so it never
+    # adds this one, and such a survivor is never also refused here.
     requested: bool = any(
         name not in dynamic and by_name[name].in_cook_set is not False
         for name in snapshot.steps_without_items
@@ -592,14 +594,21 @@ def test_a_step_without_items_is_refused_when_it_was_asked_for_or_is_needed(
 def test_an_unknown_cook_set_makes_every_dropped_step_a_refusal(
     nodes: List[NodeInfo],
 ) -> None:
-    """With cook_set unknown, every dropped step is refused, the strict reading."""
+    """With cook_set unknown, every dropped step is refused, the strict reading.
+
+    An In-Process step is the exception, because its own refusal names the cause.
+    """
     # Force every node's cook-set flag to unknown, so no drop can be excused.
     unknown: List[NodeInfo] = [replace(n, in_cook_set=None) for n in nodes]
     snapshot: GraphSnapshot = synthesize(unknown)
     verdict: Verdict = validate(_ctx(unknown, snapshot=snapshot))
-    assert _subjects(verdict, RefusalScenario.STEP_WITHOUT_ITEMS) >= set(
-        snapshot.steps_without_items
+    in_process: Set[str] = {
+        n.name for n in unknown if n.is_schedulable and n.cook_type == "InProcess"
+    }
+    assert _subjects(verdict, RefusalScenario.STEP_WITHOUT_ITEMS) >= (
+        set(snapshot.steps_without_items) - in_process
     )
+    assert in_process <= _subjects(verdict, RefusalScenario.IN_PROCESS_STEP)
 
 
 def test_a_step_left_out_of_the_cook_only_gets_an_advisory() -> None:
@@ -646,6 +655,68 @@ def test_a_step_with_a_dynamic_and_a_plain_dropped_producer_names_only_the_plain
     assert refusal.subject == "c"
     assert "plain" in refusal.detail
     assert "dyn" not in refusal.detail
+
+
+# -- a step that cooks in process ----------------------------------------------
+
+
+def _in_process_step(**kwargs: Any) -> List[NodeInfo]:
+    """A ROP Fetch set to In-Process between two steps, with no items, as the readers report it."""
+    # PDG cooks such a step's items on this machine, so the readers see none.
+    return [
+        _node("geo"),
+        _node("rop_fetch", ["geo"], count=0, cook_type="InProcess", **kwargs),
+        _node("render", ["rop_fetch"]),
+    ]
+
+
+def test_a_step_set_to_in_process_is_refused_with_the_cook_type_remedy() -> None:
+    """A step whose cook type is In-Process is refused by name, with the parm to change.
+
+    PDG never offers its items to the scheduler, so its tasks would never be
+    released, and the job would fail only after it was submitted.
+    """
+    verdict: Verdict = validate(_ctx(_in_process_step()))
+    (refusal,) = [r for r in verdict.refusals if r.scenario is RefusalScenario.IN_PROCESS_STEP]
+    assert refusal.subject == "rop_fetch"
+    assert "pdg_cooktype" in refusal.remedy
+    assert "Out-of-Process" in refusal.remedy
+
+
+def test_an_in_process_step_is_not_also_refused_for_having_no_items() -> None:
+    """One cause gets one message: the step and the step below it get no items refusal."""
+    # The empty step would otherwise read as the graph being read too early, and
+    # the step below it as missing a producer.
+    verdict: Verdict = validate(_ctx(_in_process_step()))
+    assert not _subjects(verdict, RefusalScenario.STEP_WITHOUT_ITEMS)
+    assert not _advised(verdict, RefusalScenario.STEP_WITHOUT_ITEMS)
+
+
+def test_an_in_process_step_with_items_is_still_refused() -> None:
+    """The cook type decides, not the item count, so a generated in-process step is refused too."""
+    nodes: List[NodeInfo] = [_node("geo"), _node("rop_fetch", ["geo"], cook_type="InProcess")]
+    assert _subjects(validate(_ctx(nodes)), RefusalScenario.IN_PROCESS_STEP) == {"rop_fetch"}
+
+
+@pytest.mark.parametrize("cook_type", ["OutOfProcess", "Generate", None])
+def test_a_step_with_another_cook_type_is_not_refused_as_in_process(
+    cook_type: Optional[str],
+) -> None:
+    """Only In-Process is refused. An unknown cook type is not evidence of one."""
+    nodes: List[NodeInfo] = [_node("geo"), _node("rop_fetch", ["geo"], cook_type=cook_type)]
+    assert not _subjects(validate(_ctx(nodes)), RefusalScenario.IN_PROCESS_STEP)
+
+
+def test_an_in_process_node_that_is_not_a_step_is_not_refused_as_an_in_process_step() -> None:
+    """A node with no job script is judged by the non-step check, so it gets that message only."""
+    nodes: List[NodeInfo] = [
+        _node("geo"),
+        _node("python1", ["geo"], schedulable=False, cook_type="InProcess"),
+        _node("render", ["python1"]),
+    ]
+    verdict: Verdict = validate(_ctx(nodes))
+    assert not _subjects(verdict, RefusalScenario.IN_PROCESS_STEP)
+    assert _subjects(verdict, RefusalScenario.IN_PROCESS_NODE) == {"python1"}
 
 
 # -- the scenario keys ---------------------------------------------------------

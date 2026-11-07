@@ -38,6 +38,9 @@ class RefusalScenario(Enum):
     #: An in-process node that writes files a step reads, or reads files a step
     #: writes. Neither reaches the other side without a shared filesystem.
     IN_PROCESS_NODE = "in_process_node"
+    #: A step set to cook In-Process. PDG cooks its items on this machine and
+    #: never offers them to the scheduler, so its tasks would never run.
+    IN_PROCESS_STEP = "in_process_step"
     RUNTIME_FILE_UNPRODUCED = "runtime_file_unproduced"
     ROP_BATCH = "rop_batch"
     MULTIPLE_SCHEDULERS = "multiple_schedulers"
@@ -516,8 +519,14 @@ def _check_steps_without_items(ctx: ValidationContext) -> Verdict:
     set is incomplete.
     """
     by_name: Dict[str, NodeInfo] = {node.name: node for node in ctx.nodes}
-    dynamic: Set[str] = {node.name for node in ctx.nodes if node.is_dynamic}
-    dropped: List[str] = [name for name in ctx.snapshot.steps_without_items if name not in dynamic]
+    # A dynamic node and an In-Process step have no items for a reason another
+    # check names, so they are left out here and get one message each.
+    explained: Set[str] = {
+        node.name for node in ctx.nodes if node.is_dynamic or _is_in_process_step(node)
+    }
+    dropped: List[str] = [
+        name for name in ctx.snapshot.steps_without_items if name not in explained
+    ]
 
     def requested(name: str) -> bool:
         # A dropped node is a race only when the cook asked for it. Unknown means
@@ -550,9 +559,9 @@ def _check_steps_without_items(ctx: ValidationContext) -> Verdict:
         missing: Tuple[str, ...] = tuple(
             name
             for name in ctx.snapshot.dependencies_on_dropped.get(step.name, ())
-            if name not in dynamic
+            if name not in explained
         )
-        if not missing or step.name in dynamic:
+        if not missing or step.name in explained:
             continue
         refusals.append(
             Refusal(
@@ -588,6 +597,35 @@ def _check_steps_without_items(ctx: ValidationContext) -> Verdict:
 
 
 # -- the node's kind ----------------------------------------------------------
+
+
+def _is_in_process_step(node: NodeInfo) -> bool:
+    """Whether a node runs a job script but is set to cook In-Process."""
+    return bool(node.is_schedulable) and node.cook_type == _IN_PROCESS
+
+
+def _check_in_process_steps(ctx: ValidationContext) -> Verdict:
+    """Refuse a step whose cook type is In-Process.
+
+    PDG cooks its items in this Houdini session and never offers them to the
+    scheduler, so its tasks would never be released and the job would fail late.
+    """
+    return Verdict(
+        refusals=tuple(
+            Refusal(
+                scenario=RefusalScenario.IN_PROCESS_STEP,
+                subject=node.name,
+                detail=(
+                    "This node runs a command, but its cook type is In-Process, so PDG cooks "
+                    "its work items in this Houdini session and never sends them to the farm. "
+                    "Its tasks in the job would never run."
+                ),
+                remedy="Set the node's Cook Type (pdg_cooktype) to Out-of-Process.",
+            )
+            for node in ctx.nodes
+            if _is_in_process_step(node)
+        )
+    )
 
 
 def _nearest_steps(start: str, edges: Mapping[str, Set[str]], targets: Set[str]) -> List[str]:
@@ -1261,6 +1299,7 @@ _CHECKS: Tuple[Tuple[RefusalScenario, Callable[[ValidationContext], Verdict]], .
     (RefusalScenario.ROP_BATCH, _check_rop_batch),
     (RefusalScenario.QUOTA_EXCEEDED, _check_quotas),
     (RefusalScenario.STEP_WITHOUT_ITEMS, _check_steps_without_items),
+    (RefusalScenario.IN_PROCESS_STEP, _check_in_process_steps),
     (RefusalScenario.IN_PROCESS_NODE, _check_non_step_file_use),
     (RefusalScenario.SERVICE_NODE, _check_service_nodes),
     (RefusalScenario.MULTIPLE_SCHEDULERS, _check_schedulers),
