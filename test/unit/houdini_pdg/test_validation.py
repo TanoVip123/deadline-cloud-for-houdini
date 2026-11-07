@@ -1423,6 +1423,47 @@ def test_cached_output_returns_an_empty_string_when_nothing_is_on_disk() -> None
     assert validation._cached_output(item, ctx) == ""
 
 
+def _with_cached_item(cache_mode: Optional[str] = None) -> List[NodeInfo]:
+    """A step with two items in the cook and a third PDG cooked from cache, and a step below it."""
+    cached: RawItem = _item(
+        "sim_2", 2, declared_outputs=(DeclaredFile("__PDG_DIR__/geo/sim.2.bgeo.sc", ""),)
+    )
+    return [
+        _node("sim", count=2, cached_items=(cached,), cache_mode=cache_mode),
+        _node("render", ["sim"]),
+    ]
+
+
+def test_a_step_with_an_item_cooked_from_cache_is_refused_naming_its_file() -> None:
+    """The cached item never reaches the farm, so the job would run on a local result.
+
+    The step is refused before anything is uploaded, with the file that made PDG
+    skip the item.
+    """
+    cached_file: str = os.path.join(WORKING_DIR, "geo", "sim.2.bgeo.sc")
+    verdict: Verdict = validate(
+        _ctx(_with_cached_item(), working_dir=WORKING_DIR, exists=lambda path: path == cached_file)
+    )
+    (refusal,) = [r for r in verdict.refusals if r.scenario is RefusalScenario.CACHED_OUTPUTS]
+    assert refusal.subject == "sim"
+    assert cached_file in refusal.detail
+
+
+def test_a_cached_item_whose_file_is_gone_still_refuses_its_step() -> None:
+    """PDG already decided not to cook the item, so its task never runs whatever the disk holds now."""
+    verdict: Verdict = validate(
+        _ctx(_with_cached_item(), working_dir=WORKING_DIR, exists=lambda path: False)
+    )
+    assert _subjects(verdict, RefusalScenario.CACHED_OUTPUTS) == {"sim"}
+
+
+def test_a_step_with_only_items_in_the_cook_is_not_refused_for_a_cached_item() -> None:
+    """Without a cached item and with nothing on disk, the step cooks every item on the farm."""
+    nodes: List[NodeInfo] = [_node("sim", count=2), _node("render", ["sim"])]
+    verdict: Verdict = validate(_ctx(nodes, working_dir=WORKING_DIR, exists=lambda path: False))
+    assert not _subjects(verdict, RefusalScenario.CACHED_OUTPUTS)
+
+
 # -- outputs that cannot be delivered ------------------------------------------
 
 

@@ -58,6 +58,8 @@ class RawItem:
     #: Whether the cook being read will schedule the item, from its PDG state.
     #: None when unknown.
     in_cook: Optional[bool] = None
+    #: Whether PDG marked the item cooked from cache, from its PDG state.
+    cached: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,6 +104,9 @@ class NodeInfo:
     #: ``(parm, code)`` for each Python code parm, such as a Python Processor's
     #: generate code. Read only for nodes that run no job script.
     python_code: Tuple[Tuple[str, str], ...] = ()
+    #: Items the cook's graph read left out because PDG cooked them from cache.
+    #: Their tasks never reach the farm, so validation refuses the step.
+    cached_items: Tuple[RawItem, ...] = ()
 
     @property
     def is_schedulable(self) -> bool:

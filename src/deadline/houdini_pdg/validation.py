@@ -18,7 +18,14 @@ from enum import Enum
 from types import ModuleType
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from .graph import PDG_DIR_TOKEN, PDG_TOKEN_PREFIX, GraphSnapshot, NodeInfo, WorkItemSpec
+from .graph import (
+    PDG_DIR_TOKEN,
+    PDG_TOKEN_PREFIX,
+    GraphSnapshot,
+    NodeInfo,
+    RawItem,
+    WorkItemSpec,
+)
 from .scene_reads import (
     AttributeVariableUse,
     ReadReport,
@@ -930,11 +937,11 @@ def _cached_output(item: WorkItemSpec, ctx: ValidationContext) -> str:
 
 
 def _check_cached_outputs(ctx: ValidationContext) -> Verdict:
-    """Refuse a step with an item whose declared outputs already exist on this machine.
+    """Refuse a step with an item whose declared outputs already exist here, or that PDG cooked from cache.
 
-    PDG's default cache mode marks such an item cooked from cache and never
-    schedules it, so its task never runs and the job waits forever. A node set to
-    Write Files, or a path that still holds a token or a variable, is skipped.
+    PDG marks such an item cooked from cache and never schedules it, so its task
+    never runs on the farm. A node set to Write Files, or a path that still holds a
+    token or a variable, is skipped for the files on disk.
     """
     refusals: List[Refusal] = []
     # Write Files ignores existing results, so a node set to it is never cached.
@@ -949,25 +956,61 @@ def _check_cached_outputs(ctx: ValidationContext) -> Verdict:
         ]
         if not present_files:
             continue
-        cached: int = len(present_files)
-        example: str = present_files[0]
         refusals.append(
-            Refusal(
-                scenario=RefusalScenario.CACHED_OUTPUTS,
-                subject=step.name,
-                detail=(
-                    f"{cached} of this step's {step.task_count} work item(s) declare outputs "
-                    f"that already exist, for example '{example}'. PDG would mark them cooked "
-                    "from cache and never schedule them, so their tasks would never run and "
-                    "the job would wait for them forever."
-                ),
-                remedy=(
-                    "Set the node's Cache Mode (pdg_cachemode) to Write Files, or delete its "
-                    "results before cooking (Delete Selected Node Results From Disk)."
-                ),
+            _cached_refusal(
+                step.name,
+                f"{len(present_files)} of this step's {step.task_count} work item(s) declare "
+                f"outputs that already exist, for example '{present_files[0]}'. PDG would mark "
+                "them cooked from cache and never schedule them, so their tasks would never "
+                "run and the job would wait for them forever.",
+            )
+        )
+    # PDG already took these items from an earlier cook's files, so the job would
+    # leave them out and the steps below would read local results.
+    refused: Set[str] = {refusal.subject for refusal in refusals}
+    for node in ctx.nodes:
+        if not node.cached_items or not node.is_schedulable or node.name in refused:
+            continue
+        example: str = _cached_example(node.cached_items, ctx)
+        refusals.append(
+            _cached_refusal(
+                node.name,
+                f"PDG cooked {len(node.cached_items)} of this step's work item(s) from files "
+                f"already on this machine, for example '{example}', so the job would not run "
+                "them and the steps below would use the local results.",
             )
         )
     return Verdict(refusals=tuple(refusals))
+
+
+def _cached_refusal(step: str, detail: str) -> Refusal:
+    """A CACHED_OUTPUTS refusal for ``step``, with the shared remedy."""
+    return Refusal(
+        scenario=RefusalScenario.CACHED_OUTPUTS,
+        subject=step,
+        detail=detail,
+        remedy=(
+            "Set the node's Cache Mode (pdg_cachemode) to Write Files, or delete its "
+            "results before cooking (Delete Selected Node Results From Disk)."
+        ),
+    )
+
+
+def _cached_example(items: Sequence[RawItem], ctx: ValidationContext) -> str:
+    """A cached item's output that exists here, else its first declared output, else its name."""
+    # A file on disk says why PDG skipped the item, so it is preferred.
+    resolved: List[str] = [
+        _resolve(declared.path, ctx.working_dir, ctx.env)
+        for item in items
+        for declared in item.declared_outputs
+    ]
+    for path in resolved:
+        try:
+            if ctx.exists(path):
+                return path
+        except Exception:
+            _logger.debug("Could not test whether '%s' exists.", path, exc_info=True)
+    return resolved[0] if resolved else items[0].name
 
 
 # -- the scene's file references ----------------------------------------------

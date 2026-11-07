@@ -32,6 +32,9 @@ _OUTSIDE_COOK_STATES: FrozenSet[str] = frozenset(
     {"Uncooked", "Dirty", "CookedSuccess", "CookedFail", "CookedCancel", "CookedCache"}
 )
 
+# The ``pdg.workItemState`` name of an item PDG took from an earlier cook's files.
+_CACHED_STATE: str = "CookedCache"
+
 # The authored text of a parm that only copies another parm's value.
 _CHANNEL_REFERENCES: Tuple[str, ...] = ("chs(", "chsraw(", "ch(")
 
@@ -67,9 +70,12 @@ def node_infos(
     # is outside the cook.
     items, item_upstream, attributes = _generated(dependency_graph)
     outside: Set[str] = set()
+    cached: Dict[str, Tuple[RawItem, ...]] = {}
     if only_items_in_cook:
         for name in list(items):
+            # A dropped item PDG cooked from cache is kept aside, so validation can refuse it.
             kept: List[RawItem] = [item for item in items[name] if item.in_cook is not False]
+            cached[name] = tuple(item for item in items[name] if item.cached)
             if not kept:
                 outside.add(name)
             items[name] = kept
@@ -116,6 +122,7 @@ def node_infos(
                 expressions=() if job_script else _expressions(hom),
                 file_parms=() if job_script else _file_parm_texts(hom),
                 python_code=() if job_script else _python_code(hom),
+                cached_items=cached.get(name, ()),
             )
         )
 
@@ -345,6 +352,7 @@ def _raw_item(work_item: Any, depends_on: Any) -> Optional[RawItem]:
         declared_inputs=_declared(_attr(work_item, "inputFiles", ())),
         depends_on=tuple(n for n in (_str_attr(d, "name") for d in _iterate(depends_on)) if n),
         in_cook=_in_cook(_attr(work_item, "state", None)),
+        cached=_enum_name(_attr(work_item, "state", None)) == _CACHED_STATE,
     )
 
 
