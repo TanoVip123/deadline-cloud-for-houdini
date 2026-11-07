@@ -473,6 +473,8 @@ def test_work_item_expressions_and_relative_paths_are_not_globbed(
     """
     folder: str = str(tmp_path / "scene")
     _touch(folder, "frame.0001.exr")
+    # A file whose name spells an attribute, which only a work item can name.
+    _touch(folder, "@pdg_name.exr")
     # A step's earlier output, which the wedge expression would glob into.
     _touch(folder, "render", "v0", "f.0001.jpg")
     # Houdini's current directory, standing in for the artist's home directory.
