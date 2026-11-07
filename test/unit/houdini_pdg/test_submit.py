@@ -115,11 +115,70 @@ def test_a_refused_graph_is_named_and_not_cooked(scene: FakeHou) -> None:
     assert _cooks(network) == []
     ((text, buttons),) = scene.messages.calls
     assert "python1" in text and buttons == ()
+    assert scene.messages.options[0]["severity"] == "Error"
 
 
-def test_a_workstation_without_a_farm_is_told_which_setting_is_missing(scene: FakeHou) -> None:
-    """With no farm the job has nowhere to go, so the ROP's message names the setting."""
+@pytest.mark.parametrize(
+    "settings, words",
+    [({}, "farm ID"), ({"defaults.farm_id": "farm-1"}, "queue ID")],
+)
+def test_a_workstation_without_a_farm_or_queue_is_told_which_setting_is_missing(
+    scene: FakeHou, settings: Dict[str, str], words: str
+) -> None:
+    """With no farm or queue the job has nowhere to go, so the ROP's message names the setting."""
     network: Network = _network()
-    assert submit(network.scheduler_node, get_setting=lambda name: "") is False
-    assert "farm ID" in scene.messages.calls[0][0]
+    assert submit(network.scheduler_node, get_setting=lambda name: settings.get(name, "")) is False
+    assert words in scene.messages.calls[0][0]
+    assert scene.messages.options[0]["severity"] == "Error"
+    assert _cooks(network) == []
+
+
+def test_the_workstation_defaults_are_read_when_no_reader_is_given(
+    scene: FakeHou, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The node's Submit reads the same farm and queue as the ROP, from the workstation config."""
+    from configparser import ConfigParser
+
+    from deadline.client.config import config_file
+
+    # A config file with a farm and a queue, which the confirmation then shows.
+    parser: ConfigParser = ConfigParser()
+    config_file.set_setting("defaults.farm_id", "farm-cfg", config=parser)
+    config_file.set_setting("defaults.queue_id", "queue-cfg", config=parser)
+    path: Path = tmp_path / "config"
+    with open(path, "w", encoding="utf8") as f:
+        parser.write(f)
+    monkeypatch.setenv("DEADLINE_CONFIG_FILE_PATH", str(path))
+    assert submit(_network().scheduler_node) is True
+    assert "Farm: farm-cfg" in scene.messages.calls[0][0]
+
+
+def test_the_confirmation_shows_the_jobs_settings_and_any_warning(scene: FakeHou) -> None:
+    """The artist confirms what will run, and a waived refusal is shown, not hidden."""
+    network: Network = build_network(
+        COOKING_EXAMPLE,
+        scheduler_parms={"working_dir": "$HIP", "validate_graph": 0, "priority": 70},
+    )
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    text: str = scene.messages.calls[0][0]
+    # With no name parm the job takes the scene's file name.
+    assert "Job name: shot.hip" in text and "Priority: 70" in text
+    assert "Farm: farm-1" in text and "Queue: queue-1" in text
+    assert "python1" in scene.messages.options[0]["details"]
+
+
+def test_closing_the_confirmation_cooks_nothing(scene: FakeHou) -> None:
+    """Closing the window is a cancel, so a stray click never submits a job."""
+    scene.messages.answers = [None]
+    network: Network = _network()
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert _cooks(network) == []
+
+
+def test_a_wrong_working_directory_is_named_before_any_confirmation(scene: FakeHou) -> None:
+    """The cook would fail on it at once, so Submit says which parm to fix and cooks nothing."""
+    network: Network = build_network(PYRO_BONFIRE, scheduler_parms={"working_dir": ""})
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    ((text, buttons),) = scene.messages.calls
+    assert "'working_dir'" in text and buttons == ()
     assert _cooks(network) == []

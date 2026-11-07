@@ -101,8 +101,9 @@ class _Named:
 class _Template:
     """A ``hou.ParmTemplate``: String with a string type, or another type."""
 
-    def __init__(self, kind: str) -> None:
+    def __init__(self, kind: str, tags: Optional[Dict[str, str]] = None) -> None:
         self._kind: str = kind
+        self._tags: Dict[str, str] = dict(tags or {})
 
     def type(self) -> _Named:
         return _Named("String" if self._kind else "Int")
@@ -111,17 +112,25 @@ class _Template:
         return _Named(self._kind)
 
     def tags(self) -> Dict[str, str]:
-        return {}
+        return dict(self._tags)
 
 
 class FakeParm:
     """A ``hou.Parm``. ``kind`` is its string type, such as ``FileReference``, or ``""`` for a number."""
 
-    def __init__(self, node: "FakeNode", name: str, value: Any, kind: str = "") -> None:
+    def __init__(
+        self,
+        node: "FakeNode",
+        name: str,
+        value: Any,
+        kind: str = "",
+        tags: Optional[Dict[str, str]] = None,
+    ) -> None:
         self._node: FakeNode = node
         self._name: str = name
         self.value: Any = value
         self.kind: str = kind
+        self.tags: Dict[str, str] = dict(tags or {})
         self.sets: List[Any] = []
 
     def name(self) -> str:
@@ -134,7 +143,7 @@ class FakeParm:
         return self._node
 
     def parmTemplate(self) -> _Template:
-        return _Template(self.kind)
+        return _Template(self.kind, self.tags)
 
     def eval(self) -> Any:
         # A parm set to an exception stands for one whose expression fails.
@@ -186,6 +195,8 @@ class FakeNode:
         self.cook_calls: List[Dict[str, Any]] = []
         self.spare: List[FakeParm] = []
         self.display: Optional[FakeNode] = None
+        self.cook_creates: Any = None
+        self.pdg_name: Optional[str] = None
 
     def path(self) -> str:
         return self._path
@@ -221,9 +232,11 @@ class FakeNode:
     def parm(self, name: str) -> Optional[FakeParm]:
         return self._parms.get(name)
 
-    def set_parm(self, name: str, value: Any, kind: str = "") -> FakeParm:
+    def set_parm(
+        self, name: str, value: Any, kind: str = "", tags: Optional[Dict[str, str]] = None
+    ) -> FakeParm:
         """Add or replace a parm, and return it."""
-        parm: FakeParm = FakeParm(self, name, value, kind)
+        parm: FakeParm = FakeParm(self, name, value, kind, tags)
         self._parms[name] = parm
         return parm
 
@@ -252,13 +265,15 @@ class FakeNode:
         return self.pdg_node
 
     def getPDGNodeName(self) -> Optional[str]:
-        return None
+        return self.pdg_name
 
     def getPDGGraphContext(self) -> Any:
         return self.context
 
     def cookWorkItems(self, **kwargs: Any) -> None:
         self.cook_calls.append(kwargs)
+        if self.cook_creates is not None and kwargs.get("tops_only"):
+            self.context = self.cook_creates
 
 
 class FakeHipFile:
@@ -296,16 +311,23 @@ def expand(text: str) -> str:
 
 
 class FakeMessages:
-    """``hou.ui.displayMessage``: answers from ``answers`` in turn, then ``choice``, and records each call's buttons."""
+    """``hou.ui.displayMessage``: answers from ``answers`` in turn, then ``choice``, and records each call.
+
+    An answer of None closes the window, which returns the call's ``close_choice``.
+    """
 
     def __init__(self) -> None:
-        self.choice: int = 0
-        self.answers: List[int] = []
+        self.choice: Optional[int] = 0
+        self.answers: List[Optional[int]] = []
         self.calls: List[Tuple[str, Tuple[str, ...]]] = []
+        self.options: List[Dict[str, Any]] = []
 
     def __call__(self, text: str, **kwargs: Any) -> int:
+        # Record the text, the buttons, and every other option, then answer.
         self.calls.append((text, tuple(kwargs.get("buttons", ()))))
-        return self.answers.pop(0) if self.answers else self.choice
+        self.options.append(kwargs)
+        answer: Optional[int] = self.answers.pop(0) if self.answers else self.choice
+        return int(kwargs.get("close_choice", -1)) if answer is None else answer
 
 
 @dataclass
@@ -321,6 +343,8 @@ class FakeHou:
     version: str = "21.0.596"
     #: Raised by ``hou.fileReferences`` when set, as a scene that cannot be scanned.
     scan_error: Optional[Exception] = None
+    #: Raised by ``hou.nodeType`` when set, as a session that cannot list node types.
+    type_error: Optional[Exception] = None
 
 
 def _file_references(state: FakeHou) -> List[Tuple[Any, str]]:
@@ -338,6 +362,8 @@ def install_hou(monkeypatch: pytest.MonkeyPatch, hip_file: str) -> FakeHou:
 
     def node_type(category: str, name: str) -> Any:
         # A node type's instances, and the library that defines it, when a test set one.
+        if state.type_error is not None:
+            raise state.type_error
         path: Optional[str] = state.libraries.get(name)
         definition: Any = (
             types.SimpleNamespace(libraryFilePath=lambda: path) if path is not None else None
@@ -415,12 +441,15 @@ class FakeContext:
         )
 
     def addEventHandler(self, function: Any, event_type: Any, is_python: bool) -> Any:
+        # PDG calls only the handlers registered as Python back into Python.
         handler: Tuple[Any, Any] = (function, event_type)
-        self.handlers.append(handler)
+        if is_python:
+            self.handlers.append(handler)
         return handler
 
     def removeEventHandler(self, handler: Any) -> None:
-        self.handlers.remove(handler)
+        if handler in self.handlers:
+            self.handlers.remove(handler)
 
     def emit(self, event_type: Any, node_name: str) -> None:
         """Send ``event_type`` for the named node to every handler registered for it."""
@@ -487,6 +516,8 @@ def build_network(
     topnet.display = homs[spec[-1][0]] if spec else None
     context: FakeContext = FakeContext(nodes=pdg_nodes)
     scheduler_node.context = context
+    # PDG creates the graph context when a never-cooked network cooks its TOP nodes only.
+    scheduler_node.cook_creates = context
     return Network(topnet, scheduler_node, pdg_nodes, context)
 
 

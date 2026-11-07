@@ -23,6 +23,7 @@ from .houdini_fakes import (
     SCHEDULER_PATH,
     FakeHou,
     FakeNode,
+    FakePdgNode,
     FakePyScheduler,
     Network,
     build_network,
@@ -226,8 +227,14 @@ def test_a_log_without_an_error_line_gives_no_error_and_its_last_line(scene: Fak
 
 def test_a_failure_reason_is_empty_when_pdg_has_no_log_or_no_item(scene: FakeHou) -> None:
     """A missing item or log must not raise, because the cook is reporting a failure already."""
+
+    class Unreadable:
+        def __str__(self) -> str:
+            raise RuntimeError("deleted")
+
     assert _host_with_item_log(None).failure_reason(7) == ("", "")
     assert _host_with_item_log("x").failure_reason(8) == ("", "")
+    assert _host_with_item_log(Unreadable()).failure_reason(7) == ("", "")
     broken: Any = types.SimpleNamespace(context=None)
     assert HoudiniPdgHost(broken).failure_reason(7) == ("", "")
 
@@ -323,6 +330,46 @@ def test_read_graph_reads_the_dependency_graph_once_and_keeps_the_cook_set(scene
     assert by_name["sim"].in_cook_set is True and by_name["montage"].in_cook_set is False
 
 
+def test_read_graph_leaves_out_the_items_this_cook_will_not_schedule(scene: FakeHou) -> None:
+    """An item PDG left Uncooked is not in this cook, so the job must not get a task for it."""
+
+    class Item:
+        """A ``pdg.WorkItem`` of ``sim`` in the given state. PDG's items are hashable keys."""
+
+        def __init__(self, index: int, state: str) -> None:
+            self.name: str = f"sim_{index}"
+            self.index: int = index
+            self.id: int = 100 + index
+            self.node: Any = types.SimpleNamespace(name="sim")
+            self.command: str = "hython sim.py"
+            self.state: Any = types.SimpleNamespace(name=state)
+
+    def item(index: int, state: str) -> Any:
+        return Item(index, state)
+
+    network: Network = build_network(PYRO_BONFIRE)
+    scheduler: FakePyScheduler = network.scheduler()
+    scheduler.dependency_graph = ({item(0, "Waiting"): [], item(1, "Uncooked"): []}, {}, [])
+    infos: Sequence[NodeInfo] = HoudiniPdgHost(scheduler).read_graph()
+    sim: NodeInfo = next(info for info in infos if info.name == "sim")
+    assert [i.name for i in sim.items] == ["sim_0"]
+
+
+def test_a_pdg_node_whose_job_script_cannot_be_read_is_not_a_step(scene: FakeHou) -> None:
+    """A node being deleted raises on every read, and must not be waited for as a step."""
+
+    class Deleted(FakePdgNode):
+        @property
+        def scriptInfo(self) -> Any:
+            raise RuntimeError("deleted")
+
+    network: Network = build_network(PYRO_BONFIRE)
+    network.pdg_nodes.append(Deleted(name="gone", command="hython x.py"))
+    host: HoudiniPdgHost = HoudiniPdgHost(network.scheduler())
+    host.watch_generation(None)
+    assert "gone" not in host.pending_generation()
+
+
 def test_an_override_naming_this_scheduler_is_cleared_and_another_is_kept(scene: FakeHou) -> None:
     """An override that names this scheduler changes nothing, so only another scheduler is refused."""
     network: Network = build_network(PYRO_BONFIRE)
@@ -341,6 +388,23 @@ def test_an_empty_or_unreadable_cook_set_is_unknown() -> None:
     assert cook_set_names(None) is None
     assert cook_set_names(42) is None
     assert cook_set_names([types.SimpleNamespace(name="a"), "b"]) == {"a", "b"}
+
+
+def test_a_reads_static_prefix_has_its_variables_expanded(
+    scene: FakeHou, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A read that depends on a work item is matched by its folder, so ``$HIP`` there must be expanded.
+
+    An unknown variable expands to nothing in Houdini, which would shorten the path, so it gives no prefix.
+    """
+    network: Network = build_network(PYRO_BONFIRE)
+    hom: Any = network.node("render").hom
+    hom.set_parm("file", "$HIP/geo/`@pdg_index`.bgeo", kind="FileReference")
+    hom.set_parm("other", "${NO_SUCH_VARIABLE_X}/geo/`@pdg_index`.bgeo", kind="FileReference")
+    reads: SceneReads = HoudiniPdgHost(network.scheduler()).read_scene()
+    prefixes: Dict[str, str] = {read.parm: read.static_prefix for read in reads.reads}
+    assert prefixes["file"] == os.path.join(str(tmp_path / "scene"), "geo") + "/"
+    assert prefixes["other"] == ""
 
 
 def test_read_scene_walks_every_top_node_including_those_that_are_not_steps(
@@ -666,6 +730,10 @@ def test_the_scheduler_node_is_found_by_name_when_pdg_gives_none(scene: FakeHou)
     scene.instances = []
     with pytest.raises(CookSetupError, match="deadlinecloudscheduler1"):
         find_scheduler_node(scheduler)
+    # A session that can't list node types gives the same error, not a crash.
+    scene.type_error = RuntimeError("no such category")
+    with pytest.raises(CookSetupError, match="deadlinecloudscheduler1"):
+        find_scheduler_node(scheduler)
 
 
 def test_the_houdini_version_and_queue_values_come_from_the_scheduler_node(
@@ -805,6 +873,32 @@ def test_an_override_naming_this_scheduler_is_not_refused_before_generation(
     assert _verdict(network).accepted()
 
 
+@pytest.mark.parametrize("override", ["deadlinecloudscheduler1", "dc_pdg_name"])
+def test_an_override_naming_this_scheduler_by_name_is_not_refused(
+    scene: FakeHou, override: str
+) -> None:
+    """An override may name the scheduler node by its name or its PDG name, as well as its path."""
+    network: Network = build_network(PYRO_BONFIRE)
+    network.scheduler_node.pdg_name = "dc_pdg_name"
+    network.node("montage").hom.set_parm("topscheduler", override)
+    # PDG's own answer names no scheduler, so only the override's text decides.
+    network.node("montage").scheduler_name = ""
+    assert _verdict(network).accepted()
+
+
+def test_python_code_that_opens_a_file_is_advised_before_generation(scene: FakeHou) -> None:
+    """Code is too open to judge, so a node between steps whose code opens a file gets a warning."""
+    network: Network = build_network(ROUTED_EXAMPLE)
+    network.node("merge").hom.set_parm(
+        "pythoncode", "open(work_item.inputFiles[0].path)", tags={"editorlang": "python"}
+    )
+    verdict: Verdict = _verdict(network)
+    assert verdict.accepted()
+    assert [(a.scenario, a.subject) for a in verdict.advisories] == [
+        (RefusalScenario.IN_PROCESS_NODE, "merge")
+    ]
+
+
 def test_a_step_set_to_in_process_is_refused_before_generation(scene: FakeHou) -> None:
     """PDG never offers such a step's items, so its tasks would never run, and it is named first."""
     network: Network = build_network(PYRO_BONFIRE)
@@ -894,6 +988,7 @@ def test_always_save_saves_and_turns_auto_save_on_so_the_next_submit_does_not_as
     scene.messages.choice = 1
     network: Network = _auto_save_network(0)
     assert _verdict(network, interactive=True).accepted()
+    assert scene.hip_file.saves == 1
     assert network.scheduler_node.parm("auto_save_hip").sets == [1]  # type: ignore[union-attr]
     # The next submit with changes saves without asking.
     scene.hip_file.unsaved = True
@@ -903,7 +998,7 @@ def test_always_save_saves_and_turns_auto_save_on_so_the_next_submit_does_not_as
 
 def test_cancel_at_the_save_prompt_raises_user_initiated_cancel(scene: FakeHou) -> None:
     """Cancel starts nothing and saves nothing, and closing the prompt is a cancel too."""
-    for choice in (2, -1):
+    for choice in (2, None):
         scene.messages.choice = choice
         scene.hip_file.unsaved = True
         network: Network = _auto_save_network(0)
@@ -943,13 +1038,24 @@ def test_without_a_ui_the_interactive_check_does_not_prompt(scene: FakeHou) -> N
     assert scene.messages.calls == []
 
 
-def test_a_network_without_a_pdg_graph_creates_its_nodes_first(scene: FakeHou, caplog: Any) -> None:
-    """A network never cooked has no PDG graph, so its nodes are created without cooking anything."""
+def test_a_network_without_a_pdg_graph_creates_its_nodes_first(scene: FakeHou) -> None:
+    """A network never cooked has no PDG graph, so its nodes are created, without cooking, and judged."""
     network: Network = build_network(COOKING_EXAMPLE)
     network.scheduler_node.context = None
+    verdict: Verdict = _verdict(network)
+    assert network.scheduler_node.cook_calls == [{"block": True, "tops_only": True}]
+    assert _refused(verdict) == [(RefusalScenario.IN_PROCESS_NODE, "python1")]
+
+
+def test_a_network_whose_pdg_graph_cannot_be_made_is_checked_when_it_cooks(
+    scene: FakeHou, caplog: Any
+) -> None:
+    """Without a graph nothing can be judged yet, so the cook runs the checks when it starts."""
+    network: Network = build_network(COOKING_EXAMPLE)
+    network.scheduler_node.context = None
+    network.scheduler_node.cook_creates = None
     with caplog.at_level(logging.WARNING):
         verdict: Verdict = _verdict(network)
-    assert network.scheduler_node.cook_calls == [{"block": True, "tops_only": True}]
     assert verdict.accepted() and "no PDG graph yet" in caplog.text
 
 

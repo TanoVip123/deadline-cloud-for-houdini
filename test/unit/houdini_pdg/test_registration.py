@@ -24,17 +24,17 @@ from .houdini_fakes import (
     install_hou,
 )
 
+import deadline.houdini_pdg
 from deadline.houdini_pdg.cook import CookServices, SystemClock
 from deadline.houdini_pdg.errors import CookSetupError
 from deadline.houdini_pdg.houdini.host import HoudiniPdgHost
 from deadline.houdini_pdg.houdini.settings import SchedulerSettings
 from deadline.houdini_pdg.ports import CookPhase, CookSummary
 
-#: The registration module's source. PDG loads it by path, so the test does too.
+#: The registration module's source, found from the installed package. PDG loads it by path, so the test does too.
 _REGISTRATION: str = os.path.join(
-    os.path.dirname(__file__),
-    *("..", "..", "..", "src", "deadline", "houdini_pdg", "houdini_plugin"),
-    *("pdg", "types", "deadlinecloud", "__init__.py"),
+    os.path.dirname(deadline.houdini_pdg.__file__),
+    *("houdini_plugin", "pdg", "types", "deadlinecloud", "__init__.py"),
 )
 
 
