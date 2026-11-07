@@ -1440,6 +1440,7 @@ def test_a_step_with_an_item_cooked_from_cache_is_refused_naming_its_file() -> N
     The step is refused before anything is uploaded, with the file that made PDG
     skip the item.
     """
+    # Only the cached item's file exists, so the disk check alone would not refuse the step.
     cached_file: str = os.path.join(WORKING_DIR, "geo", "sim.2.bgeo.sc")
     verdict: Verdict = validate(
         _ctx(_with_cached_item(), working_dir=WORKING_DIR, exists=lambda path: path == cached_file)

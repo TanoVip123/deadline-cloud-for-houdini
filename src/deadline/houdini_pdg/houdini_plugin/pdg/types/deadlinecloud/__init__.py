@@ -246,22 +246,9 @@ def _connect(
     if not queue_id:
         raise CookSetupError(_NO_QUEUE)
     # The queue gives the bucket, and its role gives the session that reaches it.
-    client: Any
-    queue: Any
-    try:
-        client = cloud.deadline_client()
-        queue = _get_queue(client, farm_id, queue_id, cloud)
-    except Exception as e:
-        raise _queue_error(e, farm_id, queue_id, cloud) from e
+    client, queue = _read_queue(farm_id, queue_id, cloud)
     bucket, root_prefix = _job_attachments(queue, queue_id)
-    s3_client: Any
-    try:
-        session: Any = cloud.queue_session(
-            client, farm_id, queue_id, str(queue.get("displayName") or "")
-        )
-        s3_client = session.client("s3")
-    except Exception as e:
-        raise _queue_error(e, farm_id, queue_id, cloud) from e
+    s3_client: Any = _queue_s3(client, queue, farm_id, queue_id, cloud)
     _check_bucket_listing(s3_client, bucket, root_prefix, queue.get("displayName") or queue_id)
     return CookServices(
         submitter=PdgSubmitter(
@@ -293,6 +280,26 @@ def _connect(
     )
 
 
+def _read_queue(farm_id: str, queue_id: str, cloud: DeadlineCloud) -> Tuple[Any, Any]:
+    """A Deadline Cloud client and the queue it reads. Raises ``CookSetupError`` naming the cause."""
+    try:
+        client: Any = cloud.deadline_client()
+        return client, _get_queue(client, farm_id, queue_id, cloud)
+    except Exception as e:
+        raise _queue_error(e, farm_id, queue_id, cloud) from e
+
+
+def _queue_s3(client: Any, queue: Any, farm_id: str, queue_id: str, cloud: DeadlineCloud) -> Any:
+    """An S3 client with the queue role's credentials. Raises ``CookSetupError`` naming the cause."""
+    try:
+        session: Any = cloud.queue_session(
+            client, farm_id, queue_id, str(queue.get("displayName") or "")
+        )
+        return session.client("s3")
+    except Exception as e:
+        raise _queue_error(e, farm_id, queue_id, cloud) from e
+
+
 def _check_bucket_listing(s3_client: Any, bucket: str, root_prefix: str, queue: str) -> None:
     """Refuse a queue role that cannot list its bucket, by reading a key that cannot exist.
 
@@ -303,6 +310,7 @@ def _check_bucket_listing(s3_client: Any, bucket: str, root_prefix: str, queue: 
     try:
         s3_client.get_object(Bucket=bucket, Key=key)
     except Exception as e:
+        # A missing key is the expected answer. Only a denial proves the permission is missing.
         code: str = _error_code(e)
         if code in ("NoSuchKey", "404", "NotFound"):
             return
@@ -340,6 +348,7 @@ def _declared_outputs(work_item: Any) -> Tuple[DeclaredFile, ...]:
 
 def _job_attachments(queue: Any, queue_id: str) -> Tuple[str, str]:
     """The queue's job attachments bucket and root prefix. Raises ``CookSetupError`` without them."""
+    # Both the bucket and the root prefix are needed to name a task's keys.
     settings: Dict[str, str] = queue.get("jobAttachmentSettings") or {}
     bucket: str = settings.get("s3BucketName", "")
     root_prefix: str = settings.get("rootPrefix", "")
@@ -394,6 +403,7 @@ def _queue_error(
     error: Exception, farm_id: str, queue_id: str, cloud: DeadlineCloud
 ) -> CookSetupError:
     """The setup error for a failed queue read, with the remedy for its cause."""
+    # Match the error by its class name and its service code, from the most specific cause.
     names: Set[str] = {type(error).__name__, _error_code(error)}
     login: CookSetupError = CookSetupError(
         "Your AWS Deadline Cloud login is missing or has expired. Log in with the node's "

@@ -311,6 +311,7 @@ def test_stopping_removes_the_handler_and_is_safe_twice(scene: FakeHou) -> None:
 
 def test_read_graph_reads_the_dependency_graph_once_and_keeps_the_cook_set(scene: FakeHou) -> None:
     """One read gives a consistent snapshot, and a node outside the cook set is marked so."""
+    # The cook set names two of the five nodes.
     network: Network = build_network(PYRO_BONFIRE)
     network.context.cookSet = [network.node("sim"), network.node("render")]
     scheduler: FakePyScheduler = network.scheduler()
@@ -443,6 +444,7 @@ def test_an_item_file_token_with_a_fake_home_is_not_attached(
     The step that writes the file delivers it, and the home guard must not fire on
     a reference that is never attached.
     """
+    # A home folder, and a token parm that evaluates to it while a work item is active.
     home: Path = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -470,6 +472,7 @@ def test_the_integrations_own_libraries_are_not_attached_and_expanded_libraries_
     scene: FakeHou, tmp_path: Path
 ) -> None:
     """A worker never cooks the scheduler or the ROP, and job attachments refuses a folder listed as a file."""
+    # Both integration libraries are stored expanded, as folders, next to two scene libraries.
     folder: str = str(tmp_path / "scene")
     plugin: str = str(tmp_path / "plugin")
     for library in ("deadline_cloud_scheduler.hda", "deadline_cloud.hda"):
@@ -600,6 +603,7 @@ def test_absent_parms_take_their_defaults_and_are_logged_once(
     scene: FakeHou, tmp_path: Path, caplog: Any
 ) -> None:
     """A node saved before a parm existed still cooks, validating, and says once how to get the parm."""
+    # Read twice: the second read must not log again.
     node: FakeNode = FakeNode("/obj/topnet1/old_scheduler")
     with caplog.at_level(logging.WARNING):
         first: SchedulerSettings = read_scheduler_settings(node)
@@ -668,6 +672,7 @@ def test_the_houdini_version_and_queue_values_come_from_the_scheduler_node(
     scene: FakeHou,
 ) -> None:
     """The Conda packages are pinned to the running Houdini, and the queue values are the node's own."""
+    # A queue parameter is a spare parm with the shared prefix, as the ROP makes it.
     network: Network = build_network(PYRO_BONFIRE)
     spare: Any = network.scheduler_node.set_parm(
         "queue_env_do_not_use_CondaChannels", "deadline-cloud"
@@ -742,6 +747,7 @@ def test_a_cooking_example_network_is_refused_before_generation(scene: FakeHou) 
 
 def test_with_validation_off_the_pre_cook_refusal_becomes_a_warning(scene: FakeHou) -> None:
     """The Cook button accepts the same graph the cook submits when the artist turns validation off."""
+    # The refusal is kept as an advisory that says validation is off.
     network: Network = build_network(
         COOKING_EXAMPLE, scheduler_parms={"working_dir": "$HIP", "validate_graph": 0}
     )

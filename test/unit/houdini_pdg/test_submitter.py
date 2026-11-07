@@ -22,7 +22,6 @@ from typing import (
     Set,
     Tuple,
     Type,
-    TypeVar,
 )
 
 import jsonschema
@@ -122,10 +121,6 @@ class FakeNode:
             raise AssertionError("The node was read outside the host's on_main_thread.")
 
 
-#: What a fake main-thread read returns.
-_T = TypeVar("_T")
-
-
 class FakeHost:
     """The scene side of the submitter: its files, Houdini's version, and the node's queue values.
 
@@ -154,7 +149,7 @@ class FakeHost:
     def queue_parameter_values(self) -> List[Dict[str, Any]]:
         return self.queue_values
 
-    def on_main_thread(self, read: Callable[[], _T]) -> _T:
+    def on_main_thread(self, read: Callable[[], Any]) -> Any:
         # Count the read, and open the window a guarded node checks.
         self.main_thread_reads += 1
         self.allowed[0] = True

@@ -27,7 +27,6 @@ from typing import (
     Sequence,
     Set,
     Tuple,
-    TypeVar,
 )
 
 import hou  # type: ignore[import-not-found]
@@ -35,16 +34,13 @@ import pdg  # type: ignore[import-not-found]
 
 from ..errors import CookSetupError, PayloadTransferError
 from ..graph import GraphSnapshot, NodeInfo, synthesize
-from ..ports import ItemOutcome, ItemState, SceneFiles, WorkItemHandle
+from ..ports import ItemOutcome, ItemState, SceneFiles, T, WorkItemHandle
 from ..scene_reads import ReadReport, SceneReads, match_reads
 from ..validation import Refusal, RefusalScenario, ValidationContext, Verdict, validate, waived
 from . import readers
 from .settings import SchedulerSettings
 
 _logger: logging.Logger = logging.getLogger(__name__)
-
-#: What a read run on the main thread returns.
-T = TypeVar("T")
 
 #: The scheduler's node type, which the HDA defines.
 _NODE_TYPE: str = "deadlinecloudscheduler"
@@ -163,6 +159,7 @@ class HoudiniPdgHost:
         PDG offers a step's first item while it is still generating the steps
         below it, so a graph read at that moment is missing most of the job.
         """
+        # Wait for every step, or only those in the cook set, and listen for each to finish.
         context: Any = self._scheduler.context
         steps: Set[str] = set(_step_top_nodes(_graph_nodes(context)))
         with self._generation_lock:
@@ -381,13 +378,18 @@ def _debug_level(node: Any) -> int:
         )
     # The parm holds a menu index, so anything else is a damaged scene.
     value: Any = _parm(node, _DEBUG_LEVEL_PARM, 0, as_text=False)
-    try:
-        parm_level: int = int(value)
-    except (TypeError, ValueError):
-        parm_level = -1
+    parm_level: int = _as_level(value)
     if parm_level not in _DEBUG_LEVELS:
         raise CookSetupError(f"The '{_DEBUG_LEVEL_PARM}' parm must be 0 or 1, not {value!r}.")
     return parm_level
+
+
+def _as_level(value: Any) -> int:
+    """``value`` as a whole number, or -1 when it is not one."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
 
 
 def _parm(node: Any, name: str, default: Any, *, as_text: bool) -> Any:
@@ -433,21 +435,15 @@ def _absolute(path: str) -> str:
 
 def _scheduler_node(scheduler: Any) -> Any:
     """The scheduler's TOP node: PDG's own link first, then the only node of this type by name."""
-    try:
-        node: Any = scheduler.topNode()
-    except Exception:
-        node = None
+    node: Any = _call(scheduler, "topNode")
     if node is not None:
         return node
     # PDG gave no link, so match the node by the scheduler's name.
     name: str = _name(scheduler)
-    try:
-        instances: List[Any] = list(hou.nodeType(hou.topNodeTypeCategory(), _NODE_TYPE).instances())
-    except Exception:
-        instances = []
-    matches: List[Any] = [n for n in instances if _call(n, "name") == name]
-    if not matches and len(instances) == 1:
-        matches = instances
+    instances: List[Any] = _type_instances()
+    named: List[Any] = [n for n in instances if _call(n, "name") == name]
+    # The only node of the type is used even when its name differs.
+    matches: List[Any] = named or (instances if len(instances) == 1 else [])
     if len(matches) == 1:
         return matches[0]
     raise CookSetupError(
@@ -456,14 +452,23 @@ def _scheduler_node(scheduler: Any) -> Any:
     )
 
 
+def _type_instances() -> List[Any]:
+    """Every node of the scheduler's type in the scene, or none when they can't be listed."""
+    try:
+        return list(hou.nodeType(hou.topNodeTypeCategory(), _NODE_TYPE).instances())
+    except Exception:
+        return []
+
+
 # A PDG log line's leading "[HH:MM:SS.fff] " stamp.
 _LOG_STAMP: "re.Pattern[str]" = re.compile(r"^\[[0-9:.]+\]\s*")
 
 
 def _reason_from_log(log: str) -> Tuple[str, str]:
     """A work item's log as ``(its ERROR: lines joined, its last line)``, without time stamps."""
-    lines: List[str] = [_LOG_STAMP.sub("", line).strip() for line in log.splitlines()]
-    lines = [line for line in lines if line]
+    # Drop the time stamps and blank lines, then keep the ERROR lines apart from the last line.
+    stripped: List[str] = [_LOG_STAMP.sub("", line).strip() for line in log.splitlines()]
+    lines: List[str] = [line for line in stripped if line]
     errors: List[str] = [line.split("ERROR:", 1)[1].strip() for line in lines if "ERROR:" in line]
     return " ".join(errors), (lines[-1] if lines else "")
 
@@ -501,6 +506,7 @@ def _has_queued_item(node: Any) -> bool:
 
 def _names_of(node: Any) -> Set[str]:
     """The node's name, path, and PDG node name, any of which an override may hold."""
+    # An override may name the node, its path, or its PDG name.
     names: Set[str] = {str(_call(node, "name") or ""), _path_of(node)}
     pdg_name: Any = _call(node, "getPDGNodeName")
     if pdg_name:
@@ -648,10 +654,10 @@ def _scene_assets(node: Any) -> Dict[str, Set[str]]:
         # Expand the variables, and keep only an absolute path with none left. A
         # relative path would resolve against Houdini's current directory.
         pattern: str = _houdini_time_vars_to_glob(ref)
-        expanded: str = os.path.expanduser(hou.text.expandString(pattern).strip())
-        if not os.path.isabs(expanded) or "$" in expanded:
+        evaluated: str = os.path.expanduser(hou.text.expandString(pattern).strip())
+        if not os.path.isabs(evaluated) or "$" in evaluated:
             continue
-        expanded = _absolute(expanded)
+        expanded: str = _absolute(evaluated)
         matched: List[str] = (
             [_absolute(path) for path in glob.glob(expanded)]
             if pattern != ref
@@ -670,6 +676,7 @@ def _refuse_unbounded(
     Attaching such a path would hash every file below it before anything is
     submitted, so the cook would hang with no message.
     """
+    # Each home directory that is set, folded for case where paths ignore it.
     homes: List[str] = [
         os.path.normcase(_absolute(env[name])) for name in _HOME_VARIABLES if env.get(name)
     ]
@@ -686,6 +693,7 @@ def _refuse_unbounded(
 
 def _is_unbounded(path: str, homes: Sequence[str]) -> bool:
     """Whether ``path`` is a filesystem root, one of ``homes``, or a directory that holds one."""
+    # A root is its own parent. Above home means home starts with this path.
     folded: str = os.path.normcase(os.path.normpath(path))
     if os.path.dirname(folded) == folded:
         return True
@@ -728,17 +736,19 @@ def prompt_to_save(node: Any) -> None:
 def _save_refusals() -> Tuple[Refusal, ...]:
     """A refusal when the ``.hip`` was never saved, or, with a UI, has unsaved changes."""
     path: str = str(hou.hipFile.path() or "")
-    detail: str
-    if hou.hipFile.isNewFile():
-        detail = "The scene has never been saved, so there is no .hip for the workers to load."
     # hython reports unsaved changes even right after a save, and a session with no
     # UI has no artist editing the scene, so only a graphical session is checked.
-    elif hou.isUIAvailable() and hou.hipFile.hasUnsavedChanges():
-        detail = (
-            "The scene has unsaved changes. The workers load the saved .hip, so they would cook "
-            "the scene as it was last saved, not as it is now."
+    detail: str = (
+        "The scene has never been saved, so there is no .hip for the workers to load."
+        if hou.hipFile.isNewFile()
+        else (
+            "The scene has unsaved changes. The workers load the saved .hip, so they would "
+            "cook the scene as it was last saved, not as it is now."
+            if hou.isUIAvailable() and hou.hipFile.hasUnsavedChanges()
+            else ""
         )
-    else:
+    )
+    if not detail:
         return ()
     return (
         Refusal(
@@ -766,26 +776,24 @@ def _topology_verdict(node: Any) -> Verdict:
     snapshot: GraphSnapshot = synthesize(infos)
     # A settings problem is reported by the cook when it starts, so the topology
     # is still judged without it.
-    settings: Optional[SchedulerSettings]
-    try:
-        settings = read_scheduler_settings(node)
-    except CookSetupError:
-        settings = None
+    settings: Optional[SchedulerSettings] = _settings_or_none(node)
     working_dir: str = settings.working_dir if settings is not None else ""
     scene: SceneReads = readers.collect_scene_reads(
         _top_nodes(graph_nodes), expand=_expand_variables
     )
-    reads: Optional[ReadReport] = None
-    if scene.available:
-        # Only how the write parms are authored is known before generation. With no
-        # declared outputs every read would look external, so matches are dropped.
-        reads = dataclasses.replace(
+    # Only how the write parms are authored is known before generation. With no
+    # declared outputs every read would look external, so matches are dropped.
+    reads: Optional[ReadReport] = (
+        dataclasses.replace(
             match_reads(snapshot, scene.reads, working_dir),
             matches=(),
             data_edges={},
             attribute_variables=(),
         )
-    verdict: Verdict = validate(
+        if scene.available
+        else None
+    )
+    full: Verdict = validate(
         ValidationContext(
             nodes=infos,
             snapshot=snapshot,
@@ -795,21 +803,29 @@ def _topology_verdict(node: Any) -> Verdict:
         )
     )
     # The checks that need generated items would report every step, so they wait.
-    verdict = Verdict(
-        refusals=tuple(r for r in verdict.refusals if r.scenario not in _NEEDS_ITEMS),
-        advisories=tuple(a for a in verdict.advisories if a.scenario not in _NEEDS_ITEMS),
+    verdict: Verdict = Verdict(
+        refusals=tuple(r for r in full.refusals if r.scenario not in _NEEDS_ITEMS),
+        advisories=tuple(a for a in full.advisories if a.scenario not in _NEEDS_ITEMS),
     )
     return waived(verdict) if settings is not None and not settings.validate_graph else verdict
+
+
+def _settings_or_none(node: Any) -> Optional[SchedulerSettings]:
+    """The node's settings, or None when a parm is wrong."""
+    try:
+        return read_scheduler_settings(node)
+    except CookSetupError:
+        return None
 
 
 def _graph_context(node: Any) -> Any:
     """The node's PDG graph context, creating the PDG nodes first when there is none."""
     context: Any = _call(node, "getPDGGraphContext")
-    if context is None:
-        # Creates the PDG nodes without generating or cooking anything.
-        _call_kwargs(node, "cookWorkItems", block=True, tops_only=True)
-        context = _call(node, "getPDGGraphContext")
-    return context
+    if context is not None:
+        return context
+    # Creates the PDG nodes without generating or cooking anything.
+    _call_kwargs(node, "cookWorkItems", block=True, tops_only=True)
+    return _call(node, "getPDGGraphContext")
 
 
 def _environment() -> Dict[str, str]:
@@ -907,6 +923,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
 
 def _default_scheduler_problem(node: Any, network: Any) -> str:
     """Why the network would not cook on ``node``, or ``""`` when its default scheduler is ``node``."""
+    # The network parm names its default scheduler, relative to the network.
     parm: Any = network.parm("topscheduler") if network is not None else None
     target: Any = network.node(parm.eval()) if parm is not None and parm.eval() else None
     if target is not None and target.path() == node.path():
@@ -921,6 +938,7 @@ def _farm_problem(read: Callable[[str], str]) -> str:
     """The ROP's message for a missing farm or queue, or ``""``."""
     from ..submitter import _NO_FARM, _NO_QUEUE
 
+    # The same messages the ROP shows, so both nodes read the same.
     if not read("defaults.farm_id"):
         return _NO_FARM
     if not read("defaults.queue_id"):
@@ -932,6 +950,7 @@ def _confirmed(
     node: Any, settings: SchedulerSettings, verdict: Verdict, read: Callable[[str], str]
 ) -> bool:
     """Show what will be submitted, with any advisory, and return whether the artist chose Submit."""
+    # The job as it will be submitted, then any warnings in the details.
     lines: List[str] = [
         f"Farm: {read('defaults.farm_id')}",
         f"Queue: {read('defaults.queue_id')}",

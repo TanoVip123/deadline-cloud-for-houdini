@@ -291,8 +291,8 @@ _HIP_DIR: Dict[str, str] = {"value": os.sep}
 def expand(text: str) -> str:
     """Houdini's expansion, for the variables the tests use: ``$HIP``, ``$F4``, and the environment."""
     # Frame 1, as a scene at its first frame evaluates ``$F4``.
-    text = text.replace("${HIP}", _HIP_DIR["value"]).replace("$HIP", _HIP_DIR["value"])
-    return os.path.expandvars(text.replace("$F4", "0001"))
+    hip: str = text.replace("${HIP}", _HIP_DIR["value"]).replace("$HIP", _HIP_DIR["value"])
+    return os.path.expandvars(hip.replace("$F4", "0001"))
 
 
 class FakeMessages:

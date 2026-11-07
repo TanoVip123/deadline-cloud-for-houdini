@@ -203,6 +203,7 @@ def test_a_cook_starts_connected_with_the_cook_set_as_names(
     scene: FakeHou, tmp_path: Path, caplog: Any
 ) -> None:
     """PDG gives its cook set as node objects, and the cook needs their names to know what to wait for."""
+    # Start with one PDG node in the cook set, then tick and stop the open cook.
     network: Network = build_network(PYRO_BONFIRE)
     scheduler: Any = _scheduler(network)
     with caplog.at_level(logging.INFO):
