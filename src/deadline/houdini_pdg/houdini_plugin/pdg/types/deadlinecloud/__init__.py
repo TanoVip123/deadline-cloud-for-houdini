@@ -20,23 +20,83 @@ import json
 import logging
 import shutil
 import tempfile
-from typing import Any, Optional
+import time
+import uuid
+from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 import pdg  # type: ignore[import-not-found]
 from pdg.scheduler import PyScheduler  # type: ignore[import-not-found]
 
-from deadline.houdini_pdg.errors import artist_message
 from deadline.houdini_pdg.cook import CookServices, PdgScheduler, ScheduleResult, SystemClock
-from deadline.houdini_pdg.houdini.host import HoudiniPdgHost
+from deadline.houdini_pdg.diagnostics import CookJournal
+from deadline.houdini_pdg.errors import CookSetupError, GraphRefusedError, artist_message
+from deadline.houdini_pdg.farm_job import DeadlineFarmJob
+from deadline.houdini_pdg.graph import DeclaredFile
+from deadline.houdini_pdg.houdini.host import HoudiniPdgHost, PreCookChecks, cook_set_names
 from deadline.houdini_pdg.houdini.settings import SchedulerSettings
-from deadline.houdini_pdg.ports import WorkItemHandle
+from deadline.houdini_pdg.ports import Clock, WorkItemHandle
+from deadline.houdini_pdg.submitter import _NO_FARM, _NO_QUEUE, PdgSubmitter
+from deadline.houdini_pdg.task_storage import S3TaskStorage
+from deadline.houdini_pdg.validation import Verdict
 
-_logger = logging.getLogger(__name__)
+_logger: logging.Logger = logging.getLogger(__name__)
 
-_SCHEDULE_RESULTS = {
+_SCHEDULE_RESULTS: Dict[ScheduleResult, Any] = {
     ScheduleResult.SUCCEEDED: pdg.scheduleResult.Succeeded,
     ScheduleResult.DEFERRED: pdg.scheduleResult.Deferred,
 }
+
+
+class DeadlineCloud:
+    """The Deadline Cloud calls the composition root makes. A test replaces them by subclassing."""
+
+    def get_setting(self, name: str) -> str:
+        """A workstation setting, such as ``defaults.farm_id``."""
+        from deadline.client.config import get_setting
+
+        return str(get_setting(name) or "")
+
+    def deadline_client(self) -> Any:
+        """A Deadline Cloud client with the workstation's login."""
+        from deadline.client import api
+
+        return api.get_boto3_client("deadline")
+
+    def queue_session(self, client: Any, farm_id: str, queue_id: str, display_name: str) -> Any:
+        """A boto3 session with the queue role's credentials."""
+        from deadline.client import api
+
+        return api.get_queue_user_boto3_session(
+            deadline=client, farm_id=farm_id, queue_id=queue_id, queue_display_name=display_name
+        )
+
+    def needs_login(self) -> bool:
+        """Whether the client library says the workstation must log in again."""
+        from deadline.client import api
+
+        try:
+            return bool(
+                api.check_authentication_status() == api.AwsAuthenticationStatus.NEEDS_LOGIN
+            )
+        except Exception:
+            return False
+
+    def record_event(self) -> Callable[[str, Dict[str, Any]], Any]:
+        """The telemetry client's ``record_event``, which honors the workstation's opt-out."""
+        from deadline.client import api
+
+        try:
+            record: Callable[[str, Dict[str, Any]], Any] = (
+                api.get_deadline_cloud_library_telemetry_client().record_event
+            )
+            return record
+        except Exception:
+            _logger.debug("Telemetry is unavailable for this cook", exc_info=True)
+            return lambda event_type, details: None
+
+    def sleep(self, seconds: float) -> None:
+        """Wait before a retry."""
+        time.sleep(seconds)
 
 
 class DeadlineCloudPDGScheduler(PyScheduler):
@@ -49,7 +109,7 @@ class DeadlineCloudPDGScheduler(PyScheduler):
 
     @classmethod
     def templateBody(cls) -> str:
-        """The node's parm template."""
+        """The node's parm template. The HDA declares the parms."""
         return json.dumps({"name": cls.templateName(), "parameters": []})
 
     def __init__(self, scheduler: Any, name: str) -> None:
@@ -57,7 +117,7 @@ class DeadlineCloudPDGScheduler(PyScheduler):
         # Built per cook, so a node can be created and its help read even when a
         # cook cannot start.
         self._core: Optional[PdgScheduler] = None
-        self._start_failed = False
+        self._start_failed: bool = False
         self._scratch_dir: Optional[str] = None
 
     def onStartCook(self, static: bool, cook_set: Any) -> bool:
@@ -69,13 +129,22 @@ class DeadlineCloudPDGScheduler(PyScheduler):
         """
         self._start_failed = False
         try:
+            # One host per cook, so the scene files are scanned once per cook.
+            host: HoudiniPdgHost = HoudiniPdgHost(self)
+            if not static:
+                # A generate submits nothing, so only a cook is checked.
+                _refuse(PreCookChecks().run(host.scheduler_node(), interactive=False))
+            clock: SystemClock = SystemClock()
+            cloud: DeadlineCloud = self._cloud()
             self._core = PdgScheduler(
-                host=HoudiniPdgHost(self),
-                clock=SystemClock(),
-                read_settings=self._read_settings,
-                connect=self._connect,
+                host=host,
+                clock=clock,
+                read_settings=host.read_settings,
+                connect=lambda settings, cook_id: _connect(
+                    settings, cook_id, host=host, clock=clock, cloud=cloud
+                ),
             )
-            return self._core.on_start_cook(static, cook_set)
+            return self._core.on_start_cook(static, cook_set_names(cook_set))
         except Exception as error:
             self._core = None
             self._start_failed = True
@@ -88,7 +157,7 @@ class DeadlineCloudPDGScheduler(PyScheduler):
         try:
             if self._start_failed or self._core is None:
                 return pdg.scheduleResult.CookFailed
-            result = self._core.on_schedule(self._handle(work_item))
+            result: ScheduleResult = self._core.on_schedule(_handle(work_item))
         except Exception as error:
             self._fail("onSchedule", error)
             return pdg.scheduleResult.CookFailed
@@ -107,7 +176,8 @@ class DeadlineCloudPDGScheduler(PyScheduler):
 
     def onStopCook(self, cancel: bool) -> bool:
         """Close the cook."""
-        core, self._core = self._core, None
+        core: Optional[PdgScheduler] = self._core
+        self._core = None
         try:
             return True if core is None else core.on_stop_cook(cancel)
         except Exception as error:
@@ -115,6 +185,10 @@ class DeadlineCloudPDGScheduler(PyScheduler):
             return True
         finally:
             self._remove_scratch_working_dir()
+
+    def _cloud(self) -> DeadlineCloud:
+        """The Deadline Cloud calls this scheduler makes."""
+        return DeadlineCloud()
 
     def _use_scratch_working_dir(self) -> None:
         # PDG copies its job scripts into the working directory before it
@@ -128,25 +202,219 @@ class DeadlineCloudPDGScheduler(PyScheduler):
             _logger.exception("Could not set a working directory for the failed cook")
 
     def _remove_scratch_working_dir(self) -> None:
+        # Delete the failed start's temporary working directory, if there is one.
         if self._scratch_dir:
             shutil.rmtree(self._scratch_dir, ignore_errors=True)
             self._scratch_dir = None
 
     def _fail(self, callback: str, error: Exception) -> None:
+        # Log the traceback, and show the artist the error on the node.
         _logger.error("%s failed", callback, exc_info=error)
         try:
             self.cookError(artist_message(error))
         except Exception:
             _logger.exception("Could not show the error on the scheduler node")
 
-    def _read_settings(self) -> SchedulerSettings:
-        raise NotImplementedError
 
-    def _connect(self, settings: SchedulerSettings, cook_id: str) -> CookServices:
-        raise NotImplementedError
+def _refuse(verdict: Verdict) -> None:
+    """Log each refusal, then raise ``GraphRefusedError`` when there is any."""
+    for refusal in verdict.refusals:
+        _logger.error(
+            "Refused, %s (%s): %s %s",
+            refusal.subject,
+            refusal.scenario.value,
+            refusal.detail,
+            refusal.remedy,
+        )
+    if verdict.refusals:
+        raise GraphRefusedError(verdict)
 
-    def _handle(self, work_item: Any) -> WorkItemHandle:
-        raise NotImplementedError
+
+def _connect(
+    settings: SchedulerSettings,
+    cook_id: str,
+    *,
+    host: HoudiniPdgHost,
+    clock: Clock,
+    cloud: DeadlineCloud,
+) -> CookServices:
+    """The cook's farm services, for the workstation's farm and queue, from one ``GetQueue``."""
+    farm_id: str = cloud.get_setting("defaults.farm_id")
+    if not farm_id:
+        raise CookSetupError(_NO_FARM)
+    queue_id: str = cloud.get_setting("defaults.queue_id")
+    if not queue_id:
+        raise CookSetupError(_NO_QUEUE)
+    # The queue gives the bucket, and its role gives the session that reaches it.
+    client: Any
+    queue: Any
+    try:
+        client = cloud.deadline_client()
+        queue = _get_queue(client, farm_id, queue_id, cloud)
+    except Exception as e:
+        raise _queue_error(e, farm_id, queue_id, cloud) from e
+    bucket, root_prefix = _job_attachments(queue, queue_id)
+    s3_client: Any
+    try:
+        session: Any = cloud.queue_session(
+            client, farm_id, queue_id, str(queue.get("displayName") or "")
+        )
+        s3_client = session.client("s3")
+    except Exception as e:
+        raise _queue_error(e, farm_id, queue_id, cloud) from e
+    _check_bucket_listing(s3_client, bucket, root_prefix, queue.get("displayName") or queue_id)
+    return CookServices(
+        submitter=PdgSubmitter(
+            node=host.scheduler_node(),
+            host=host,
+            working_dir=settings.working_dir,
+            log=logging.getLogger("deadline.houdini_pdg.submitter").info,
+            # The queue was read once, here, so the submitter does not read it again.
+            job_attachments=lambda _farm, _queue: (bucket, root_prefix),
+            cook_id=cook_id,
+            get_setting=cloud.get_setting,
+        ),
+        storage=S3TaskStorage(s3_client=s3_client, bucket=bucket, root_prefix=root_prefix),
+        open_job=lambda job_id, snapshot: DeadlineFarmJob(
+            deadline_client=client,
+            farm_id=farm_id,
+            queue_id=queue_id,
+            job_id=job_id,
+            snapshot=snapshot,
+            clock=clock,
+        ),
+        journal=CookJournal(
+            working_dir=settings.working_dir,
+            cook_id=cook_id,
+            started_at=clock.now(),
+            debug_level=settings.debug_level,
+            record_event=cloud.record_event(),
+        ),
+    )
+
+
+def _check_bucket_listing(s3_client: Any, bucket: str, root_prefix: str, queue: str) -> None:
+    """Refuse a queue role that cannot list its bucket, by reading a key that cannot exist.
+
+    Without ``s3:ListBucket``, S3 answers ``AccessDenied`` for a missing object,
+    so a task with no output record could not be told from one the role can't read.
+    """
+    key: str = f"{root_prefix.strip('/')}/PdgAccessCheck/{uuid.uuid4().hex}"
+    try:
+        s3_client.get_object(Bucket=bucket, Key=key)
+    except Exception as e:
+        code: str = _error_code(e)
+        if code in ("NoSuchKey", "404", "NotFound"):
+            return
+        if code == "AccessDenied" or type(e).__name__ == "AccessDenied":
+            raise CookSetupError(
+                f"The role of queue {queue} cannot list its job attachments bucket {bucket}. "
+                "Add s3:ListBucket on the bucket to the queue role, then cook again."
+            ) from e
+        _logger.warning("Could not check access to bucket %s: %s", bucket, e)
+        return
+    _logger.warning("The access check found an object at %s in bucket %s.", key, bucket)
+
+
+def _handle(work_item: Any) -> WorkItemHandle:
+    """The cook's view of a PDG work item."""
+    node: Any = getattr(work_item, "node", None)
+    return WorkItemHandle(
+        item_id=int(work_item.id),
+        index=int(work_item.index),
+        name=str(work_item.name),
+        node_name=str(getattr(node, "name", "") or ""),
+        declared_outputs=_declared_outputs(work_item),
+        native=work_item,
+    )
+
+
+def _declared_outputs(work_item: Any) -> Tuple[DeclaredFile, ...]:
+    """The item's expected outputs now. PDG can change them after generation."""
+    return tuple(
+        DeclaredFile(path=str(entry.path), tag=str(getattr(entry, "tag", "") or ""))
+        for entry in getattr(work_item, "expectedOutputFiles", None) or ()
+        if getattr(entry, "path", "")
+    )
+
+
+def _job_attachments(queue: Any, queue_id: str) -> Tuple[str, str]:
+    """The queue's job attachments bucket and root prefix. Raises ``CookSetupError`` without them."""
+    settings: Dict[str, str] = queue.get("jobAttachmentSettings") or {}
+    bucket: str = settings.get("s3BucketName", "")
+    root_prefix: str = settings.get("rootPrefix", "")
+    if not bucket or not root_prefix:
+        raise CookSetupError(
+            f"Queue {queue.get('displayName') or queue_id} has no job attachments bucket. "
+            "The scheduler stores each work item's data there, so choose a queue that has one."
+        )
+    return bucket, root_prefix
+
+
+#: Errors and codes that mean the workstation's login is missing or expired.
+_LOGIN_ERRORS: Tuple[str, ...] = (
+    "NoCredentialsError",
+    "TokenRetrievalError",
+    "UnauthorizedSSOTokenError",
+    "SSOTokenLoadError",
+    "CredentialRetrievalError",
+    "ExpiredToken",
+    "ExpiredTokenException",
+    "UnrecognizedClientException",
+    "InvalidClientTokenId",
+)
+
+#: Seconds to wait before each retry of a queue read that failed for login. Deadline
+#: Cloud Monitor renews its credentials in the background, sometimes only after they lapse.
+_LOGIN_RETRY_DELAYS: Tuple[float, ...] = (2.0, 4.0, 8.0, 16.0)
+
+
+def _get_queue(client: Any, farm_id: str, queue_id: str, cloud: DeadlineCloud) -> Any:
+    """The queue, retried while the login is expired, so a renewal in progress can finish."""
+    for delay in _LOGIN_RETRY_DELAYS:
+        try:
+            return client.get_queue(farmId=farm_id, queueId=queue_id)
+        except Exception as e:
+            if not {type(e).__name__, _error_code(e)} & set(_LOGIN_ERRORS):
+                raise
+            _logger.info("The login was refused (%s); retrying in %s s", e, delay)
+            cloud.sleep(delay)
+    return client.get_queue(farmId=farm_id, queueId=queue_id)
+
+
+def _error_code(error: Exception) -> str:
+    """The service error code botocore attaches to ``error``, or ``""``."""
+    response: Any = getattr(error, "response", None)
+    if isinstance(response, dict):
+        return str(response.get("Error", {}).get("Code", ""))
+    return ""
+
+
+def _queue_error(
+    error: Exception, farm_id: str, queue_id: str, cloud: DeadlineCloud
+) -> CookSetupError:
+    """The setup error for a failed queue read, with the remedy for its cause."""
+    names: Set[str] = {type(error).__name__, _error_code(error)}
+    login: CookSetupError = CookSetupError(
+        "Your AWS Deadline Cloud login is missing or has expired. Log in with the node's "
+        f"Login button or Deadline Cloud Monitor, then cook again. Detail: {error}"
+    )
+    if names & set(_LOGIN_ERRORS):
+        return login
+    if any("AccessDenied" in name for name in names):
+        return CookSetupError(
+            f"Access to queue {queue_id} on farm {farm_id} was denied. Check that your AWS "
+            f"identity may use this queue. Detail: {error}"
+        )
+    if "ResourceNotFound" in _error_code(error):
+        return CookSetupError(
+            f"Queue {queue_id} on farm {farm_id} was not found. Choose a farm and queue in the "
+            "node's Deadline Cloud settings."
+        )
+    # Some credential providers raise their own errors, so ask the library.
+    if cloud.needs_login():
+        return login
+    return CookSetupError(f"Cannot read queue {queue_id} on farm {farm_id}: {error}")
 
 
 def registerTypes(type_registry: Any) -> None:

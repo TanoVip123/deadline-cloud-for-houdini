@@ -185,6 +185,7 @@ class FakeNode:
         self.child_category: str = "Top"
         self.cook_calls: List[Dict[str, Any]] = []
         self.spare: List[FakeParm] = []
+        self.display: Optional[FakeNode] = None
 
     def path(self) -> str:
         return self._path
@@ -238,7 +239,11 @@ class FakeNode:
         )
 
     def node(self, ref: str) -> Any:
-        return None
+        # A child by name, or any child by its absolute path.
+        return next((c for c in self._children if ref in (c.name(), c.path())), None)
+
+    def displayNode(self) -> Optional["FakeNode"]:
+        return self.display
 
     def isInsideLockedHDA(self) -> bool:
         return False
@@ -291,15 +296,16 @@ def expand(text: str) -> str:
 
 
 class FakeMessages:
-    """``hou.ui.displayMessage``: returns ``choice``, and records each call's buttons."""
+    """``hou.ui.displayMessage``: answers from ``answers`` in turn, then ``choice``, and records each call's buttons."""
 
     def __init__(self) -> None:
         self.choice: int = 0
+        self.answers: List[int] = []
         self.calls: List[Tuple[str, Tuple[str, ...]]] = []
 
     def __call__(self, text: str, **kwargs: Any) -> int:
         self.calls.append((text, tuple(kwargs.get("buttons", ()))))
-        return self.choice
+        return self.answers.pop(0) if self.answers else self.choice
 
 
 @dataclass
@@ -353,6 +359,7 @@ def install_hou(monkeypatch: pytest.MonkeyPatch, hip_file: str) -> FakeHou:
         "ropNodeTypeCategory": lambda: "Driver",
         "applicationVersionString": lambda: state.version,
         "ToggleParmTemplate": type("ToggleParmTemplate", (), {}),
+        "severityType": types.SimpleNamespace(Error="Error", Message="Message"),
     }
     for name, value in attributes.items():
         monkeypatch.setattr(hou, name, value, raising=False)
@@ -475,6 +482,9 @@ def build_network(
         else scheduler_parms
     )
     scheduler_node: FakeNode = topnet.add(FakeNode(SCHEDULER_PATH, parms=parms))
+    # The network cooks on this scheduler by default, and its last node is displayed.
+    topnet.set_parm("topscheduler", "deadlinecloudscheduler1")
+    topnet.display = homs[spec[-1][0]] if spec else None
     context: FakeContext = FakeContext(nodes=pdg_nodes)
     scheduler_node.context = context
     return Network(topnet, scheduler_node, pdg_nodes, context)

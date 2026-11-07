@@ -292,7 +292,7 @@ class PreCookChecks:
         which raises ``UserInitiatedCancel``.
         """
         if interactive:
-            on_main_thread(lambda: _prompt_to_save(node))
+            on_main_thread(lambda: prompt_to_save(node))
         verdict: Verdict = on_main_thread(lambda: _topology_verdict(node))
         refusals: Tuple[Refusal, ...] = verdict.refusals + on_main_thread(_save_refusals)
         return Verdict(refusals=refusals, advisories=verdict.advisories)
@@ -697,7 +697,7 @@ def _is_unbounded(path: str, homes: Sequence[str]) -> bool:
 # -- pre-cook checks ----------------------------------------------------------
 
 
-def _prompt_to_save(node: Any) -> None:
+def prompt_to_save(node: Any) -> None:
     """Save unsaved changes before a submit: at once when the node's auto-save is on, else after asking.
 
     The prompt offers Save, Always Save, which also turns auto-save on, and Cancel,
