@@ -212,9 +212,29 @@ def test_a_generate_sets_the_working_directory_and_skips_the_checks(
     assert not [call for call in scheduler.calls if call[0] == "cookError"]
 
 
-@pytest.mark.parametrize(
-    "cook_type", ["cookType.GenerateNode", types.SimpleNamespace(name="GenerateNode")]
-)
+#: The ``pdg.cookType`` members, with their values, as Houdini 21.0 lists them.
+_GENERATE_TYPES: List[Tuple[str, int]] = [
+    ("GenerateFull", 2),
+    ("GenerateNode", 3),
+    ("GenerateStatic", 4),
+]
+_COOK_TYPES: List[Tuple[str, int]] = [
+    ("Full", 0),
+    ("Node", 1),
+    ("StaticDepsFull", 5),
+    ("StaticDepsGen", 2),
+    ("StaticDepsNode", 6),
+]
+
+
+def _printed_and_named(members: List[Tuple[str, int]]) -> List[Any]:
+    """Each member in its printed form and as an enum with a ``name`` and a ``value``."""
+    return [f"cookType.{name}" for name, _ in members] + [
+        types.SimpleNamespace(name=name, value=value) for name, value in members
+    ]
+
+
+@pytest.mark.parametrize("cook_type", _printed_and_named(_GENERATE_TYPES), ids=str)
 def test_a_generate_houdini_reports_in_the_cook_options_is_not_a_farm_cook(
     scene: FakeHou, tmp_path: Path, cook_type: Any
 ) -> None:
@@ -230,13 +250,17 @@ def test_a_generate_houdini_reports_in_the_cook_options_is_not_a_farm_cook(
     assert scheduler.onTick() == PDG.tickResult.SchedulerReady
 
 
+@pytest.mark.parametrize("cook_type", _printed_and_named(_COOK_TYPES), ids=str)
 def test_a_cook_houdini_reports_in_the_cook_options_is_checked_and_connected(
-    scene: FakeHou,
+    scene: FakeHou, cook_type: Any
 ) -> None:
-    """Only a generate skips the checks, so a cook of a refused graph still fails its start."""
+    """Only a generate skips the checks, so a cook of a refused graph still fails its start.
+
+    StaticDepsGen shares GenerateFull's value, so a check by value would skip it too.
+    """
     # The same refused graph, with Houdini's cook options saying it's a cook.
     network: Network = build_network(COOKING_EXAMPLE)
-    network.context.cookOptions = types.SimpleNamespace(cookType="cookType.Node")
+    network.context.cookOptions = types.SimpleNamespace(cookType=cook_type)
     scheduler: Any = _scheduler(network)
     scheduler.onStartCook(False, None)
     errors: List[str] = [call[1] for call in scheduler.calls if call[0] == "cookError"]

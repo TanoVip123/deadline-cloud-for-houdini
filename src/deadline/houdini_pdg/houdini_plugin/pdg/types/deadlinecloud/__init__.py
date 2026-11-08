@@ -22,7 +22,7 @@ import shutil
 import tempfile
 import time
 import uuid
-from typing import Any, Callable, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Optional, Set, Tuple
 
 import pdg  # type: ignore[import-not-found]
 from deadline.client import api as deadline_api
@@ -217,6 +217,10 @@ class DeadlineCloudPDGScheduler(PyScheduler):
             _logger.exception("Could not show the error on the scheduler node")
 
 
+#: The ``pdg.cookType`` members for a cook that only generates work items.
+_GENERATE_COOK_TYPES: FrozenSet[str] = frozenset({"GenerateFull", "GenerateNode", "GenerateStatic"})
+
+
 def _is_generate(context: Any) -> bool:
     """Whether PDG's cook options say this cook only generates work items."""
     try:
@@ -224,8 +228,9 @@ def _is_generate(context: Any) -> bool:
     except Exception:
         return False
     # PDG's enum prints as ``cookType.GenerateNode``, and its ``name`` is the member alone.
+    # The name decides, because a generate shares its value with a member that isn't one.
     name: str = str(getattr(cook_type, "name", "") or cook_type)
-    return name.rsplit(".", 1)[-1] == "GenerateNode"
+    return name.rsplit(".", 1)[-1] in _GENERATE_COOK_TYPES
 
 
 def _refuse(verdict: Verdict) -> None:
