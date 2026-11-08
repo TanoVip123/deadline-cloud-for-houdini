@@ -106,6 +106,31 @@ def test_a_network_that_cooks_on_another_scheduler_is_refused(scene: FakeHou) ->
     assert "Default TOP Scheduler" in scene.messages.calls[0][0]
 
 
+def test_enter_picks_save_on_the_save_prompt_and_submit_on_the_confirmation(
+    scene: FakeHou,
+) -> None:
+    """Enter must never pick Always Save, which writes a parm, or Cancel instead of Submit."""
+    # Submit an unsaved scene, then name the button Enter and the close box pick on each dialog.
+    scene.hip_file.unsaved = True
+    network: Network = _network()
+    submit(network.scheduler_node, get_setting=_workstation)
+    picked: List[Tuple[str, str]] = [
+        (buttons[options["default_choice"]], buttons[options["close_choice"]])
+        for (_, buttons), options in zip(scene.messages.calls, scene.messages.options)
+    ]
+    assert picked == [("Save", "Cancel"), ("Submit", "Cancel")]
+
+
+def test_a_parent_network_without_a_default_scheduler_parm_is_refused(scene: FakeHou) -> None:
+    """A scheduler inside a TOP subnet has a parent with no such parm, and Submit must say so, not crash."""
+    # A parent with no Default TOP Scheduler parm gets the message and no cook.
+    network: Network = _network()
+    network.topnet.remove_parm("topscheduler")
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert _cooks(network) == []
+    assert "Default TOP Scheduler" in scene.messages.calls[0][0]
+
+
 def test_a_refused_graph_is_named_and_not_cooked(scene: FakeHou) -> None:
     """The artist sees why before anything is uploaded, and no confirmation is offered."""
     network: Network = build_network(

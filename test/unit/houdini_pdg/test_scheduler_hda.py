@@ -4,11 +4,17 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
-from typing import Dict, List, Set, Tuple
+import sys
+import types
+from pathlib import Path
+from typing import Any, Dict, List, Set, Tuple
 
 import pytest
+
+from .houdini_fakes import FakeHou, FakeNode, install_hou
 
 _SRC: str = os.path.join(os.path.dirname(__file__), "..", "..", "..", "src", "deadline")
 _NODE: str = os.path.join(
@@ -113,3 +119,69 @@ def test_the_python_module_sends_submit_to_the_schedulers_own_flow() -> None:
     module: str = _read(_NODE, "PythonModule")
     assert "deadline.houdini_pdg.houdini.host import submit" in module
     compile(module, "PythonModule", "exec")
+
+
+#: The two places the node's module looks for the ROP's submitter, in order.
+_ROP_INSTALL: str = "deadline_cloud_for_houdini.submitter"
+_PACKAGE_COPY: str = "deadline.houdini_submitter.python.deadline_cloud_for_houdini.submitter"
+
+
+def _python_module() -> types.ModuleType:
+    """The node's PythonModule section, run as Houdini runs it for ``hou.phm()``."""
+    module: types.ModuleType = types.ModuleType("deadlinecloudscheduler_phm")
+    exec(compile(_read(_NODE, "PythonModule"), "PythonModule", "exec"), module.__dict__)
+    return module
+
+
+class _SchedulerNode(FakeNode):
+    """A scheduler node whose ``hdaModule`` is the node's PythonModule."""
+
+    def __init__(self, phm: types.ModuleType) -> None:
+        super().__init__("/obj/topnet1/deadlinecloudscheduler1")
+        self.phm: types.ModuleType = phm
+
+    def hdaModule(self) -> types.ModuleType:
+        return self.phm
+
+
+def _without(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    """Make each module in ``names`` fail to import, as on a machine without it."""
+    for name in names:
+        monkeypatch.setitem(sys.modules, name, None)
+
+
+@pytest.mark.parametrize("section", ["OnCreated", "OnLoaded"])
+def test_the_node_is_created_and_loaded_without_the_rop_submitter(
+    monkeypatch: pytest.MonkeyPatch, caplog: Any, section: str
+) -> None:
+    """A missing submitter used to raise from OnCreated, which shows a traceback for every new node."""
+    # Run the section as Houdini does, with neither copy of the submitter importable.
+    _without(monkeypatch, _ROP_INSTALL, _PACKAGE_COPY)
+    node: _SchedulerNode = _SchedulerNode(_python_module())
+    with caplog.at_level(logging.WARNING):
+        exec(compile(_read(_NODE, section), section, "exec"), {"kwargs": {"node": node}})
+    assert "submitter for Houdini isn't installed" in caplog.text
+    assert node.path() in caplog.text
+
+
+def test_without_the_rops_install_the_node_uses_this_packages_submitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scheduler ships the ROP's module too, so the node works where only it is installed."""
+    _without(monkeypatch, _ROP_INSTALL)
+    found: Any = _python_module()._rop_submitter()
+    assert found is not None and found.__name__ == _PACKAGE_COPY
+
+
+def test_a_rop_button_without_the_submitter_says_what_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The Login and Settings buttons can't work without the submitter, so the artist is told why."""
+    # Press Login with no submitter, and expect one message that names it.
+    scene: FakeHou = install_hou(monkeypatch, str(tmp_path / "shot.hip"))
+    _without(monkeypatch, _ROP_INSTALL, _PACKAGE_COPY)
+    phm: types.ModuleType = _python_module()
+    parm: Any = types.SimpleNamespace(name=lambda: "login")
+    phm.callback({"parm": parm, "node": _SchedulerNode(phm)})
+    ((text, _),) = scene.messages.calls
+    assert "submitter for Houdini" in text

@@ -39,7 +39,6 @@ from deadline.houdini_pdg.houdini.host import (
     HoudiniPdgHost,
     PreCookChecks,
     cook_set_names,
-    find_scheduler_node,
     read_scheduler_settings,
 )
 from deadline.houdini_pdg.houdini.settings import SchedulerSettings
@@ -731,17 +730,17 @@ def test_the_scheduler_node_is_found_by_name_when_pdg_gives_none(scene: FakeHou)
     mine: FakeNode = FakeNode(SCHEDULER_PATH)
     scheduler: FakePyScheduler = FakePyScheduler()
     scene.instances = [other, mine]
-    assert find_scheduler_node(scheduler) is mine
+    assert HoudiniPdgHost(scheduler).scheduler_node() is mine
     # The only node of the type is used even when its name differs.
     scene.instances = [other]
-    assert find_scheduler_node(scheduler) is other
+    assert HoudiniPdgHost(scheduler).scheduler_node() is other
     scene.instances = []
     with pytest.raises(CookSetupError, match="deadlinecloudscheduler1"):
-        find_scheduler_node(scheduler)
+        HoudiniPdgHost(scheduler).scheduler_node()
     # A session that can't list node types gives the same error, not a crash.
     scene.type_error = RuntimeError("no such category")
     with pytest.raises(CookSetupError, match="deadlinecloudscheduler1"):
-        find_scheduler_node(scheduler)
+        HoudiniPdgHost(scheduler).scheduler_node()
 
 
 def test_the_houdini_version_and_queue_values_come_from_the_scheduler_node(
@@ -870,6 +869,41 @@ def test_a_dynamic_node_and_a_foreign_scheduler_are_refused_before_generation(
         (RefusalScenario.DYNAMIC_NODE, "render"),
         (RefusalScenario.MULTIPLE_SCHEDULERS, "montage"),
     }
+
+
+def test_a_new_override_to_another_scheduler_is_refused_while_pdg_still_names_this_one(
+    scene: FakeHou,
+) -> None:
+    """PDG keeps a node's old scheduler until the next cook, so Submit would start a cook that fails."""
+    # The parm names a real Local Scheduler, while PDG still reports this scheduler.
+    network: Network = build_network(PYRO_BONFIRE)
+    network.topnet.add(FakeNode("/obj/topnet1/localscheduler"))
+    network.node("render").hom.set_parm("topscheduler", "../localscheduler")
+    assert network.node("render").scheduler_name == "deadlinecloudscheduler1"
+    assert (RefusalScenario.MULTIPLE_SCHEDULERS, "render") in _refused(_verdict(network))
+    infos: Sequence[NodeInfo] = HoudiniPdgHost(network.scheduler()).read_graph()
+    assert {info.name: info for info in infos}["render"].scheduler_override == "../localscheduler"
+
+
+def test_an_override_that_now_names_this_scheduler_is_cleared_while_pdg_names_the_old_one(
+    scene: FakeHou,
+) -> None:
+    """The authored parm is what the next cook uses, so it decides over PDG's stale answer."""
+    # The parm now names this scheduler, while PDG still reports the Local Scheduler.
+    network: Network = build_network(PYRO_BONFIRE)
+    network.node("render").hom.set_parm("topscheduler", "../deadlinecloudscheduler1")
+    network.node("render").scheduler_name = "localscheduler"
+    assert _verdict(network).accepted()
+
+
+def test_an_override_that_names_no_node_falls_back_to_pdgs_answer(scene: FakeHou) -> None:
+    """A parm whose value can't be resolved, such as a deleted node, is judged by what PDG reports."""
+    # The parm names no node, so PDG's answer decides, first this scheduler, then another.
+    network: Network = build_network(PYRO_BONFIRE)
+    network.node("render").hom.set_parm("topscheduler", "../renamed_scheduler")
+    assert _verdict(network).accepted()
+    network.node("render").scheduler_name = "localscheduler"
+    assert (RefusalScenario.MULTIPLE_SCHEDULERS, "render") in _refused(_verdict(network))
 
 
 def test_an_override_naming_this_scheduler_is_not_refused_before_generation(

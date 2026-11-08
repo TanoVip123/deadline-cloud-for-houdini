@@ -7,12 +7,17 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import types
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pytest
 from botocore.exceptions import ClientError, NoCredentialsError
+from deadline.client.api import _telemetry
+from hypothesis import HealthCheck, given
+from hypothesis import settings as hypothesis_settings
+from hypothesis import strategies as st
 
 from .houdini_fakes import (
     COOKING_EXAMPLE,
@@ -25,7 +30,7 @@ from .houdini_fakes import (
 )
 
 import deadline.houdini_pdg
-from deadline.houdini_pdg.cook import CookServices, SystemClock
+from deadline.houdini_pdg.cook import CookServices, ScheduleResult, SystemClock
 from deadline.houdini_pdg.errors import CookSetupError
 from deadline.houdini_pdg.houdini.host import HoudiniPdgHost
 from deadline.houdini_pdg.houdini.settings import SchedulerSettings
@@ -48,6 +53,9 @@ def _load() -> ModuleType:
 
 
 REGISTRATION: ModuleType = _load()
+
+#: The client library's cache of telemetry clients, by package name.
+_TELEMETRY_CLIENTS: Dict[str, Any] = getattr(_telemetry, "__cached_telemetry_clients")
 
 
 def _client_error(code: str) -> ClientError:
@@ -88,8 +96,8 @@ _QUEUE: Dict[str, Any] = {
 }
 
 
-class FakeCloud(REGISTRATION.DeadlineCloud):  # type: ignore[misc, name-defined]
-    """Deadline Cloud with a fixed farm, queue, S3 answer, and telemetry, and no waiting."""
+class FakeCloud(REGISTRATION._ClientFactory):  # type: ignore[misc, name-defined]
+    """Clients with a fixed farm, queue, S3 answer, and telemetry, and no waiting."""
 
     def __init__(
         self,
@@ -97,6 +105,7 @@ class FakeCloud(REGISTRATION.DeadlineCloud):  # type: ignore[misc, name-defined]
         settings: Optional[Dict[str, str]] = None,
         queue: Optional[List[Any]] = None,
         s3_error: Optional[Exception] = _client_error("NoSuchKey"),
+        login_needed: bool = False,
     ) -> None:
         self.settings: Dict[str, str] = (
             settings
@@ -107,6 +116,8 @@ class FakeCloud(REGISTRATION.DeadlineCloud):  # type: ignore[misc, name-defined]
         self.s3: FakeS3 = FakeS3(s3_error)
         self.events: List[Tuple[str, Dict[str, Any]]] = []
         self.sleeps: List[float] = []
+        self.login_needed: bool = login_needed
+        self.session_names: List[str] = []
 
     def get_setting(self, name: str) -> str:
         return self.settings.get(name, "")
@@ -115,10 +126,11 @@ class FakeCloud(REGISTRATION.DeadlineCloud):  # type: ignore[misc, name-defined]
         return self.client
 
     def queue_session(self, client: Any, farm_id: str, queue_id: str, display_name: str) -> Any:
+        self.session_names.append(display_name)
         return type("Session", (), {"client": lambda _self, name: self.s3})()
 
     def needs_login(self) -> bool:
-        return False
+        return self.login_needed
 
     def record_event(self) -> Callable[[str, Dict[str, Any]], Any]:
         return lambda event_type, details: self.events.append((event_type, details))
@@ -144,7 +156,7 @@ def _scheduler(network: Network, cloud: Optional[FakeCloud] = None) -> Any:
     chosen: FakeCloud = cloud or FakeCloud()
 
     class Scheduler(REGISTRATION.DeadlineCloudPDGScheduler):  # type: ignore[misc, name-defined]
-        def _cloud(self) -> Any:
+        def _clients(self) -> Any:
             return chosen
 
     scheduler: Any = Scheduler(None, "deadlinecloudscheduler1")
@@ -158,7 +170,7 @@ def _connect(network: Network, cloud: FakeCloud, tmp_path: Path) -> CookServices
     host: HoudiniPdgHost = HoudiniPdgHost(_scheduler(network, cloud))
     settings: SchedulerSettings = SchedulerSettings(working_dir=str(tmp_path / "scene"))
     services: CookServices = REGISTRATION._connect(
-        settings, "cook-1", host=host, clock=SystemClock(), cloud=cloud
+        settings, "cook-1", host=host, clock=SystemClock(), clients=cloud
     )
     return services
 
@@ -197,6 +209,144 @@ def test_a_generate_sets_the_working_directory_and_skips_the_checks(
     folder: str = str(tmp_path / "scene")
     assert ("setWorkingDir", folder, folder) in scheduler.calls
     assert not [call for call in scheduler.calls if call[0] == "cookError"]
+
+
+@pytest.mark.parametrize(
+    "cook_type", ["cookType.GenerateNode", types.SimpleNamespace(name="GenerateNode")]
+)
+def test_a_generate_houdini_reports_in_the_cook_options_is_not_a_farm_cook(
+    scene: FakeHou, tmp_path: Path, cook_type: Any
+) -> None:
+    """Houdini starts every generate with static False, so a farm cook would need a farm to generate."""
+    network: Network = build_network(COOKING_EXAMPLE)
+    network.context.cookOptions = types.SimpleNamespace(cookType=cook_type)
+    # No farm is set, so a farm cook would fail on the missing farm ID.
+    scheduler: Any = _scheduler(network, FakeCloud(settings={}))
+    assert scheduler.onStartCook(False, None) is True
+    folder: str = str(tmp_path / "scene")
+    assert ("setWorkingDir", folder, folder) in scheduler.calls
+    assert not [call for call in scheduler.calls if call[0] == "cookError"]
+    assert scheduler.onTick() == PDG.tickResult.SchedulerReady
+
+
+def test_a_cook_houdini_reports_in_the_cook_options_is_checked_and_connected(
+    scene: FakeHou,
+) -> None:
+    """Only a generate skips the checks, so a cook of a refused graph still fails its start."""
+    # The same refused graph, with Houdini's cook options saying it's a cook.
+    network: Network = build_network(COOKING_EXAMPLE)
+    network.context.cookOptions = types.SimpleNamespace(cookType="cookType.Node")
+    scheduler: Any = _scheduler(network)
+    scheduler.onStartCook(False, None)
+    errors: List[str] = [call[1] for call in scheduler.calls if call[0] == "cookError"]
+    assert len(errors) == 1 and "python1" in errors[0]
+
+
+def test_a_context_without_cook_options_is_a_cook(scene: FakeHou) -> None:
+    """Only a generate PDG reports may skip the checks, so unreadable options mean a cook."""
+    # A refused graph whose context has no cook options must still fail its start.
+    network: Network = build_network(COOKING_EXAMPLE)
+    network.context.cookOptions = None
+    scheduler: Any = _scheduler(network)
+    scheduler.onStartCook(False, None)
+    assert [call for call in scheduler.calls if call[0] == "cookError"]
+
+
+def test_a_cook_started_in_a_session_with_a_ui_never_opens_the_save_prompt(scene: FakeHou) -> None:
+    """Only the node's Submit asks to save. A cook started any other way refuses unsaved changes."""
+    # Start a cook of an unsaved scene in a session with a UI, and expect a refusal, not a prompt.
+    scene.ui = True
+    scene.hip_file.unsaved = True
+    scheduler: Any = _scheduler(build_network(PYRO_BONFIRE))
+    scheduler.onStartCook(False, None)
+    assert scene.messages.calls == [] and scene.hip_file.saves == 0
+    errors: List[str] = [call[1] for call in scheduler.calls if call[0] == "cookError"]
+    assert len(errors) == 1 and "unsaved" in errors[0].lower()
+
+
+def test_the_scheduler_uses_the_client_library_by_default() -> None:
+    """Every cook's farm calls come from this factory, so without it no cook could connect."""
+    scheduler: Any = REGISTRATION.DeadlineCloudPDGScheduler(None, "deadlinecloudscheduler1")
+    assert isinstance(scheduler._clients(), REGISTRATION._ClientFactory)
+
+
+class FakeCore:
+    """The cook's ``on_schedule``: records each handle, then answers ``result`` or raises ``error``."""
+
+    def __init__(self, result: Any, error: Optional[Exception]) -> None:
+        self.result: Any = result
+        self.error: Optional[Exception] = error
+        self.handles: List[Any] = []
+
+    def on_schedule(self, handle: Any) -> Any:
+        self.handles.append(handle)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    def on_stop_cook(self, cancel: bool) -> bool:
+        return True
+
+
+_ITEM: Any = types.SimpleNamespace(
+    id=1, index=0, name="sim_1", node=types.SimpleNamespace(name="sim"), expectedOutputFiles=[]
+)
+
+
+@hypothesis_settings(max_examples=40, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(
+    result=st.sampled_from(list(ScheduleResult) + [None]),
+    error=st.sampled_from(
+        [None, RuntimeError("boom"), KeyError("x"), CookSetupError("setup"), ValueError("v")]
+    ),
+)
+def test_schedule_answers_succeeded_or_deferred_from_the_cook_and_fails_anything_else(
+    scene: FakeHou, result: Any, error: Optional[Exception]
+) -> None:
+    """PDG must hear Succeeded or Deferred exactly when the cook says so, and never an exception."""
+    scheduler: Any = _scheduler(build_network(PYRO_BONFIRE))
+    scheduler._core = FakeCore(result, error)
+    answer: Any = scheduler.onSchedule(_ITEM)
+    expected: Dict[Any, str] = {
+        ScheduleResult.SUCCEEDED: PDG.scheduleResult.Succeeded,
+        ScheduleResult.DEFERRED: PDG.scheduleResult.Deferred,
+    }
+    wanted: str = (
+        expected.get(result, PDG.scheduleResult.CookFailed)
+        if error is None
+        else PDG.scheduleResult.CookFailed
+    )
+    assert answer == wanted
+    # A raised error is shown on the node, and nothing else is.
+    shown: bool = any(call[0] == "cookError" for call in scheduler.calls)
+    assert shown is (error is not None)
+
+
+def test_a_work_item_reaches_the_cook_with_its_node_and_declared_outputs(scene: FakeHou) -> None:
+    """The cook names a task by its node and checks its declared outputs, so neither may be lost."""
+    # Schedule one item with two outputs and one output with no path, through a recording core.
+    scheduler: Any = _scheduler(build_network(PYRO_BONFIRE))
+    core: FakeCore = FakeCore(ScheduleResult.SUCCEEDED, None)
+    scheduler._core = core
+    outputs: List[Any] = [
+        types.SimpleNamespace(path="/out/a.bgeo", tag="file/geo"),
+        types.SimpleNamespace(path="", tag="file/geo"),
+        types.SimpleNamespace(path="/out/b.exr"),
+    ]
+    item: Any = types.SimpleNamespace(
+        id=7,
+        index=2,
+        name="sim_7",
+        node=types.SimpleNamespace(name="sim"),
+        expectedOutputFiles=outputs,
+    )
+    scheduler.onSchedule(item)
+    ((handle,),) = [core.handles]
+    assert (handle.item_id, handle.index, handle.name, handle.node_name) == (7, 2, "sim_7", "sim")
+    assert [(f.path, f.tag) for f in handle.declared_outputs] == [
+        ("/out/a.bgeo", "file/geo"),
+        ("/out/b.exr", ""),
+    ]
 
 
 def test_a_cook_starts_connected_with_the_cook_set_as_names(
@@ -261,6 +411,8 @@ def test_the_cook_uses_the_queues_bucket_and_checks_the_role_can_list_it(
     _connect(build_network(PYRO_BONFIRE), cloud, tmp_path)
     ((bucket, key),) = cloud.s3.keys
     assert bucket == "bucket-a" and key.startswith("DeadlineCloud/")
+    # The queue's display name reaches the session, which names the queue in its errors.
+    assert cloud.session_names == ["Render"]
 
 
 def test_a_queue_role_that_cannot_list_its_bucket_is_refused_before_any_upload(
@@ -292,6 +444,44 @@ def test_the_cooks_outcome_event_goes_through_the_telemetry_client(
     services: CookServices = _connect(build_network(PYRO_BONFIRE), cloud, tmp_path)
     services.journal.closed(CookSummary(cook_id="cook-1", final_phase=CookPhase.DONE))
     assert len(cloud.events) == 1
+
+
+def _restore_telemetry_client(previous: Any) -> None:
+    """Put back the library's cached telemetry client, or drop the one a test built."""
+    _TELEMETRY_CLIENTS.pop("deadline-cloud-library", None)
+    if previous is not None:
+        _TELEMETRY_CLIENTS["deadline-cloud-library"] = previous
+
+
+def test_an_opted_out_workstation_sends_no_outcome_event(
+    scene: FakeHou, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: Any
+) -> None:
+    """The opt-out lives in the client library's own client, so the cook's event must go through it."""
+    from queue import Queue
+
+    from deadline.client import api
+
+    # A fresh library client, built with the opt-out set, as on the artist's workstation.
+    monkeypatch.setenv("DEADLINE_CLOUD_TELEMETRY_OPT_OUT", "true")
+    previous: Any = _TELEMETRY_CLIENTS.pop("deadline-cloud-library", None)
+    request.addfinalizer(lambda: _restore_telemetry_client(previous))
+    client: Any = api.get_deadline_cloud_library_telemetry_client()
+    client.event_queue = Queue()
+
+    class Clients(FakeCloud):
+        record_event: Any = REGISTRATION._ClientFactory.record_event
+
+    record: Any = Clients().record_event()
+    assert record.__self__ is client and record.__func__ is type(client).record_event
+    services: CookServices = _connect(build_network(PYRO_BONFIRE), Clients(), tmp_path)
+    services.journal.closed(CookSummary(cook_id="cook-1", final_phase=CookPhase.DONE))
+    assert client.event_queue.empty()
+    # The same client with telemetry on queues the event, so an empty queue means the opt-out held.
+    monkeypatch.setattr(client, "telemetry_opted_out", False)
+    monkeypatch.setattr(client, "_initialized", True)
+    opted_in: CookServices = _connect(build_network(PYRO_BONFIRE), Clients(), tmp_path)
+    opted_in.journal.closed(CookSummary(cook_id="cook-1", final_phase=CookPhase.DONE))
+    assert not client.event_queue.empty()
 
 
 @pytest.mark.parametrize(
@@ -332,8 +522,23 @@ def test_a_failed_queue_read_names_its_cause(
         _connect(build_network(PYRO_BONFIRE), FakeCloud(queue=[error]), tmp_path)
 
 
-def test_a_queue_without_job_attachments_cannot_cook(scene: FakeHou, tmp_path: Path) -> None:
-    """Every payload is stored in the bucket, so a queue without one is refused by name."""
-    cloud: FakeCloud = FakeCloud(queue=[{"displayName": "Render"}])
+def test_an_error_the_library_says_needs_a_login_asks_for_one(
+    scene: FakeHou, tmp_path: Path
+) -> None:
+    """Some credential providers raise their own errors, so the library's login check decides."""
+    cloud: FakeCloud = FakeCloud(queue=[RuntimeError("provider failed")], login_needed=True)
+    with pytest.raises(CookSetupError, match="login is missing or has expired"):
+        _connect(build_network(PYRO_BONFIRE), cloud, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "attachments", [{}, {"s3BucketName": "bucket-a"}, {"rootPrefix": "DeadlineCloud"}]
+)
+def test_a_queue_without_job_attachments_cannot_cook(
+    scene: FakeHou, tmp_path: Path, attachments: Dict[str, str]
+) -> None:
+    """Every payload is stored under the bucket and its prefix, so a queue missing either is refused by name."""
+    queue: Dict[str, Any] = {"displayName": "Render", "jobAttachmentSettings": attachments}
+    cloud: FakeCloud = FakeCloud(queue=[queue])
     with pytest.raises(CookSetupError, match="Render has no job attachments bucket"):
         _connect(build_network(PYRO_BONFIRE), cloud, tmp_path)

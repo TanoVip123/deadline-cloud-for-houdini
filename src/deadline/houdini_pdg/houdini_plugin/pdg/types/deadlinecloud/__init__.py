@@ -47,8 +47,11 @@ _SCHEDULE_RESULTS: Dict[ScheduleResult, Any] = {
 }
 
 
-class DeadlineCloud:
-    """The Deadline Cloud calls the composition root makes. A test replaces them by subclassing."""
+class _ClientFactory:
+    """Builds the client library's clients and sessions for a cook, and reads its settings.
+
+    A test replaces these calls by subclassing.
+    """
 
     def get_setting(self, name: str) -> str:
         """A workstation setting, such as ``defaults.farm_id``."""
@@ -131,20 +134,22 @@ class DeadlineCloudPDGScheduler(PyScheduler):
         try:
             # One host per cook, so the scene files are scanned once per cook.
             host: HoudiniPdgHost = HoudiniPdgHost(self)
-            if not static:
+            # Houdini starts a generate with static False, and says so in the cook options.
+            generate: bool = static or _is_generate(self.context)
+            if not generate:
                 # A generate submits nothing, so only a cook is checked.
                 _refuse(PreCookChecks().run(host.scheduler_node(), interactive=False))
             clock: SystemClock = SystemClock()
-            cloud: DeadlineCloud = self._cloud()
+            clients: _ClientFactory = self._clients()
             self._core = PdgScheduler(
                 host=host,
                 clock=clock,
                 read_settings=host.read_settings,
                 connect=lambda settings, cook_id: _connect(
-                    settings, cook_id, host=host, clock=clock, cloud=cloud
+                    settings, cook_id, host=host, clock=clock, clients=clients
                 ),
             )
-            return self._core.on_start_cook(static, cook_set_names(cook_set))
+            return self._core.on_start_cook(generate, cook_set_names(cook_set))
         except Exception as error:
             self._core = None
             self._start_failed = True
@@ -186,9 +191,9 @@ class DeadlineCloudPDGScheduler(PyScheduler):
         finally:
             self._remove_scratch_working_dir()
 
-    def _cloud(self) -> DeadlineCloud:
-        """The Deadline Cloud calls this scheduler makes."""
-        return DeadlineCloud()
+    def _clients(self) -> _ClientFactory:
+        """The factory for the clients this scheduler's cooks use."""
+        return _ClientFactory()
 
     def _use_scratch_working_dir(self) -> None:
         # PDG copies its job scripts into the working directory before it
@@ -216,6 +221,17 @@ class DeadlineCloudPDGScheduler(PyScheduler):
             _logger.exception("Could not show the error on the scheduler node")
 
 
+def _is_generate(context: Any) -> bool:
+    """Whether PDG's cook options say this cook only generates work items."""
+    try:
+        cook_type: Any = context.cookOptions.cookType
+    except Exception:
+        return False
+    # PDG's enum prints as ``cookType.GenerateNode``, and its ``name`` is the member alone.
+    name: str = str(getattr(cook_type, "name", "") or cook_type)
+    return name.rsplit(".", 1)[-1] == "GenerateNode"
+
+
 def _refuse(verdict: Verdict) -> None:
     """Log each refusal, then raise ``GraphRefusedError`` when there is any."""
     for refusal in verdict.refusals:
@@ -236,19 +252,19 @@ def _connect(
     *,
     host: HoudiniPdgHost,
     clock: Clock,
-    cloud: DeadlineCloud,
+    clients: _ClientFactory,
 ) -> CookServices:
     """The cook's farm services, for the workstation's farm and queue, from one ``GetQueue``."""
-    farm_id: str = cloud.get_setting("defaults.farm_id")
+    farm_id: str = clients.get_setting("defaults.farm_id")
     if not farm_id:
         raise CookSetupError(_NO_FARM)
-    queue_id: str = cloud.get_setting("defaults.queue_id")
+    queue_id: str = clients.get_setting("defaults.queue_id")
     if not queue_id:
         raise CookSetupError(_NO_QUEUE)
     # The queue gives the bucket, and its role gives the session that reaches it.
-    client, queue = _read_queue(farm_id, queue_id, cloud)
+    client, queue = _read_queue(farm_id, queue_id, clients)
     bucket, root_prefix = _job_attachments(queue, queue_id)
-    s3_client: Any = _queue_s3(client, queue, farm_id, queue_id, cloud)
+    s3_client: Any = _queue_s3(client, queue, farm_id, queue_id, clients)
     _check_bucket_listing(s3_client, bucket, root_prefix, queue.get("displayName") or queue_id)
     return CookServices(
         submitter=PdgSubmitter(
@@ -259,7 +275,7 @@ def _connect(
             # The queue was read once, here, so the submitter does not read it again.
             job_attachments=lambda _farm, _queue: (bucket, root_prefix),
             cook_id=cook_id,
-            get_setting=cloud.get_setting,
+            get_setting=clients.get_setting,
         ),
         storage=S3TaskStorage(s3_client=s3_client, bucket=bucket, root_prefix=root_prefix),
         open_job=lambda job_id, snapshot: DeadlineFarmJob(
@@ -275,29 +291,29 @@ def _connect(
             cook_id=cook_id,
             started_at=clock.now(),
             debug_level=settings.debug_level,
-            record_event=cloud.record_event(),
+            record_event=clients.record_event(),
         ),
     )
 
 
-def _read_queue(farm_id: str, queue_id: str, cloud: DeadlineCloud) -> Tuple[Any, Any]:
+def _read_queue(farm_id: str, queue_id: str, clients: _ClientFactory) -> Tuple[Any, Any]:
     """A Deadline Cloud client and the queue it reads. Raises ``CookSetupError`` naming the cause."""
     try:
-        client: Any = cloud.deadline_client()
-        return client, _get_queue(client, farm_id, queue_id, cloud)
+        client: Any = clients.deadline_client()
+        return client, _get_queue(client, farm_id, queue_id, clients)
     except Exception as e:
-        raise _queue_error(e, farm_id, queue_id, cloud) from e
+        raise _queue_error(e, farm_id, queue_id, clients) from e
 
 
-def _queue_s3(client: Any, queue: Any, farm_id: str, queue_id: str, cloud: DeadlineCloud) -> Any:
+def _queue_s3(client: Any, queue: Any, farm_id: str, queue_id: str, clients: _ClientFactory) -> Any:
     """An S3 client with the queue role's credentials. Raises ``CookSetupError`` naming the cause."""
     try:
-        session: Any = cloud.queue_session(
+        session: Any = clients.queue_session(
             client, farm_id, queue_id, str(queue.get("displayName") or "")
         )
         return session.client("s3")
     except Exception as e:
-        raise _queue_error(e, farm_id, queue_id, cloud) from e
+        raise _queue_error(e, farm_id, queue_id, clients) from e
 
 
 def _check_bucket_listing(s3_client: Any, bucket: str, root_prefix: str, queue: str) -> None:
@@ -378,7 +394,7 @@ _LOGIN_ERRORS: Tuple[str, ...] = (
 _LOGIN_RETRY_DELAYS: Tuple[float, ...] = (2.0, 4.0, 8.0, 16.0)
 
 
-def _get_queue(client: Any, farm_id: str, queue_id: str, cloud: DeadlineCloud) -> Any:
+def _get_queue(client: Any, farm_id: str, queue_id: str, clients: _ClientFactory) -> Any:
     """The queue, retried while the login is expired, so a renewal in progress can finish."""
     for delay in _LOGIN_RETRY_DELAYS:
         try:
@@ -387,7 +403,7 @@ def _get_queue(client: Any, farm_id: str, queue_id: str, cloud: DeadlineCloud) -
             if not {type(e).__name__, _error_code(e)} & set(_LOGIN_ERRORS):
                 raise
             _logger.info("The login was refused (%s); retrying in %s s", e, delay)
-            cloud.sleep(delay)
+            clients.sleep(delay)
     return client.get_queue(farmId=farm_id, queueId=queue_id)
 
 
@@ -400,7 +416,7 @@ def _error_code(error: Exception) -> str:
 
 
 def _queue_error(
-    error: Exception, farm_id: str, queue_id: str, cloud: DeadlineCloud
+    error: Exception, farm_id: str, queue_id: str, clients: _ClientFactory
 ) -> CookSetupError:
     """The setup error for a failed queue read, with the remedy for its cause."""
     # Match the error by its class name and its service code, from the most specific cause.
@@ -422,7 +438,7 @@ def _queue_error(
             "node's Deadline Cloud settings."
         )
     # Some credential providers raise their own errors, so ask the library.
-    if cloud.needs_login():
+    if clients.needs_login():
         return login
     return CookSetupError(f"Cannot read queue {queue_id} on farm {farm_id}: {error}")
 

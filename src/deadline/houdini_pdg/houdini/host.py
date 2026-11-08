@@ -246,14 +246,15 @@ class HoudiniPdgHost:
         return self.on_main_thread(lambda: read_scheduler_settings(node))
 
     def _on_node_generated(self, _handler: Any, event: Any) -> None:
-        # Record the node PDG says finished generating.
+        """Record the node PDG says finished generating."""
         name: str = _name(_attr(event, "node"))
         if name:
             with self._generation_lock:
                 self._generated.add(name)
 
     def _read_graph(self, dependency_graph: Any) -> Sequence[NodeInfo]:
-        # The nodes and their items, with an override naming this scheduler cleared.
+        """The nodes and their items, with an override naming this scheduler cleared."""
+        # Keep only the items in this cook, because the others are an earlier cook's.
         context: Any = self._scheduler.context
         graph_nodes: List[Any] = _graph_nodes(context)
         infos: Tuple[NodeInfo, ...] = readers.node_infos(
@@ -265,7 +266,7 @@ class HoudiniPdgHost:
         return _own_overrides_cleared(infos, graph_nodes, self._own_names())
 
     def _own_names(self) -> FrozenSet[str]:
-        # Every name an override may use for this scheduler.
+        """Every name an override may use for this scheduler."""
         names: Set[str] = {_name(self._scheduler)}
         try:
             names |= _names_of(self.scheduler_node())
@@ -315,11 +316,6 @@ def cook_set_names(cook_set: Any) -> Optional[FrozenSet[str]]:
         return None
     # An empty set would leave every node out, which is not what PDG asked.
     return names or None
-
-
-def find_scheduler_node(scheduler: Any) -> Any:
-    """The TOP node of ``scheduler``, read on the main thread. Raises ``CookSetupError`` when there is none."""
-    return on_main_thread(lambda: _scheduler_node(scheduler))
 
 
 def _clear_outputs(item: WorkItemHandle) -> None:
@@ -519,26 +515,43 @@ def _own_overrides_cleared(
 ) -> Tuple[NodeInfo, ...]:
     """Clear an override that names this scheduler, because it changes nothing.
 
-    The parm holds a path as authored, often relative, so PDG's own answer for
-    the node's scheduler decides when it can be read.
+    The override is resolved on the node itself, because PDG keeps a node's old
+    scheduler until the next cook. PDG's answer is used only when that fails.
     """
     own_names: Set[str] = set(own)
-    # PDG's resolved scheduler for each node, by node name.
+    # Per node name: the node the override names, by path, and PDG's resolved scheduler.
+    authored: Dict[str, str] = {}
     resolved: Dict[str, str] = {}
     for node in graph_nodes:
         name: str = _name(node)
+        if not name:
+            continue
+        hom: Any = _call(node, "topNode")
+        target: str = _path_of(_call(hom, "node", readers._scheduler_override(hom)))
+        if target:
+            authored[name] = target
         scheduler: str = _name(_attr(node, "scheduler"))
-        if name and scheduler:
+        if scheduler:
             resolved[name] = scheduler
     return tuple(
         (
             dataclasses.replace(info, scheduler_override="")
             if info.scheduler_override
-            and (info.scheduler_override in own_names or resolved.get(info.name) in own_names)
+            and _names_own(info, authored.get(info.name), resolved.get(info.name), own_names)
             else info
         )
         for info in infos
     )
+
+
+def _names_own(
+    info: NodeInfo, authored: Optional[str], resolved: Optional[str], own_names: Set[str]
+) -> bool:
+    """Whether the node's override names this scheduler."""
+    # A node the override resolves to decides. Otherwise its text or PDG's answer does.
+    if authored:
+        return authored in own_names
+    return info.scheduler_override in own_names or resolved in own_names
 
 
 def _is_step(node: Any) -> bool:

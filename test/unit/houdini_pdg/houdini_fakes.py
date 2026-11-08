@@ -240,6 +240,10 @@ class FakeNode:
         self._parms[name] = parm
         return parm
 
+    def remove_parm(self, name: str) -> None:
+        """Remove a parm, as on a node type that has no such parm."""
+        self._parms.pop(name, None)
+
     def spareParms(self) -> List[FakeParm]:
         return list(self.spare)
 
@@ -252,8 +256,36 @@ class FakeNode:
         )
 
     def node(self, ref: str) -> Any:
-        # A child by name, or any child by its absolute path.
-        return next((c for c in self._children if ref in (c.name(), c.path())), None)
+        """The node ``ref`` names, absolute from the root or relative to this node, or None."""
+        if not ref:
+            return None
+        if not ref.startswith("/"):
+            return self._walk(ref.split("/"))
+        # The fake's root is ``/obj``, so an absolute path starts with its name.
+        root: FakeNode = self._root()
+        parts: List[str] = ref.split("/")
+        return root._walk(parts[2:]) if parts[1:2] == [root.name()] else None
+
+    def _root(self) -> "FakeNode":
+        """The node at the top of this node's parents."""
+        return self if self._parent is None else self._parent._root()
+
+    def _walk(self, parts: List[str]) -> Optional["FakeNode"]:
+        """Follow ``parts`` from this node, where ``..`` is the parent, as Houdini does."""
+        if not parts:
+            return self
+        # Take one step: stay, go up, or go to the child of that name.
+        head: str = parts[0]
+        step: Optional[FakeNode] = (
+            self
+            if head in ("", ".")
+            else (
+                self._parent
+                if head == ".."
+                else next((c for c in self._children if c.name() == head), None)
+            )
+        )
+        return step._walk(parts[1:]) if step is not None else None
 
     def displayNode(self) -> Optional["FakeNode"]:
         return self.display
@@ -433,6 +465,10 @@ class FakeContext:
     cookSet: Any = None
     handlers: List[Tuple[Any, Any]] = field(default_factory=list)
     items: Dict[int, Any] = field(default_factory=dict)
+    #: PDG's cook options. Houdini prints the cook type as ``cookType.Node`` for a cook.
+    cookOptions: Any = field(
+        default_factory=lambda: types.SimpleNamespace(cookType="cookType.Node")
+    )
 
     @property
     def graph(self) -> Any:
