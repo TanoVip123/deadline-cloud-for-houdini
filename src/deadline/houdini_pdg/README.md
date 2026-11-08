@@ -34,7 +34,7 @@ The installer does not register the scheduler, so it does not appear in anyone's
    }
    ```
 
-   `hpath` makes Houdini find the scheduler type and its HDA. `PYTHONPATH` makes `deadline.houdini_pdg` importable inside Houdini. The node's buttons use the Deadline Cloud ROP's code. They use the installed ROP submitter when there is one, and the copy in this repository otherwise.
+   `hpath` makes Houdini find the scheduler type and its HDA. `PYTHONPATH` makes `deadline.houdini_pdg` importable inside Houdini. The node's buttons use the Deadline Cloud ROP's code, so the ROP submitter must be installed too.
 
 3. Restart Houdini. In a TOP network, open the Tab menu and check that **Deadline Cloud Scheduler (Experimental)** appears under Schedulers.
 

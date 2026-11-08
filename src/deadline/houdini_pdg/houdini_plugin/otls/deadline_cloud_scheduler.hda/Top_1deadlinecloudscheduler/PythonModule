@@ -1,59 +1,20 @@
 """Button callbacks of the Deadline Cloud scheduler node."""
 
-import logging
-from types import ModuleType
-from typing import Any, Dict, Optional, Tuple
 
-_logger: logging.Logger = logging.getLogger("deadline.houdini_pdg")
-
-#: Where the ROP's submitter module is found: the ROP's own install, then this package.
-_ROP_MODULES: Tuple[str, ...] = (
-    "deadline_cloud_for_houdini.submitter",
-    "deadline.houdini_submitter.python.deadline_cloud_for_houdini.submitter",
-)
-
-
-def _rop_submitter() -> Optional[ModuleType]:
-    """The ROP's submitter module, or None when neither install has it."""
-    import importlib
-
-    # Prefer the ROP's install, so both nodes share one module. This package carries it too.
-    for name in _ROP_MODULES:
-        try:
-            return importlib.import_module(name)
-        except ImportError:
-            _logger.debug("Could not import %s", name, exc_info=True)
-    return None
-
-
-def callback(kwargs: Dict[str, Any]) -> None:
+def callback(kwargs):
     """Submit runs the scheduler's own flow. Every other button is the ROP's."""
     if kwargs["parm"].name() == "submit":
         from deadline.houdini_pdg.houdini.host import submit
 
         submit(kwargs["node"])
         return
-    rop: Optional[ModuleType] = _rop_submitter()
-    if rop is None:
-        import hou
+    from deadline_cloud_for_houdini.submitter import callback as rop_callback
 
-        hou.ui.displayMessage(
-            "This button needs the Deadline Cloud submitter for Houdini, which isn't installed.",
-            title="Deadline Cloud",
-        )
-        return
-    rop.callback(kwargs)
+    rop_callback(kwargs)
 
 
-def update_queue_parameters_callback(kwargs: Dict[str, Any]) -> None:
+def update_queue_parameters_callback(kwargs):
     """Show the default farm and queue, and rebuild the queue parameters, as the ROP does."""
-    rop: Optional[ModuleType] = _rop_submitter()
-    if rop is None:
-        # A missing submitter must not stop the node from being created or loaded.
-        _logger.warning(
-            "The Deadline Cloud submitter for Houdini isn't installed, so the farm, queue "
-            "and queue parameters on %s were not updated.",
-            kwargs["node"].path(),
-        )
-        return
-    rop.update_queue_parameters_callback(kwargs)
+    from deadline_cloud_for_houdini.submitter import update_queue_parameters_callback as rop
+
+    rop(kwargs)
