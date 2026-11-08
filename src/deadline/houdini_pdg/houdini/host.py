@@ -527,7 +527,7 @@ def _own_overrides_cleared(
         if not name:
             continue
         hom: Any = _call(node, "topNode")
-        target: str = _path_of(_call(hom, "node", readers._scheduler_override(hom)))
+        target: str = _override_target(hom)
         if target:
             authored[name] = target
         scheduler: str = _name(_attr(node, "scheduler"))
@@ -542,6 +542,14 @@ def _own_overrides_cleared(
         )
         for info in infos
     )
+
+
+def _override_target(hom: Any) -> str:
+    """The path of the node a step's override names, or ``""`` when it names none."""
+    value: str = readers._scheduler_override(hom)
+    # A path is relative to the step, so a bare name finds a sibling only from the network.
+    target: str = _path_of(_call(hom, "node", value))
+    return target or _path_of(_call(_call(hom, "parent"), "node", value))
 
 
 def _names_own(

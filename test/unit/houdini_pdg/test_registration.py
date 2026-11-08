@@ -8,6 +8,7 @@ import importlib.util
 import logging
 import os
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -529,6 +530,105 @@ def test_an_error_the_library_says_needs_a_login_asks_for_one(
     cloud: FakeCloud = FakeCloud(queue=[RuntimeError("provider failed")], login_needed=True)
     with pytest.raises(CookSetupError, match="login is missing or has expired"):
         _connect(build_network(PYRO_BONFIRE), cloud, tmp_path)
+
+
+@pytest.fixture
+def library(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, request: Any) -> None:
+    """The real client library with its own config file and a made-up key, so nothing reads this machine."""
+    from deadline.client.api._session import invalidate_boto3_session_cache
+
+    # Every file the library or boto3 reads is under tmp_path, and the key works only offline.
+    monkeypatch.setenv("DEADLINE_CONFIG_FILE_PATH", str(tmp_path / "deadline" / "config"))
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "aws" / "config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "aws" / "credentials"))
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDWORKSTATION")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "workstation-secret")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-west-2")
+    for name in ("AWS_PROFILE", "AWS_SESSION_TOKEN", "AWS_REGION"):
+        monkeypatch.delenv(name, raising=False)
+    # The library caches its sessions, so each test starts and ends with none.
+    invalidate_boto3_session_cache()
+    request.addfinalizer(invalidate_boto3_session_cache)
+
+
+def test_the_factory_reads_a_workstation_setting_and_an_unset_one_as_empty(library: None) -> None:
+    """An unset farm ID must read as empty, or the cook can't tell the artist to set it."""
+    from deadline.client import config
+
+    config.set_setting("defaults.farm_id", "farm-1")
+    clients: Any = REGISTRATION._ClientFactory()
+    assert clients.get_setting("defaults.farm_id") == "farm-1"
+    assert clients.get_setting("defaults.queue_id") == ""
+    # A library that answers None for an unset value reads as empty too.
+    clients.config = types.SimpleNamespace(get_setting=lambda name: None)
+    assert clients.get_setting("defaults.farm_id") == ""
+
+
+def test_the_factory_builds_a_deadline_client_and_a_queue_session_from_the_library(
+    library: None,
+) -> None:
+    """Without these the cook can't read the queue, and its uploads would use the artist's own role."""
+    from botocore.stub import Stubber
+
+    clients: Any = REGISTRATION._ClientFactory()
+    client: Any = clients.deadline_client()
+    assert client.meta.service_model.service_name == "deadline"
+    # The session's credentials come from the queue role that this client assumes for this queue.
+    expires: datetime = datetime(2099, 1, 1, tzinfo=timezone.utc)
+    stub: Stubber = Stubber(client)
+    stub.add_response(
+        "assume_queue_role_for_user",
+        {
+            "credentials": {
+                "accessKeyId": "AKIDQUEUE",
+                "secretAccessKey": "queue-secret",
+                "sessionToken": "queue-token",
+                "expiration": expires,
+            }
+        },
+        {"farmId": "farm-1", "queueId": "queue-1"},
+    )
+    with stub:
+        session: Any = clients.queue_session(client, "farm-1", "queue-1", "Render")
+        assert session.get_credentials().get_frozen_credentials().access_key == "AKIDQUEUE"
+    stub.assert_no_pending_responses()
+
+
+class _AuthCheck:
+    """The library's ``api`` as the login check sees it: the real status enum and a fixed answer."""
+
+    def __init__(self, answer: Any) -> None:
+        from deadline.client import api
+
+        self.AwsAuthenticationStatus: Any = api.AwsAuthenticationStatus
+        self.answer: Any = answer
+
+    def check_authentication_status(self) -> Any:
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+def _statuses() -> List[Any]:
+    """Every status the client library's login check can give."""
+    from deadline.client import api
+
+    return list(api.AwsAuthenticationStatus)
+
+
+@pytest.mark.parametrize("status", _statuses(), ids=lambda status: status.name)
+def test_only_a_status_that_needs_a_login_asks_the_artist_to_log_in(status: Any) -> None:
+    """Asking for a login on any other status sends an artist with a working login the wrong way."""
+    clients: Any = REGISTRATION._ClientFactory()
+    clients.api = _AuthCheck(status)
+    assert clients.needs_login() is (status.name == "NEEDS_LOGIN")
+
+
+def test_a_login_check_that_fails_does_not_ask_for_a_login() -> None:
+    """A failed check shows nothing about the login, so the queue error is reported as it is."""
+    clients: Any = REGISTRATION._ClientFactory()
+    clients.api = _AuthCheck(RuntimeError("no network"))
+    assert clients.needs_login() is False
 
 
 @pytest.mark.parametrize(

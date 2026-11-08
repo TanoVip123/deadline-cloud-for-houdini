@@ -25,6 +25,8 @@ import uuid
 from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 import pdg  # type: ignore[import-not-found]
+from deadline.client import api as deadline_api
+from deadline.client import config as deadline_config
 from pdg.scheduler import PyScheduler  # type: ignore[import-not-found]
 
 from deadline.houdini_pdg.cook import CookServices, PdgScheduler, ScheduleResult, SystemClock
@@ -50,47 +52,41 @@ _SCHEDULE_RESULTS: Dict[ScheduleResult, Any] = {
 class _ClientFactory:
     """Builds the client library's clients and sessions for a cook, and reads its settings.
 
-    A test replaces these calls by subclassing.
+    A test replaces these calls by subclassing, or replaces ``api`` with a stand-in.
     """
+
+    #: The client library's ``api`` and ``config`` modules, which every call here goes through.
+    api: Any = deadline_api
+    config: Any = deadline_config
 
     def get_setting(self, name: str) -> str:
         """A workstation setting, such as ``defaults.farm_id``."""
-        from deadline.client.config import get_setting
-
-        return str(get_setting(name) or "")
+        return str(self.config.get_setting(name) or "")
 
     def deadline_client(self) -> Any:
         """A Deadline Cloud client with the workstation's login."""
-        from deadline.client import api
-
-        return api.get_boto3_client("deadline")
+        return self.api.get_boto3_client("deadline")
 
     def queue_session(self, client: Any, farm_id: str, queue_id: str, display_name: str) -> Any:
         """A boto3 session with the queue role's credentials."""
-        from deadline.client import api
-
-        return api.get_queue_user_boto3_session(
+        return self.api.get_queue_user_boto3_session(
             deadline=client, farm_id=farm_id, queue_id=queue_id, queue_display_name=display_name
         )
 
     def needs_login(self) -> bool:
         """Whether the client library says the workstation must log in again."""
-        from deadline.client import api
-
+        # A failed check can't show that a login would help, so it asks for none.
         try:
-            return bool(
-                api.check_authentication_status() == api.AwsAuthenticationStatus.NEEDS_LOGIN
-            )
+            status: Any = self.api.check_authentication_status()
+            return bool(status == self.api.AwsAuthenticationStatus.NEEDS_LOGIN)
         except Exception:
             return False
 
     def record_event(self) -> Callable[[str, Dict[str, Any]], Any]:
         """The telemetry client's ``record_event``, which honors the workstation's opt-out."""
-        from deadline.client import api
-
         try:
             record: Callable[[str, Dict[str, Any]], Any] = (
-                api.get_deadline_cloud_library_telemetry_client().record_event
+                self.api.get_deadline_cloud_library_telemetry_client().record_event
             )
             return record
         except Exception:
