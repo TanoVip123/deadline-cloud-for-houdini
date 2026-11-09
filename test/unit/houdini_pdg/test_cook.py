@@ -2168,7 +2168,7 @@ def test_a_graph_that_cannot_be_read_at_the_end_closes_the_cook_quietly(
     h.events.faults["read_graph"] = RuntimeError("context gone")
     with caplog.at_level(logging.WARNING, logger=PACKAGE_LOGGER):
         assert h.scheduler.on_stop_cook(False)
-    assert "Could not read which work items PDG cooked from cache" in caplog.text
+    assert _traceback_logged(caplog, "Could not read which work items PDG cooked from cache.")
     assert h.summary().refusals == () and h.scheduler._cook is None
 
 
