@@ -1,3 +1,5 @@
+# Dialog script for deadlinecloudscheduler automatically generated
+
 {
     name	deadlinecloudscheduler
     script	deadlinecloudscheduler
@@ -5,5 +7,195 @@
 
     help {
 	""
+    }
+
+    group {
+        name    "job_settings"
+        label   "Shared Job Settings"
+
+        groupsimple {
+            name    "folder0"
+            label   "Job Properties"
+
+            parm {
+                name    "name"
+                label   "Name"
+                type    string
+                default { "$HIPNAME" }
+                parmtag { "script_callback_language" "python" }
+                help    "The job's name. Shown in the Deadline Monitor."
+            }
+            parm {
+                name    "description"
+                label   "Description"
+                type    string
+                default { "" }
+                parmtag { "script_callback_language" "python" }
+                help    "The job's description. Included in the job template."
+            }
+            parm {
+                name    "priority"
+                label   "Priority"
+                type    integer
+                default { "50" }
+                range   { 1 100 }
+                parmtag { "script_callback_language" "python" }
+                help    "The job's scheduling priority. The numerically largest priority is scheduled first. See the AWS Deadline Cloud job scheduling documentation for more details."
+            }
+            parm {
+                name    "failed_tasks_limit"
+                label   "Failed Tasks Limit"
+                type    integer
+                default { "20" }
+                range   { 0 200 }
+                parmtag { "script_callback_language" "python" }
+                help    "The number of task failures before the job stops running and is marked as FAILED."
+            }
+            parm {
+                name    "task_retry_limit"
+                label   "Task Retry Limit"
+                type    integer
+                default { "5" }
+                range   { 0 10 }
+                parmtag { "script_callback_language" "python" }
+                help    "The maximum number of retries for each task."
+            }
+            parm {
+                name    "max_worker_count"
+                label   "Max Worker Count"
+                type    integer
+                default { "0" }
+                range   { 0! 100 }
+                parmtag { "script_callback_language" "python" }
+                help    "The maximum number of workers that run the job's tasks at the same time. 0 sets no limit."
+            }
+        }
+
+        groupsimple {
+            name    "folder1"
+            label   "Deadline Cloud Settings"
+
+            parm {
+                name    "farm"
+                label   "Farm"
+                type    label
+                default { "<unknown>" }
+            }
+            parm {
+                name    "queue"
+                label   "Queue"
+                type    label
+                default { "<unknown>" }
+            }
+            parm {
+                name    "login"
+                label   "Login"
+                type    button
+                joinnext
+                default { "0" }
+                parmtag { "script_callback" "hou.phm().callback(kwargs)" }
+                parmtag { "script_callback_language" "python" }
+                help    "Log in to AWS Deadline Cloud and authenticate for job submission."
+            }
+            parm {
+                name    "logout"
+                label   "Logout"
+                type    button
+                joinnext
+                default { "0" }
+                parmtag { "script_callback" "hou.phm().callback(kwargs)" }
+                parmtag { "script_callback_language" "python" }
+                help    "Log out of AWS Deadline Cloud."
+            }
+            parm {
+                name    "settings"
+                label   "Settings"
+                type    button
+                joinnext
+                default { "0" }
+                parmtag { "script_callback" "hou.phm().callback(kwargs)" }
+                parmtag { "script_callback_language" "python" }
+                help    "Update the AWS Deadline Cloud workstation configuration shared by all tools."
+            }
+            parm {
+                name    "update_queue_parameters"
+                label   "Update Queue Parameters"
+                type    button
+                default { "0" }
+                parmtag { "script_callback" "hou.phm().callback(kwargs)" }
+                parmtag { "script_callback_language" "python" }
+                help    "Show the default farm and queue, and refresh the queue's parameters below."
+            }
+        }
+
+    }
+
+    group {
+        name    "job_settings_1"
+        label   "PDG"
+
+        parm {
+            name    "working_dir"
+            label   "Working Directory"
+            type    directory
+            default { "$HIP" }
+            parmtag { "script_callback_language" "python" }
+            help    "The cook's working directory on this workstation. PDG writes its job scripts and outputs below it, and each step receives it through job attachments."
+        }
+        parm {
+            name    "debug_level"
+            label   "Debug Level"
+            type    ordinal
+            default { "0" }
+            menu {
+                "0" "Standard"
+                "1" "Graph dump and item details"
+            }
+            parmtag { "script_callback_language" "python" }
+            help    "How much the cook writes to its log directory. The second level adds a dump of the graph and the details of each work item."
+        }
+        parm {
+            name    "validate_graph"
+            label   "Validate Graph"
+            type    toggle
+            default { "1" }
+            parmtag { "script_callback_language" "python" }
+            help    "Refuse a graph this scheduler cannot cook correctly before anything is submitted. When off, each refusal is a warning and the cook goes ahead."
+        }
+        parm {
+            name    "auto_save_hip"
+            label   "Automatically save scene (.hip) file"
+            type    toggle
+            default { "0" }
+            parmtag { "script_callback_language" "python" }
+            help    "Save the scene (.hip) file without asking when you click Submit with unsaved changes."
+        }
+        parm {
+            name    "include_adaptor_wheels"
+            label   "Include Adaptor Wheels"
+            type    toggle
+            default { "0" }
+            parmtag { "script_callback_language" "python" }
+            help    "Adaptor wheels are custom builds of the adaptor that change rendering behavior."
+        }
+        parm {
+            name    "adaptor_wheels"
+            label   "Adaptor Wheels"
+            type    directory
+            default { "" }
+            disablewhen "{ include_adaptor_wheels == 0 }"
+            parmtag { "script_callback_language" "python" }
+            help    "The directory for adaptor wheels."
+        }
+    }
+
+    parm {
+        name    "submit"
+        label   "Submit"
+        type    button
+        default { "0" }
+        parmtag { "script_callback" "hou.phm().callback(kwargs)" }
+        parmtag { "script_callback_language" "python" }
+        help    "Check the scene, confirm the job, and cook the TOP network's display node as one AWS Deadline Cloud job."
     }
 }

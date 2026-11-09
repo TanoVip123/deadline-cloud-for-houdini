@@ -745,6 +745,137 @@ def test_a_node_with_no_item_in_the_cook_is_outside_it() -> None:
     assert unknown_set["render"].in_cook_set is None
 
 
+def test_an_item_pdg_cooked_from_cache_is_dropped_but_recorded() -> None:
+    """A cached item never reaches the farm, so the node keeps a record of it for validation to refuse."""
+    # One cached item and one queued item on the same step.
+    nodes: List[_PdgNode] = _pyro_like()
+    cached: _WorkItem = _WorkItem(
+        nodes[1], 0, state=_Enum("workItemState.CookedCache"), outputs=[_File("$HIP/geo/c.0.bgeo")]
+    )
+    items: Dict[Any, List[Any]] = {
+        cached: [],
+        _WorkItem(nodes[1], 1, state=_Enum("workItemState.Waiting")): [],
+        _WorkItem(nodes[1], 2, state=_Enum("workItemState.CookedSuccess")): [],
+    }
+    infos: Dict[str, NodeInfo] = _by_name(
+        node_infos(nodes, (items, {}, []), only_items_in_cook=True)
+    )
+    assert [i.name for i in infos["cache"].items] == ["cache_1"]
+    assert [i.name for i in infos["cache"].cached_items] == ["cache_0"]
+    assert infos["cache"].cached_items[0].declared_outputs[0].path == "$HIP/geo/c.0.bgeo"
+    # Outside a cook nothing is dropped, so nothing is recorded as cached.
+    outside: Dict[str, NodeInfo] = _by_name(node_infos(nodes, (items, {}, [])))
+    assert outside["cache"].cached_items == ()
+
+
+def _cached(node: _PdgNode, index: int) -> _WorkItem:
+    """An item of ``node`` that PDG cooked from cache."""
+    return _WorkItem(node, index, state=_Enum("workItemState.CookedCache"))
+
+
+def test_items_from_cache_are_recorded_only_on_a_node_the_cook_set_names() -> None:
+    """Cooking render alone must not be refused for a cache an earlier cook left above it.
+
+    Houdini's cook set names every node a cook touches, so a node it leaves out
+    holds an earlier cook's states. A node whose every item came from cache stays
+    outside the cook either way, because it has no item to offer.
+    """
+    # The cache's only item came from cache, and render is scheduled.
+    nodes: List[_PdgNode] = _pyro_like()
+    items: Dict[Any, List[Any]] = {
+        _cached(nodes[1], 0): [],
+        _WorkItem(nodes[3], 0, state=_Enum("workItemState.Scheduled")): [],
+    }
+    named: Dict[str, NodeInfo] = _by_name(
+        node_infos(nodes, (items, {}, []), ["cache", "render"], only_items_in_cook=True)
+    )
+    assert [i.name for i in named["cache"].cached_items] == ["cache_0"]
+    assert named["cache"].in_cook_set is False
+    # The same graph when the cook set names only render.
+    render_only: Dict[str, NodeInfo] = _by_name(
+        node_infos(nodes, (items, {}, []), ["render"], only_items_in_cook=True)
+    )
+    assert render_only["cache"].cached_items == ()
+    assert render_only["cache"].in_cook_set is False
+
+
+def test_every_step_cooked_from_cache_keeps_its_items_when_the_cook_set_names_it() -> None:
+    """When PDG took every item from files, only the cook set says which steps the cook was for."""
+    # Both steps' items came from cache, and the cook set names both, as Houdini's does.
+    nodes: List[_PdgNode] = _pyro_like()
+    items: Dict[Any, List[Any]] = {_cached(nodes[1], 0): [], _cached(nodes[3], 0): []}
+    infos: Dict[str, NodeInfo] = _by_name(
+        node_infos(nodes, (items, {}, []), ["cache", "render"], only_items_in_cook=True)
+    )
+    assert [i.name for i in infos["cache"].cached_items] == ["cache_0"]
+    assert [i.name for i in infos["render"].cached_items] == ["render_0"]
+    assert (infos["cache"].in_cook_set, infos["render"].in_cook_set) == (False, False)
+
+
+def test_items_from_cache_are_kept_on_a_node_with_items_left_or_when_the_set_is_unknown() -> None:
+    """A node with items to offer is in the cook, so its cached items would be missing from the job.
+
+    With no cook set the read can't tell, so it keeps them and validation refuses.
+    """
+    # The cache has one cached item and one scheduled item, and the set names only render.
+    nodes: List[_PdgNode] = _pyro_like()
+    items: Dict[Any, List[Any]] = {
+        _cached(nodes[1], 0): [],
+        _WorkItem(nodes[1], 1, state=_Enum("workItemState.Scheduled")): [],
+        _cached(nodes[3], 0): [],
+    }
+    infos: Dict[str, NodeInfo] = _by_name(
+        node_infos(nodes, (items, {}, []), ["render"], only_items_in_cook=True)
+    )
+    assert [i.name for i in infos["cache"].cached_items] == ["cache_0"]
+    unknown: Dict[str, NodeInfo] = _by_name(
+        node_infos(nodes, (items, {}, []), None, only_items_in_cook=True)
+    )
+    assert [i.name for i in unknown["render"].cached_items] == ["render_0"]
+
+
+def test_a_cached_items_file_is_read_from_its_results() -> None:
+    """PDG keeps the file it found for a cached item in ``outputFiles``, so the refusal can name it.
+
+    An item with no results falls back to its expected outputs. An item that isn't
+    cached always uses its expected outputs.
+    """
+    # One cached item with only results, one with both, one with only expected outputs.
+    nodes: List[_PdgNode] = _pyro_like()
+    cached: Any = _Enum("workItemState.CookedCache")
+    only_results: _WorkItem = _WorkItem(
+        nodes[1], 0, state=cached, outputFiles=[_File("$HIP/geo/found.0.bgeo")]
+    )
+    both: _WorkItem = _WorkItem(
+        nodes[1],
+        1,
+        state=cached,
+        outputFiles=[_File("$HIP/geo/found.1.bgeo")],
+        outputs=[_File("$HIP/geo/expected.1.bgeo")],
+    )
+    expected_only: _WorkItem = _WorkItem(
+        nodes[1], 2, state=cached, outputs=[_File("$HIP/geo/expected.2.bgeo")]
+    )
+    # A scheduled item with an earlier result still uses its expected outputs.
+    scheduled: _WorkItem = _WorkItem(
+        nodes[1],
+        3,
+        state=_Enum("workItemState.Scheduled"),
+        outputFiles=[_File("$HIP/geo/old.3.bgeo")],
+        outputs=[_File("$HIP/geo/expected.3.bgeo")],
+    )
+    graph: Dict[Any, List[Any]] = {only_results: [], both: [], expected_only: [], scheduled: []}
+    cache: NodeInfo = _by_name(
+        node_infos(nodes, (graph, {}, []), ["cache"], only_items_in_cook=True)
+    )["cache"]
+    assert [[d.path for d in i.declared_outputs] for i in cache.cached_items] == [
+        ["$HIP/geo/found.0.bgeo"],
+        ["$HIP/geo/found.1.bgeo"],
+        ["$HIP/geo/expected.2.bgeo"],
+    ]
+    assert [d.path for d in cache.items[0].declared_outputs] == ["$HIP/geo/expected.3.bgeo"]
+
+
 def test_an_item_whose_state_is_unknown_or_unreadable_is_kept() -> None:
     """An item with no state, a new state, or a blank one is kept: only known states drop items."""
     # No state, a state PDG may add later, and a blank one.
@@ -1746,4 +1877,27 @@ def test_a_node_inside_a_locked_asset_is_marked() -> None:
         True,
         False,
         False,
+    ]
+
+
+def test_filepath_is_a_write_on_a_text_output_node_and_a_read_elsewhere() -> None:
+    """The scene walk flags ``filepath`` as a write on Text Output and as a read on Geometry Import."""
+    # Geometry Import reads an upstream file with the same parm name, so the name
+    # alone must not make it a write.
+    writer: _Hom = _Hom(
+        "/obj/topnet1/textoutput1",
+        category="Top",
+        type_name="textoutput",
+        parms=[_file("filepath", "/proj/mid/log.txt")],
+    )
+    reader: _Hom = _Hom(
+        "/obj/topnet1/geometryimport1",
+        category="Top",
+        type_name="geometryimport",
+        parms=[_file("filepath", "/proj/geo/a.bgeo.sc")],
+    )
+    result: SceneReads = collect_scene_reads({"textoutput1": writer, "geometryimport1": reader})
+    assert [(r.step, r.is_output) for r in result.reads] == [
+        ("geometryimport1", False),
+        ("textoutput1", True),
     ]

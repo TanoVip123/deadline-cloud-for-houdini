@@ -18,13 +18,21 @@ from enum import Enum
 from types import ModuleType
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from .graph import PDG_DIR_TOKEN, PDG_TOKEN_PREFIX, GraphSnapshot, NodeInfo, WorkItemSpec
+from .graph import (
+    PDG_DIR_TOKEN,
+    PDG_TOKEN_PREFIX,
+    GraphSnapshot,
+    NodeInfo,
+    RawItem,
+    WorkItemSpec,
+)
 from .scene_reads import (
     AttributeVariableUse,
     ReadReport,
     ReadVerdict,
     SceneRead,
     _depends_on_work_item,
+    reads_opening,
 )
 
 _logger: logging.Logger = logging.getLogger(__name__)
@@ -37,6 +45,9 @@ class RefusalScenario(Enum):
     #: An in-process node that writes files a step reads, or reads files a step
     #: writes. Neither reaches the other side without a shared filesystem.
     IN_PROCESS_NODE = "in_process_node"
+    #: A step set to cook In-Process. PDG cooks its items on this machine and
+    #: never offers them to the scheduler, so its tasks would never run.
+    IN_PROCESS_STEP = "in_process_step"
     RUNTIME_FILE_UNPRODUCED = "runtime_file_unproduced"
     ROP_BATCH = "rop_batch"
     MULTIPLE_SCHEDULERS = "multiple_schedulers"
@@ -515,8 +526,16 @@ def _check_steps_without_items(ctx: ValidationContext) -> Verdict:
     set is incomplete.
     """
     by_name: Dict[str, NodeInfo] = {node.name: node for node in ctx.nodes}
-    dynamic: Set[str] = {node.name for node in ctx.nodes if node.is_dynamic}
-    dropped: List[str] = [name for name in ctx.snapshot.steps_without_items if name not in dynamic]
+    # A dynamic node, an In-Process step and a step PDG cooked from cache have no
+    # items for a reason another check names, so each gets one message there.
+    explained: Set[str] = {
+        node.name
+        for node in ctx.nodes
+        if node.is_dynamic or _is_in_process_step(node) or node.cached_items
+    }
+    dropped: List[str] = [
+        name for name in ctx.snapshot.steps_without_items if name not in explained
+    ]
 
     def requested(name: str) -> bool:
         # A dropped node is a race only when the cook asked for it. Unknown means
@@ -549,9 +568,9 @@ def _check_steps_without_items(ctx: ValidationContext) -> Verdict:
         missing: Tuple[str, ...] = tuple(
             name
             for name in ctx.snapshot.dependencies_on_dropped.get(step.name, ())
-            if name not in dynamic
+            if name not in explained
         )
-        if not missing or step.name in dynamic:
+        if not missing or step.name in explained:
             continue
         refusals.append(
             Refusal(
@@ -587,6 +606,35 @@ def _check_steps_without_items(ctx: ValidationContext) -> Verdict:
 
 
 # -- the node's kind ----------------------------------------------------------
+
+
+def _is_in_process_step(node: NodeInfo) -> bool:
+    """Whether a node runs a job script but is set to cook In-Process."""
+    return bool(node.is_schedulable) and node.cook_type == _IN_PROCESS
+
+
+def _check_in_process_steps(ctx: ValidationContext) -> Verdict:
+    """Refuse a step whose cook type is In-Process.
+
+    PDG cooks its items in this Houdini session and never offers them to the
+    scheduler, so its tasks would never be released and the job would fail late.
+    """
+    return Verdict(
+        refusals=tuple(
+            Refusal(
+                scenario=RefusalScenario.IN_PROCESS_STEP,
+                subject=node.name,
+                detail=(
+                    "This node runs a command, but its cook type is In-Process, so PDG cooks "
+                    "its work items in this Houdini session and never sends them to the farm. "
+                    "Its tasks in the job would never run."
+                ),
+                remedy="Set the node's Cook Type (pdg_cooktype) to Out-of-Process.",
+            )
+            for node in ctx.nodes
+            if _is_in_process_step(node)
+        )
+    )
 
 
 def _nearest_steps(start: str, edges: Mapping[str, Set[str]], targets: Set[str]) -> List[str]:
@@ -655,6 +703,41 @@ def _node_file_uses(node: NodeInfo) -> List[str]:
     return uses
 
 
+def _scene_walk_file_uses(ctx: ValidationContext) -> Dict[str, List[str]]:
+    """Each way a node that is not a step touches a step's files that the scene walk shows, by node name.
+
+    A node reads a step's file when a file parm's path matches a file a step
+    writes, and writes one when a write parm or a declared output is a file a step
+    reads.
+    """
+    report: ReadReport = ctx.reads or ReadReport()
+    uses: Dict[str, List[str]] = {}
+    for match in report.node_reads:
+        if match.verdict is not ReadVerdict.EXTERNAL:
+            uses.setdefault(match.read.step, []).append(
+                f"its '{match.read.parm}' parm reads '{match.read.path}', which the step "
+                f"'{match.producer}' writes"
+            )
+    # The files each node writes, from its write parms and its items' declared
+    # outputs, and the step reads that open one of them.
+    written: Dict[str, Set[str]] = {}
+    for write in report.node_writes:
+        if write.path:
+            written.setdefault(write.step, set()).add(os.path.normpath(write.path))
+    for node in ctx.nodes:
+        files: Set[str] = written.get(node.name, set()) | {
+            _resolve(declared.path, ctx.working_dir, ctx.env)
+            for item in node.items
+            for declared in item.declared_outputs
+        }
+        opened: Tuple[SceneRead, ...] = reads_opening(files, report.step_reads, ctx.working_dir)
+        uses.setdefault(node.name, []).extend(
+            f"it writes a file that the step '{read.step}' reads through its '{read.parm}' parm"
+            for read in opened
+        )
+    return uses
+
+
 def _check_non_step_file_use(ctx: ValidationContext) -> Verdict:
     """Refuse a node that is not a step, has a step above it, and touches a step's files.
 
@@ -671,6 +754,7 @@ def _check_non_step_file_use(ctx: ValidationContext) -> Verdict:
         for parent in node.upstream:
             if parent in downstream:
                 downstream[parent].add(node.name)
+    walked: Dict[str, List[str]] = _scene_walk_file_uses(ctx)
 
     refusals: List[Refusal] = []
     advisories: List[Advisory] = []
@@ -689,7 +773,9 @@ def _check_non_step_file_use(ctx: ValidationContext) -> Verdict:
         between: str = f"below {_examples(above)}"
         if below:
             between += f" and above {_examples(below)}"
-        uses: List[str] = _node_file_uses(node)
+        # Two parms the walk reached under one node can give the same reason, so
+        # each reason is kept once.
+        uses: List[str] = list(dict.fromkeys(_node_file_uses(node) + walked.get(node.name, [])))
         if uses:
             refusals.append(
                 Refusal(
@@ -853,17 +939,20 @@ def _cached_output(item: WorkItemSpec, ctx: ValidationContext) -> str:
 
 
 def _check_cached_outputs(ctx: ValidationContext) -> Verdict:
-    """Refuse a step with an item whose declared outputs already exist on this machine.
+    """Refuse a step in this cook with an item whose declared outputs already exist here, or that PDG cooked from cache.
 
-    PDG's default cache mode marks such an item cooked from cache and never
-    schedules it, so its task never runs and the job waits forever. A node set to
-    Write Files, or a path that still holds a token or a variable, is skipped.
+    With Cache Mode Automatic or Read Files, PDG cooks such an item from cache and
+    never offers it to this scheduler, so its task never runs on the farm. A node
+    set to Write Files, or a path that still holds a token or a variable, is
+    skipped for the files on disk.
     """
     refusals: List[Refusal] = []
-    # Write Files ignores existing results, so a node set to it is never cached.
+    # Write Files ignores existing results, so a node set to it is never cached,
+    # and a step outside this cook is not this cook's to judge.
     writes_always: Set[str] = {n.name for n in ctx.nodes if n.cache_mode == _WRITE_FILES}
+    outside: Set[str] = {n.name for n in ctx.nodes if n.in_cook_set is False}
     for step in ctx.snapshot.steps:
-        if step.name in writes_always:
+        if step.name in writes_always or step.name in outside:
             continue
         # Each item with a result on disk is one PDG would skip, so the step is
         # refused when any item does, and the first such file is the example.
@@ -872,25 +961,80 @@ def _check_cached_outputs(ctx: ValidationContext) -> Verdict:
         ]
         if not present_files:
             continue
-        cached: int = len(present_files)
-        example: str = present_files[0]
         refusals.append(
-            Refusal(
-                scenario=RefusalScenario.CACHED_OUTPUTS,
-                subject=step.name,
-                detail=(
-                    f"{cached} of this step's {step.task_count} work item(s) declare outputs "
-                    f"that already exist, for example '{example}'. PDG would mark them cooked "
-                    "from cache and never schedule them, so their tasks would never run and "
-                    "the job would wait for them forever."
-                ),
-                remedy=(
-                    "Set the node's Cache Mode (pdg_cachemode) to Write Files, or delete its "
-                    "results before cooking (Delete Selected Node Results From Disk)."
-                ),
+            _cached_refusal(
+                step.name,
+                f"{len(present_files)} of this step's {step.task_count} work item(s) declare "
+                f"outputs that already exist, for example '{present_files[0]}'. With Cache "
+                "Mode Automatic or Read Files, PDG cooks such an item from cache and never "
+                "offers it to this scheduler, so its task would not run on the farm.",
+            )
+        )
+    # A step refused for its files is named once.
+    refused: Set[str] = {refusal.subject for refusal in refusals}
+    from_cache: Tuple[Refusal, ...] = cooked_from_cache(ctx).refusals
+    return Verdict(
+        refusals=tuple(refusals) + tuple(r for r in from_cache if r.subject not in refused)
+    )
+
+
+def cooked_from_cache(ctx: ValidationContext, *, offered_nothing: bool = False) -> Verdict:
+    """Refuse each step in this cook that has an item PDG cooked from cache, naming one of its files.
+
+    ``offered_nothing`` is for a cook that ended before PDG offered any work item,
+    so no job was created.
+    """
+    refusals: List[Refusal] = []
+    for node in ctx.nodes:
+        # PDG already took these items from an earlier cook's files. The graph read
+        # records them only for a node in this cook, so every node that has them is judged.
+        if not node.cached_items or not node.is_schedulable:
+            continue
+        example: str = _cached_example(node.cached_items, ctx)
+        outcome: str = (
+            "and offered no work item to this scheduler, so no job was created."
+            if offered_nothing
+            else "and never offered them to this scheduler, so the job would leave their "
+            "tasks out and the steps below would read the local results."
+        )
+        refusals.append(
+            _cached_refusal(
+                node.name,
+                f"PDG cooked {len(node.cached_items)} of this step's work item(s) from files "
+                f"already on this machine, for example '{example}', {outcome}",
             )
         )
     return Verdict(refusals=tuple(refusals))
+
+
+def _cached_refusal(step: str, detail: str) -> Refusal:
+    """A CACHED_OUTPUTS refusal for ``step``, with the shared remedy."""
+    return Refusal(
+        scenario=RefusalScenario.CACHED_OUTPUTS,
+        subject=step,
+        detail=detail,
+        remedy=(
+            "Set the node's Cache Mode (pdg_cachemode) to Write Files, or delete its "
+            "results before cooking (Delete Selected Node Results From Disk)."
+        ),
+    )
+
+
+def _cached_example(items: Sequence[RawItem], ctx: ValidationContext) -> str:
+    """A cached item's output that exists here, else its first declared output, else its name."""
+    # A file on disk says why PDG skipped the item, so it is preferred.
+    resolved: List[str] = [
+        _resolve(declared.path, ctx.working_dir, ctx.env)
+        for item in items
+        for declared in item.declared_outputs
+    ]
+    for path in resolved:
+        try:
+            if ctx.exists(path):
+                return path
+        except Exception:
+            _logger.debug("Could not test whether '%s' exists.", path, exc_info=True)
+    return resolved[0] if resolved else items[0].name
 
 
 # -- the scene's file references ----------------------------------------------
@@ -1222,6 +1366,7 @@ _CHECKS: Tuple[Tuple[RefusalScenario, Callable[[ValidationContext], Verdict]], .
     (RefusalScenario.ROP_BATCH, _check_rop_batch),
     (RefusalScenario.QUOTA_EXCEEDED, _check_quotas),
     (RefusalScenario.STEP_WITHOUT_ITEMS, _check_steps_without_items),
+    (RefusalScenario.IN_PROCESS_STEP, _check_in_process_steps),
     (RefusalScenario.IN_PROCESS_NODE, _check_non_step_file_use),
     (RefusalScenario.SERVICE_NODE, _check_service_nodes),
     (RefusalScenario.MULTIPLE_SCHEDULERS, _check_schedulers),
