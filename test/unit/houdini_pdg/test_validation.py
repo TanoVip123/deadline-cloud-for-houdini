@@ -1470,6 +1470,7 @@ def test_a_step_outside_the_cook_is_never_refused_for_an_earlier_cooks_cached_it
 
     Branch ``b`` is not in this cook and nothing in the job depends on it.
     """
+    # b's only item is an earlier cook's CookedCache, and its file is on disk.
     stale: RawItem = _item(
         "b_0", 0, declared_outputs=(DeclaredFile("__PDG_DIR__/geo/b.0.bgeo.sc", ""),), cached=True
     )
@@ -1483,6 +1484,7 @@ def test_a_step_outside_the_cook_is_never_refused_for_an_earlier_cooks_cached_it
 
 def test_a_step_outside_the_cook_is_never_refused_for_its_files_on_disk() -> None:
     """The on-disk check judges only the steps in this cook, like the check of cached items."""
+    # Both steps have outputs on disk, and only a is in the cook.
     nodes: List[NodeInfo] = _with_outputs(
         [_node("a", in_cook_set=True), _node("b", in_cook_set=False)], "__PDG_DIR__/geo"
     )
@@ -1501,6 +1503,7 @@ def test_files_on_disk_are_described_as_pdg_takes_them_from_cache(
     With Automatic or Read Files, PDG marks the item cooked from cache and never
     offers it to this scheduler. Nothing waits on the item forever.
     """
+    # One item whose output exists, in each mode that reads results from disk.
     nodes: List[NodeInfo] = _with_outputs(
         [_node("cache", count=1, cache_mode=cache_mode)], "__PDG_DIR__/geo"
     )
@@ -1528,6 +1531,7 @@ def test_a_cached_step_in_the_cook_with_no_items_left_is_refused_once_for_its_ca
     Reading it as a step that hasn't generated would tell the artist to cook again,
     which changes nothing while its files are on disk.
     """
+    # sim's only item came from cache, so it has none left, and render is below it.
     cached: RawItem = _item(
         "sim_0", 0, declared_outputs=(DeclaredFile("__PDG_DIR__/geo/sim.0.bgeo.sc", ""),)
     )
@@ -1546,6 +1550,7 @@ def test_cooked_from_cache_names_each_step_in_the_cook_and_one_file() -> None:
 
     A cached step outside the cook, and a step with nothing cached, are not named.
     """
+    # Only up's first file is still on disk, so it's the example for up.
     first: str = os.path.join(WORKING_DIR, "geo", "up.1.bgeo.sc")
 
     def cached(name: str, index: int) -> RawItem:
@@ -1557,6 +1562,7 @@ def test_cooked_from_cache_names_each_step_in_the_cook_and_one_file() -> None:
             cached=True,
         )
 
+    # Two cached steps in the cook, one outside it, and one with nothing cached.
     nodes: List[NodeInfo] = [
         _node("up", count=0, in_cook_set=True, cached_items=(cached("up", 1), cached("up", 2))),
         _node("down", ["up"], count=0, in_cook_set=True, cached_items=(cached("down", 1),)),

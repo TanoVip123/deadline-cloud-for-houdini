@@ -779,6 +779,7 @@ def test_a_step_cooked_from_cache_above_the_cooked_node_is_in_the_cook() -> None
     This is the half-done job: the cache's task would be missing, and render would
     read the local files. Reading the cache as outside the cook would hide it.
     """
+    # The cache's only item came from cache, and render, the cooked node, is scheduled.
     nodes: List[_PdgNode] = _pyro_like()
     items: Dict[Any, List[Any]] = {
         _cached(nodes[1], 0): [],
@@ -797,6 +798,7 @@ def test_every_step_cooked_from_cache_is_in_the_cook_it_was_asked_for() -> None:
 
     No item is left to offer, so only the cook set says which steps the cook was for.
     """
+    # Both steps' items came from cache, and the cook asked for render.
     nodes: List[_PdgNode] = _pyro_like()
     items: Dict[Any, List[Any]] = {_cached(nodes[1], 0): [], _cached(nodes[3], 0): []}
     infos: Dict[str, NodeInfo] = _by_name(
@@ -808,6 +810,7 @@ def test_every_step_cooked_from_cache_is_in_the_cook_it_was_asked_for() -> None:
 
 def test_a_step_cooked_from_cache_below_the_cooked_node_stays_outside_the_cook() -> None:
     """Cooking the cache doesn't cook render below it, so render's old cached items are not this cook's."""
+    # The cook asked for the cache, and render below it holds an earlier cook's cache.
     nodes: List[_PdgNode] = _pyro_like()
     items: Dict[Any, List[Any]] = {
         _WorkItem(nodes[1], 0, state=_Enum("workItemState.Scheduled")): [],

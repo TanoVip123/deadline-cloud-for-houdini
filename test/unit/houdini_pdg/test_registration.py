@@ -393,6 +393,7 @@ class _CachedItem:
     """A ``pdg.WorkItem`` PDG cooked from cache, with one expected output file."""
 
     def __init__(self, node: str, index: int, path: str) -> None:
+        # The fields the graph read takes from a work item.
         self.name: str = f"{node}_{index}"
         self.index: int = index
         self.id: int = 100 + index
@@ -404,6 +405,7 @@ class _CachedItem:
 
 def _cooked_from_cache(network: Network, tmp_path: Path) -> Any:
     """A started cook of ``render`` in which PDG took every item of sim and render from cache."""
+    # Start the cook, then give PDG's graph only items it cooked from cache.
     scheduler: Any = _scheduler(network)
     network.context.cookSet = [network.node("render")]
     assert scheduler.onStartCook(False, [network.node("render")]) is True
@@ -425,6 +427,7 @@ def test_a_cook_that_ends_with_every_item_from_cache_shows_why_on_the_node(
 
     The error names each step in the cook and one of its files, and no job is made.
     """
+    # PDG ends the cook on its own, with nothing offered.
     network: Network = build_network(PYRO_BONFIRE)
     scheduler: Any = _cooked_from_cache(network, tmp_path)
     assert scheduler.onStopCook(False) is True
@@ -436,6 +439,7 @@ def test_a_cook_that_ends_with_every_item_from_cache_shows_why_on_the_node(
 
 def test_an_artists_stop_of_a_cook_from_cache_shows_nothing(scene: FakeHou, tmp_path: Path) -> None:
     """The artist stopped it, so the node shows no error for the cached items."""
+    # The same cook, stopped by the artist.
     network: Network = build_network(PYRO_BONFIRE)
     scheduler: Any = _cooked_from_cache(network, tmp_path)
     assert scheduler.onStopCook(True) is True

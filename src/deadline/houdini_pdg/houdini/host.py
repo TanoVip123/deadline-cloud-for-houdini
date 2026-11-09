@@ -261,10 +261,10 @@ class HoudiniPdgHost:
         context: Any = self._scheduler.context
         graph_nodes: List[Any] = _graph_nodes(context)
         # PDG's own cook set wins. The one from the start covers a read once PDG reports none.
-        cook_set: Optional[FrozenSet[str]] = cook_set_names(_attr(context, "cookSet"))
-        if cook_set is None:
-            with self._generation_lock:
-                cook_set = self._cook_set
+        live: Optional[FrozenSet[str]] = cook_set_names(_attr(context, "cookSet"))
+        with self._generation_lock:
+            started: Optional[FrozenSet[str]] = self._cook_set
+        cook_set: Optional[FrozenSet[str]] = live if live is not None else started
         infos: Tuple[NodeInfo, ...] = readers.node_infos(
             graph_nodes, dependency_graph, cook_set, only_items_in_cook=True
         )

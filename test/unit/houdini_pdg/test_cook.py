@@ -2078,6 +2078,7 @@ def test_closing_without_cancel_leaves_a_job_whose_tasks_were_all_offered() -> N
 
 def _all_cached(*, in_cook_set: Optional[bool] = True) -> Tuple[NodeInfo, ...]:
     """CHAIN with every item PDG took from cache, so nothing is left to offer."""
+    # Each node's items move to its cached items, and a's declare a file.
     nodes: Tuple[NodeInfo, ...] = nodes_for(CHAIN, {"a": "__PDG_DIR__/geo/a.{i}.bgeo.sc"})
     return tuple(
         dataclasses.replace(
@@ -2096,6 +2097,7 @@ def test_a_cook_pdg_ends_with_every_item_from_cache_is_refused_naming_each_step(
     Without a refusal the cook ends with no job and no message, and the artist
     can't tell why nothing reached the farm.
     """
+    # PDG ends the cook without offering an item, and without a stop by the artist.
     h: Harness = Harness(nodes=_all_cached())
     h.start()
     with pytest.raises(GraphRefusedError) as raised:
@@ -2114,6 +2116,7 @@ def test_a_cook_pdg_ends_with_every_item_from_cache_is_refused_naming_each_step(
 
 def test_an_artists_stop_before_any_offer_reads_nothing_and_refuses_nothing() -> None:
     """The artist stopped the cook, so its cached items say nothing about why no job was built."""
+    # The same cook, stopped by the artist.
     h: Harness = Harness(nodes=_all_cached())
     h.start()
     assert h.scheduler.on_stop_cook(True)
@@ -2123,6 +2126,7 @@ def test_an_artists_stop_before_any_offer_reads_nothing_and_refuses_nothing() ->
 
 def test_a_cook_that_ends_with_cached_steps_outside_it_is_not_refused() -> None:
     """Items an earlier cook left cached on nodes this cook doesn't touch are not this cook's problem."""
+    # Every cached node is outside the cook.
     h: Harness = Harness(nodes=_all_cached(in_cook_set=False))
     h.start()
     assert h.scheduler.on_stop_cook(False)
@@ -2131,6 +2135,7 @@ def test_a_cook_that_ends_with_cached_steps_outside_it_is_not_refused() -> None:
 
 def test_a_cook_that_already_offered_an_item_reads_no_cache_at_its_end() -> None:
     """Once an item was offered the snapshot already judged the cache, so the end reads nothing again."""
+    # The job runs every item, then the graph changes before PDG ends the cook.
     h: Harness = Harness().cooking()
     for name in ("a_1", "b_0"):
         h.scheduler.on_schedule(handle(name))
@@ -2144,6 +2149,7 @@ def test_with_validation_off_a_cook_from_cache_logs_the_refusal_as_a_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An artist who turned validation off still sees why no job was built, as a warning."""
+    # Validation is off, so the refusal is waived.
     h: Harness = Harness(nodes=_all_cached(), validate_graph=False)
     h.start()
     with caplog.at_level(logging.WARNING, logger=PACKAGE_LOGGER):
@@ -2156,6 +2162,7 @@ def test_a_graph_that_cannot_be_read_at_the_end_closes_the_cook_quietly(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A failed read at the end must still close the cook, and must not invent a refusal."""
+    # The graph read raises once PDG ends the cook.
     h: Harness = Harness(nodes=_all_cached())
     h.start()
     h.events.faults["read_graph"] = RuntimeError("context gone")
