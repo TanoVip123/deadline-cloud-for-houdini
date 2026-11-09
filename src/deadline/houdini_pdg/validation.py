@@ -531,9 +531,7 @@ def _check_steps_without_items(ctx: ValidationContext) -> Verdict:
     explained: Set[str] = {
         node.name
         for node in ctx.nodes
-        if node.is_dynamic
-        or _is_in_process_step(node)
-        or (node.cached_items and node.in_cook_set is not False)
+        if node.is_dynamic or _is_in_process_step(node) or node.cached_items
     }
     dropped: List[str] = [
         name for name in ctx.snapshot.steps_without_items if name not in explained
@@ -988,9 +986,9 @@ def cooked_from_cache(ctx: ValidationContext, *, offered_nothing: bool = False) 
     """
     refusals: List[Refusal] = []
     for node in ctx.nodes:
-        # PDG already took these items from an earlier cook's files. A node outside
-        # this cook keeps an earlier cook's states, so it is never judged.
-        if not node.cached_items or not node.is_schedulable or node.in_cook_set is False:
+        # PDG already took these items from an earlier cook's files. The graph read
+        # records them only for a node in this cook, so every node that has them is judged.
+        if not node.cached_items or not node.is_schedulable:
             continue
         example: str = _cached_example(node.cached_items, ctx)
         outcome: str = (

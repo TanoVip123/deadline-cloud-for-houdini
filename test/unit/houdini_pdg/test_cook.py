@@ -2076,15 +2076,15 @@ def test_closing_without_cancel_leaves_a_job_whose_tasks_were_all_offered() -> N
     assert h.summary().final_phase is CookPhase.COOKING
 
 
-def _all_cached(*, in_cook_set: Optional[bool] = True) -> Tuple[NodeInfo, ...]:
-    """CHAIN with every item PDG took from cache, so nothing is left to offer."""
+def _all_cached() -> Tuple[NodeInfo, ...]:
+    """CHAIN with every item PDG took from cache, so nothing is left and each node is outside the cook."""
     # Each node's items move to its cached items, and a's declare a file.
     nodes: Tuple[NodeInfo, ...] = nodes_for(CHAIN, {"a": "__PDG_DIR__/geo/a.{i}.bgeo.sc"})
     return tuple(
         dataclasses.replace(
             node,
             items=(),
-            in_cook_set=in_cook_set,
+            in_cook_set=False,
             cached_items=tuple(dataclasses.replace(i, cached=True) for i in node.items),
         )
         for node in nodes
@@ -2122,15 +2122,6 @@ def test_an_artists_stop_before_any_offer_reads_nothing_and_refuses_nothing() ->
     assert h.scheduler.on_stop_cook(True)
     assert h.events.count("read_graph") == 0
     assert h.summary().refusals == ()
-
-
-def test_a_cook_that_ends_with_cached_steps_outside_it_is_not_refused() -> None:
-    """Items an earlier cook left cached on nodes this cook doesn't touch are not this cook's problem."""
-    # Every cached node is outside the cook.
-    h: Harness = Harness(nodes=_all_cached(in_cook_set=False))
-    h.start()
-    assert h.scheduler.on_stop_cook(False)
-    assert h.summary().refusals == () and h.summary().final_phase is CookPhase.CONNECTED
 
 
 def test_a_cook_that_already_offered_an_item_reads_no_cache_at_its_end() -> None:

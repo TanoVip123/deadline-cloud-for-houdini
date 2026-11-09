@@ -213,6 +213,7 @@ def test_a_generate_sets_the_working_directory_and_skips_the_checks(
 
 
 #: The ``pdg.cookType`` members, with their values, as Houdini 21.0 lists them.
+#: StaticDepsGen is left out: it has GenerateFull's value, and Houdini names it GenerateFull.
 _GENERATE_TYPES: List[Tuple[str, int]] = [
     ("GenerateFull", 2),
     ("GenerateNode", 3),
@@ -222,7 +223,6 @@ _COOK_TYPES: List[Tuple[str, int]] = [
     ("Full", 0),
     ("Node", 1),
     ("StaticDepsFull", 5),
-    ("StaticDepsGen", 2),
     ("StaticDepsNode", 6),
 ]
 
@@ -254,10 +254,7 @@ def test_a_generate_houdini_reports_in_the_cook_options_is_not_a_farm_cook(
 def test_a_cook_houdini_reports_in_the_cook_options_is_checked_and_connected(
     scene: FakeHou, cook_type: Any
 ) -> None:
-    """Only a generate skips the checks, so a cook of a refused graph still fails its start.
-
-    StaticDepsGen shares GenerateFull's value, so a check by value would skip it too.
-    """
+    """Only a generate skips the checks, so a cook of a refused graph still fails its start."""
     # The same refused graph, with Houdini's cook options saying it's a cook.
     network: Network = build_network(COOKING_EXAMPLE)
     network.context.cookOptions = types.SimpleNamespace(cookType=cook_type)
@@ -390,7 +387,7 @@ def test_a_cook_starts_connected_with_the_cook_set_as_names(
 
 
 class _CachedItem:
-    """A ``pdg.WorkItem`` PDG cooked from cache, with one expected output file."""
+    """A ``pdg.WorkItem`` PDG cooked from cache, with the file it found as its result."""
 
     def __init__(self, node: str, index: int, path: str) -> None:
         # The fields the graph read takes from a work item.
@@ -400,14 +397,19 @@ class _CachedItem:
         self.node: Any = types.SimpleNamespace(name=node)
         self.command: str = f"hython {node}.py"
         self.state: Any = types.SimpleNamespace(name="CookedCache")
-        self.expectedOutputFiles: List[Any] = [types.SimpleNamespace(path=path, tag="file/geo")]
+        self.outputFiles: List[Any] = [types.SimpleNamespace(path=path, tag="file/geo")]
 
 
-def _cooked_from_cache(network: Network, tmp_path: Path) -> Any:
-    """A started cook of ``render`` in which PDG took every item of sim and render from cache."""
+def _cooked_from_cache(
+    network: Network, tmp_path: Path, cooked: Tuple[str, ...] = ("sim", "render")
+) -> Any:
+    """A started cook of ``render`` in which PDG took every item of sim and render from cache.
+
+    PDG's cook set names the ``cooked`` nodes. Houdini names render and the step above it.
+    """
     # Start the cook, then give PDG's graph only items it cooked from cache.
     scheduler: Any = _scheduler(network)
-    network.context.cookSet = [network.node("render")]
+    network.context.cookSet = [network.node(name) for name in cooked]
     assert scheduler.onStartCook(False, [network.node("render")]) is True
     scheduler.dependency_graph = (
         {
@@ -435,6 +437,18 @@ def test_a_cook_that_ends_with_every_item_from_cache_shows_why_on_the_node(
     assert "sim:" in error and str(tmp_path / "geo" / "sim.0.bgeo.sc") in error
     assert "render:" in error and str(tmp_path / "geo" / "render.1.exr") in error
     assert "montage:" not in error and "no job was created" in error
+
+
+def test_a_cook_from_cache_names_only_the_steps_its_cook_set_names(
+    scene: FakeHou, tmp_path: Path
+) -> None:
+    """A step the cook set leaves out holds an earlier cook's cache, so it isn't this cook's to refuse."""
+    # The same cook, with PDG's cook set naming only render.
+    network: Network = build_network(PYRO_BONFIRE)
+    scheduler: Any = _cooked_from_cache(network, tmp_path, ("render",))
+    assert scheduler.onStopCook(False) is True
+    (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
+    assert "render:" in error and "sim:" not in error
 
 
 def test_an_artists_stop_of_a_cook_from_cache_shows_nothing(scene: FakeHou, tmp_path: Path) -> None:

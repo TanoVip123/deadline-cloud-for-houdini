@@ -56,9 +56,8 @@ def node_infos(
     With ``only_items_in_cook``, read during a cook, an item PDG will not schedule
     is left out, and a node whose every generated item is left out is outside the
     cook: cooking one work item cooks it and its upstream items, not their nodes.
-    A node whose items PDG took from cache stays in the cook when it is in the cook
-    set or upstream of a node in the cook. Outside a cook the item states are an
-    earlier cook's, so every item is kept.
+    Items PDG took from cache are kept aside only on a node in the cook: one the
+    cook set names, or one with items left. Outside a cook every item is kept.
     """
     # The PDG nodes by name. The first of two nodes with one name wins, and a
     # nameless or unreadable node is skipped.
@@ -73,33 +72,29 @@ def node_infos(
     items, item_upstream, attributes = _generated(dependency_graph)
     outside: Set[str] = set()
     cached: Dict[str, Tuple[RawItem, ...]] = {}
+    requested: Optional[Set[str]] = (
+        None if cook_set is None else {str(name) for name in _iterate(cook_set)}
+    )
     if only_items_in_cook:
         for name in list(items):
-            # A dropped item PDG cooked from cache is kept aside, so validation can refuse it.
             kept: List[RawItem] = [item for item in items[name] if item.in_cook is not False]
-            cached[name] = tuple(item for item in items[name] if item.cached)
+            # Items PDG cooked from cache are kept aside, so validation can refuse the
+            # step. A node outside the cook set with none left holds an earlier cook's.
+            if kept or requested is None or name in requested:
+                cached[name] = tuple(item for item in items[name] if item.cached)
             if not kept:
                 outside.add(name)
             items[name] = kept
     wiring: Optional[Dict[str, Set[str]]] = _hom_wiring(pdg_nodes)
-    requested: Optional[Set[str]] = (
-        None if cook_set is None else {str(name) for name in _iterate(cook_set)}
-    )
 
     def upstream_of(name: str) -> Set[str]:
         """The node's upstream nodes, from the network's wires when they could be read."""
         return wiring.get(name, set()) if wiring is not None else item_upstream.get(name, set())
 
-    # A node PDG took from cache has no item left, but it is in the cook when the
-    # cook asked for it or for a node below it, because cooking a node cooks its inputs.
-    cooked: Set[str] = {name for name, left in items.items() if left} | (requested or set())
-    from_cache: Set[str] = {name for name in outside if cached.get(name)}
-    from_cache_in_cook: Set[str] = from_cache & _with_ancestors(cooked, upstream_of)
-
     def in_cook(name: str) -> Optional[bool]:
         """Whether the node is in the cook, or None when the cook set is unknown."""
         if name in outside:
-            return name in from_cache_in_cook
+            return False
         # A node with items is in the cook whatever the set says: the set is taken
         # at the cook's start, before an HDA's inner nodes exist.
         return None if requested is None else (name in requested or bool(items.get(name)))
@@ -153,20 +148,6 @@ def node_infos(
             )
         )
     return tuple(infos)
-
-
-def _with_ancestors(names: Set[str], upstream_of: Callable[[str], Set[str]]) -> Set[str]:
-    """``names`` and every node upstream of them. Terminates on a cycle."""
-    # Walk upstream with a visited set, so a cyclic wiring is walked once.
-    found: Set[str] = set()
-    stack: List[str] = list(names)
-    while stack:
-        current: str = stack.pop()
-        if current in found:
-            continue
-        found.add(current)
-        stack.extend(upstream_of(current))
-    return found
 
 
 def collect_scene_reads(
@@ -364,6 +345,7 @@ def _raw_item(work_item: Any, depends_on: Any) -> Optional[RawItem]:
     # Read batching from the child: the dependency graph's items are batch children,
     # so PDG's ``isBatch`` is False on every one of them.
     parent: Any = _attr(work_item, "batchParent", None)
+    cached: bool = _enum_name(_attr(work_item, "state", None)) == _CACHED_STATE
     return RawItem(
         name=name,
         index=_as_int(_attr(work_item, "index", 0), 0),
@@ -372,12 +354,21 @@ def _raw_item(work_item: Any, depends_on: Any) -> Optional[RawItem]:
         is_out_of_process=bool(_attr(work_item, "isOutOfProcess", False)),
         is_batch=bool(_attr(work_item, "isBatch", False)),
         batch_parent=_str_attr(parent, "name") if parent is not None else "",
-        declared_outputs=_declared(_attr(work_item, "expectedOutputFiles", ())),
+        declared_outputs=_declared_outputs(work_item, cached),
         declared_inputs=_declared(_attr(work_item, "inputFiles", ())),
         depends_on=tuple(n for n in (_str_attr(d, "name") for d in _iterate(depends_on)) if n),
         in_cook=_in_cook(_attr(work_item, "state", None)),
-        cached=_enum_name(_attr(work_item, "state", None)) == _CACHED_STATE,
+        cached=cached,
     )
+
+
+def _declared_outputs(work_item: Any, cached: bool) -> Tuple[DeclaredFile, ...]:
+    """The item's declared outputs. A cached item's come from its results, when it has any."""
+    # An item PDG cooked from cache holds the files it found in ``outputFiles``.
+    found: Tuple[DeclaredFile, ...] = (
+        _declared(_attr(work_item, "outputFiles", ())) if cached else ()
+    )
+    return found or _declared(_attr(work_item, "expectedOutputFiles", ()))
 
 
 def _in_cook(state: Any) -> Optional[bool]:

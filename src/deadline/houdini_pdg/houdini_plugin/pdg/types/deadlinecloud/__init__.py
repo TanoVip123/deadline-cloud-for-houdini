@@ -228,7 +228,7 @@ def _is_generate(context: Any) -> bool:
     except Exception:
         return False
     # PDG's enum prints as ``cookType.GenerateNode``, and its ``name`` is the member alone.
-    # The name decides, because a generate shares its value with a member that isn't one.
+    # StaticDepsGen has GenerateFull's value and Houdini names it GenerateFull, so it reads as one.
     name: str = str(getattr(cook_type, "name", "") or cook_type)
     return name.rsplit(".", 1)[-1] in _GENERATE_COOK_TYPES
 

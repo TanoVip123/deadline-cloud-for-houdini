@@ -1465,23 +1465,6 @@ def test_a_step_with_only_items_in_the_cook_is_not_refused_for_a_cached_item() -
     assert not _subjects(verdict, RefusalScenario.CACHED_OUTPUTS)
 
 
-def test_a_step_outside_the_cook_is_never_refused_for_an_earlier_cooks_cached_items() -> None:
-    """Cooking one branch must not be blocked by another branch an earlier local cook left cached.
-
-    Branch ``b`` is not in this cook and nothing in the job depends on it.
-    """
-    # b's only item is an earlier cook's CookedCache, and its file is on disk.
-    stale: RawItem = _item(
-        "b_0", 0, declared_outputs=(DeclaredFile("__PDG_DIR__/geo/b.0.bgeo.sc", ""),), cached=True
-    )
-    nodes: List[NodeInfo] = [
-        _node("a", in_cook_set=True),
-        _node("b", count=0, in_cook_set=False, cached_items=(stale,)),
-    ]
-    verdict: Verdict = validate(_ctx(nodes, working_dir=WORKING_DIR, exists=lambda path: True))
-    assert not _subjects(verdict, RefusalScenario.CACHED_OUTPUTS)
-
-
 def test_a_step_outside_the_cook_is_never_refused_for_its_files_on_disk() -> None:
     """The on-disk check judges only the steps in this cook, like the check of cached items."""
     # Both steps have outputs on disk, and only a is in the cook.
@@ -1531,12 +1514,13 @@ def test_a_cached_step_in_the_cook_with_no_items_left_is_refused_once_for_its_ca
     Reading it as a step that hasn't generated would tell the artist to cook again,
     which changes nothing while its files are on disk.
     """
-    # sim's only item came from cache, so it has none left, and render is below it.
+    # sim's only item came from cache, so it has none left and the read puts it
+    # outside the cook, and render is below it.
     cached: RawItem = _item(
         "sim_0", 0, declared_outputs=(DeclaredFile("__PDG_DIR__/geo/sim.0.bgeo.sc", ""),)
     )
     nodes: List[NodeInfo] = [
-        _node("sim", count=0, in_cook_set=True, cached_items=(cached,)),
+        _node("sim", count=0, in_cook_set=False, cached_items=(cached,)),
         _node("render", ["sim"], in_cook_set=True),
     ]
     verdict: Verdict = validate(_ctx(nodes, working_dir=WORKING_DIR, exists=lambda path: False))
@@ -1546,9 +1530,10 @@ def test_a_cached_step_in_the_cook_with_no_items_left_is_refused_once_for_its_ca
 
 
 def test_cooked_from_cache_names_each_step_in_the_cook_and_one_file() -> None:
-    """At the end of a cook PDG offered nothing to, each cached step in the cook is named with a file.
+    """At the end of a cook PDG offered nothing to, each cached step is named with a file.
 
-    A cached step outside the cook, and a step with nothing cached, are not named.
+    The graph read puts such a step outside the cook, because it has no item left,
+    so it must be judged by its cached items. A step with nothing cached is not named.
     """
     # Only up's first file is still on disk, so it's the example for up.
     first: str = os.path.join(WORKING_DIR, "geo", "up.1.bgeo.sc")
@@ -1562,12 +1547,11 @@ def test_cooked_from_cache_names_each_step_in_the_cook_and_one_file() -> None:
             cached=True,
         )
 
-    # Two cached steps in the cook, one outside it, and one with nothing cached.
+    # Two cached steps, and one with nothing cached.
     nodes: List[NodeInfo] = [
-        _node("up", count=0, in_cook_set=True, cached_items=(cached("up", 1), cached("up", 2))),
-        _node("down", ["up"], count=0, in_cook_set=True, cached_items=(cached("down", 1),)),
-        _node("other", count=0, in_cook_set=False, cached_items=(cached("other", 1),)),
-        _node("plain", count=0, in_cook_set=True),
+        _node("up", count=0, in_cook_set=False, cached_items=(cached("up", 1), cached("up", 2))),
+        _node("down", ["up"], count=0, in_cook_set=False, cached_items=(cached("down", 1),)),
+        _node("plain", count=0, in_cook_set=False),
     ]
     verdict: Verdict = validation.cooked_from_cache(
         _ctx(nodes, working_dir=WORKING_DIR, env={}, exists=lambda path: path == first),

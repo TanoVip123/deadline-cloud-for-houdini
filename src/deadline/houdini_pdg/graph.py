@@ -104,8 +104,8 @@ class NodeInfo:
     #: ``(parm, code)`` for each Python code parm, such as a Python Processor's
     #: generate code. Read only for nodes that run no job script.
     python_code: Tuple[Tuple[str, str], ...] = ()
-    #: Items the cook's graph read left out because PDG cooked them from cache.
-    #: Their tasks never reach the farm, so validation refuses the step.
+    #: Items the cook's graph read left out because PDG cooked them from cache,
+    #: on a node in this cook. Their tasks never reach the farm, so validation refuses the step.
     cached_items: Tuple[RawItem, ...] = ()
 
     @property
