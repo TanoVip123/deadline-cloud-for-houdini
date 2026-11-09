@@ -329,6 +329,25 @@ def test_read_graph_reads_the_dependency_graph_once_and_keeps_the_cook_set(scene
     assert by_name["sim"].in_cook_set is True and by_name["montage"].in_cook_set is False
 
 
+def test_read_graph_uses_the_cook_set_from_the_start_when_pdg_no_longer_gives_one(
+    scene: FakeHou,
+) -> None:
+    """At the end of a cook PDG may report no cook set, and the one it gave at the start still holds.
+
+    Without it, a cook whose every item came from cache would place no step in the cook.
+    """
+    network: Network = build_network(PYRO_BONFIRE)
+    host: HoudiniPdgHost = HoudiniPdgHost(network.scheduler())
+    host.watch_generation(frozenset({"render"}))
+    network.context.cookSet = None
+    by_name: Dict[str, NodeInfo] = {info.name: info for info in host.read_graph()}
+    assert by_name["render"].in_cook_set is True and by_name["montage"].in_cook_set is False
+    # A cook set PDG still reports wins over the one from the start.
+    network.context.cookSet = [network.node("montage")]
+    live: Dict[str, NodeInfo] = {info.name: info for info in host.read_graph()}
+    assert live["montage"].in_cook_set is True and live["render"].in_cook_set is False
+
+
 def test_read_graph_leaves_out_the_items_this_cook_will_not_schedule(scene: FakeHou) -> None:
     """An item PDG left Uncooked is not in this cook, so the job must not get a task for it."""
 

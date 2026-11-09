@@ -768,6 +768,67 @@ def test_an_item_pdg_cooked_from_cache_is_dropped_but_recorded() -> None:
     assert outside["cache"].cached_items == ()
 
 
+def _cached(node: _PdgNode, index: int) -> _WorkItem:
+    """An item of ``node`` that PDG cooked from cache."""
+    return _WorkItem(node, index, state=_Enum("workItemState.CookedCache"))
+
+
+def test_a_step_cooked_from_cache_above_the_cooked_node_is_in_the_cook() -> None:
+    """Cooking render cooks the cache above it, so a cache PDG took from files is in this cook.
+
+    This is the half-done job: the cache's task would be missing, and render would
+    read the local files. Reading the cache as outside the cook would hide it.
+    """
+    nodes: List[_PdgNode] = _pyro_like()
+    items: Dict[Any, List[Any]] = {
+        _cached(nodes[1], 0): [],
+        _WorkItem(nodes[3], 0, state=_Enum("workItemState.Scheduled")): [],
+    }
+    infos: Dict[str, NodeInfo] = _by_name(
+        node_infos(nodes, (items, {}, []), ["render"], only_items_in_cook=True)
+    )
+    assert infos["cache"].items == ()
+    assert [i.name for i in infos["cache"].cached_items] == ["cache_0"]
+    assert infos["cache"].in_cook_set is True
+
+
+def test_every_step_cooked_from_cache_is_in_the_cook_it_was_asked_for() -> None:
+    """When PDG took every item from files, the cooked node and the steps above it are in the cook.
+
+    No item is left to offer, so only the cook set says which steps the cook was for.
+    """
+    nodes: List[_PdgNode] = _pyro_like()
+    items: Dict[Any, List[Any]] = {_cached(nodes[1], 0): [], _cached(nodes[3], 0): []}
+    infos: Dict[str, NodeInfo] = _by_name(
+        node_infos(nodes, (items, {}, []), ["render"], only_items_in_cook=True)
+    )
+    assert infos["render"].in_cook_set is True
+    assert infos["cache"].in_cook_set is True
+
+
+def test_a_step_cooked_from_cache_below_the_cooked_node_stays_outside_the_cook() -> None:
+    """Cooking the cache doesn't cook render below it, so render's old cached items are not this cook's."""
+    nodes: List[_PdgNode] = _pyro_like()
+    items: Dict[Any, List[Any]] = {
+        _WorkItem(nodes[1], 0, state=_Enum("workItemState.Scheduled")): [],
+        _cached(nodes[3], 0): [],
+    }
+    infos: Dict[str, NodeInfo] = _by_name(
+        node_infos(nodes, (items, {}, []), ["cache"], only_items_in_cook=True)
+    )
+    assert infos["cache"].in_cook_set is True
+    assert infos["render"].in_cook_set is False
+    # A node above the cook whose items were cooked before, not taken from cache, stays outside.
+    done: Dict[Any, List[Any]] = {
+        _WorkItem(nodes[1], 0, state=_Enum("workItemState.CookedSuccess")): [],
+        _WorkItem(nodes[3], 0, state=_Enum("workItemState.Scheduled")): [],
+    }
+    partial: Dict[str, NodeInfo] = _by_name(
+        node_infos(nodes, (done, {}, []), ["render"], only_items_in_cook=True)
+    )
+    assert partial["cache"].in_cook_set is False
+
+
 def test_an_item_whose_state_is_unknown_or_unreadable_is_kept() -> None:
     """An item with no state, a new state, or a blank one is kept: only known states drop items."""
     # No state, a state PDG may add later, and a blank one.

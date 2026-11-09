@@ -526,10 +526,14 @@ def _check_steps_without_items(ctx: ValidationContext) -> Verdict:
     set is incomplete.
     """
     by_name: Dict[str, NodeInfo] = {node.name: node for node in ctx.nodes}
-    # A dynamic node and an In-Process step have no items for a reason another
-    # check names, so they are left out here and get one message each.
+    # A dynamic node, an In-Process step and a step PDG cooked from cache have no
+    # items for a reason another check names, so each gets one message there.
     explained: Set[str] = {
-        node.name for node in ctx.nodes if node.is_dynamic or _is_in_process_step(node)
+        node.name
+        for node in ctx.nodes
+        if node.is_dynamic
+        or _is_in_process_step(node)
+        or (node.cached_items and node.in_cook_set is not False)
     }
     dropped: List[str] = [
         name for name in ctx.snapshot.steps_without_items if name not in explained
@@ -937,17 +941,20 @@ def _cached_output(item: WorkItemSpec, ctx: ValidationContext) -> str:
 
 
 def _check_cached_outputs(ctx: ValidationContext) -> Verdict:
-    """Refuse a step with an item whose declared outputs already exist here, or that PDG cooked from cache.
+    """Refuse a step in this cook with an item whose declared outputs already exist here, or that PDG cooked from cache.
 
-    PDG marks such an item cooked from cache and never schedules it, so its task
-    never runs on the farm. A node set to Write Files, or a path that still holds a
-    token or a variable, is skipped for the files on disk.
+    With Cache Mode Automatic or Read Files, PDG cooks such an item from cache and
+    never offers it to this scheduler, so its task never runs on the farm. A node
+    set to Write Files, or a path that still holds a token or a variable, is
+    skipped for the files on disk.
     """
     refusals: List[Refusal] = []
-    # Write Files ignores existing results, so a node set to it is never cached.
+    # Write Files ignores existing results, so a node set to it is never cached,
+    # and a step outside this cook is not this cook's to judge.
     writes_always: Set[str] = {n.name for n in ctx.nodes if n.cache_mode == _WRITE_FILES}
+    outside: Set[str] = {n.name for n in ctx.nodes if n.in_cook_set is False}
     for step in ctx.snapshot.steps:
-        if step.name in writes_always:
+        if step.name in writes_always or step.name in outside:
             continue
         # Each item with a result on disk is one PDG would skip, so the step is
         # refused when any item does, and the first such file is the example.
@@ -960,24 +967,43 @@ def _check_cached_outputs(ctx: ValidationContext) -> Verdict:
             _cached_refusal(
                 step.name,
                 f"{len(present_files)} of this step's {step.task_count} work item(s) declare "
-                f"outputs that already exist, for example '{present_files[0]}'. PDG would mark "
-                "them cooked from cache and never schedule them, so their tasks would never "
-                "run and the job would wait for them forever.",
+                f"outputs that already exist, for example '{present_files[0]}'. With Cache "
+                "Mode Automatic or Read Files, PDG cooks such an item from cache and never "
+                "offers it to this scheduler, so its task would not run on the farm.",
             )
         )
-    # PDG already took these items from an earlier cook's files, so the job would
-    # leave them out and the steps below would read local results.
+    # A step refused for its files is named once.
     refused: Set[str] = {refusal.subject for refusal in refusals}
+    from_cache: Tuple[Refusal, ...] = cooked_from_cache(ctx).refusals
+    return Verdict(
+        refusals=tuple(refusals) + tuple(r for r in from_cache if r.subject not in refused)
+    )
+
+
+def cooked_from_cache(ctx: ValidationContext, *, offered_nothing: bool = False) -> Verdict:
+    """Refuse each step in this cook that has an item PDG cooked from cache, naming one of its files.
+
+    ``offered_nothing`` is for a cook that ended before PDG offered any work item,
+    so no job was created.
+    """
+    refusals: List[Refusal] = []
     for node in ctx.nodes:
-        if not node.cached_items or not node.is_schedulable or node.name in refused:
+        # PDG already took these items from an earlier cook's files. A node outside
+        # this cook keeps an earlier cook's states, so it is never judged.
+        if not node.cached_items or not node.is_schedulable or node.in_cook_set is False:
             continue
         example: str = _cached_example(node.cached_items, ctx)
+        outcome: str = (
+            "and offered no work item to this scheduler, so no job was created."
+            if offered_nothing
+            else "and never offered them to this scheduler, so the job would leave their "
+            "tasks out and the steps below would read the local results."
+        )
         refusals.append(
             _cached_refusal(
                 node.name,
                 f"PDG cooked {len(node.cached_items)} of this step's work item(s) from files "
-                f"already on this machine, for example '{example}', so the job would not run "
-                "them and the steps below would use the local results.",
+                f"already on this machine, for example '{example}', {outcome}",
             )
         )
     return Verdict(refusals=tuple(refusals))

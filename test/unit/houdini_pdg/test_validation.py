@@ -1465,6 +1465,116 @@ def test_a_step_with_only_items_in_the_cook_is_not_refused_for_a_cached_item() -
     assert not _subjects(verdict, RefusalScenario.CACHED_OUTPUTS)
 
 
+def test_a_step_outside_the_cook_is_never_refused_for_an_earlier_cooks_cached_items() -> None:
+    """Cooking one branch must not be blocked by another branch an earlier local cook left cached.
+
+    Branch ``b`` is not in this cook and nothing in the job depends on it.
+    """
+    stale: RawItem = _item(
+        "b_0", 0, declared_outputs=(DeclaredFile("__PDG_DIR__/geo/b.0.bgeo.sc", ""),), cached=True
+    )
+    nodes: List[NodeInfo] = [
+        _node("a", in_cook_set=True),
+        _node("b", count=0, in_cook_set=False, cached_items=(stale,)),
+    ]
+    verdict: Verdict = validate(_ctx(nodes, working_dir=WORKING_DIR, exists=lambda path: True))
+    assert not _subjects(verdict, RefusalScenario.CACHED_OUTPUTS)
+
+
+def test_a_step_outside_the_cook_is_never_refused_for_its_files_on_disk() -> None:
+    """The on-disk check judges only the steps in this cook, like the check of cached items."""
+    nodes: List[NodeInfo] = _with_outputs(
+        [_node("a", in_cook_set=True), _node("b", in_cook_set=False)], "__PDG_DIR__/geo"
+    )
+    verdict: Verdict = validate(
+        _ctx(nodes, working_dir=WORKING_DIR, env={}, exists=lambda path: True)
+    )
+    assert _subjects(verdict, RefusalScenario.CACHED_OUTPUTS) == {"a"}
+
+
+@pytest.mark.parametrize("cache_mode", [None, "Automatic", "Read Files"])
+def test_files_on_disk_are_described_as_pdg_takes_them_from_cache(
+    cache_mode: Optional[str],
+) -> None:
+    """The message says what PDG does with an item whose outputs exist, as measured in Houdini.
+
+    With Automatic or Read Files, PDG marks the item cooked from cache and never
+    offers it to this scheduler. Nothing waits on the item forever.
+    """
+    nodes: List[NodeInfo] = _with_outputs(
+        [_node("cache", count=1, cache_mode=cache_mode)], "__PDG_DIR__/geo"
+    )
+    verdict: Verdict = validate(
+        _ctx(nodes, working_dir=WORKING_DIR, env={}, exists=lambda path: True)
+    )
+    (refusal,) = [r for r in verdict.refusals if r.scenario is RefusalScenario.CACHED_OUTPUTS]
+    assert "Automatic or Read Files" in refusal.detail
+    assert "never offers it to this scheduler" in refusal.detail
+    assert "forever" not in refusal.detail
+
+
+def test_a_cached_item_is_described_as_never_offered() -> None:
+    """The message for an item PDG cooked from cache says PDG never offered it, as measured."""
+    verdict: Verdict = validate(
+        _ctx(_with_cached_item(), working_dir=WORKING_DIR, exists=lambda path: False)
+    )
+    (refusal,) = [r for r in verdict.refusals if r.scenario is RefusalScenario.CACHED_OUTPUTS]
+    assert "never offered them to this scheduler" in refusal.detail
+
+
+def test_a_cached_step_in_the_cook_with_no_items_left_is_refused_once_for_its_cache() -> None:
+    """A step whose every item came from cache is named once, for the cache, and not as a race.
+
+    Reading it as a step that hasn't generated would tell the artist to cook again,
+    which changes nothing while its files are on disk.
+    """
+    cached: RawItem = _item(
+        "sim_0", 0, declared_outputs=(DeclaredFile("__PDG_DIR__/geo/sim.0.bgeo.sc", ""),)
+    )
+    nodes: List[NodeInfo] = [
+        _node("sim", count=0, in_cook_set=True, cached_items=(cached,)),
+        _node("render", ["sim"], in_cook_set=True),
+    ]
+    verdict: Verdict = validate(_ctx(nodes, working_dir=WORKING_DIR, exists=lambda path: False))
+    assert _subjects(verdict, RefusalScenario.CACHED_OUTPUTS) == {"sim"}
+    assert not _subjects(verdict, RefusalScenario.STEP_WITHOUT_ITEMS)
+    assert not _advised(verdict, RefusalScenario.STEP_WITHOUT_ITEMS)
+
+
+def test_cooked_from_cache_names_each_step_in_the_cook_and_one_file() -> None:
+    """At the end of a cook PDG offered nothing to, each cached step in the cook is named with a file.
+
+    A cached step outside the cook, and a step with nothing cached, are not named.
+    """
+    first: str = os.path.join(WORKING_DIR, "geo", "up.1.bgeo.sc")
+
+    def cached(name: str, index: int) -> RawItem:
+        """An item of ``name`` that PDG cooked from cache, with one declared output."""
+        return _item(
+            f"{name}_{index}",
+            index,
+            declared_outputs=(DeclaredFile(f"__PDG_DIR__/geo/{name}.{index}.bgeo.sc", ""),),
+            cached=True,
+        )
+
+    nodes: List[NodeInfo] = [
+        _node("up", count=0, in_cook_set=True, cached_items=(cached("up", 1), cached("up", 2))),
+        _node("down", ["up"], count=0, in_cook_set=True, cached_items=(cached("down", 1),)),
+        _node("other", count=0, in_cook_set=False, cached_items=(cached("other", 1),)),
+        _node("plain", count=0, in_cook_set=True),
+    ]
+    verdict: Verdict = validation.cooked_from_cache(
+        _ctx(nodes, working_dir=WORKING_DIR, env={}, exists=lambda path: path == first),
+        offered_nothing=True,
+    )
+    by_step: Dict[str, Refusal] = {r.subject: r for r in verdict.refusals}
+    assert set(by_step) == {"up", "down"}
+    assert {r.scenario for r in verdict.refusals} == {RefusalScenario.CACHED_OUTPUTS}
+    assert first in by_step["up"].detail and "no job was created" in by_step["up"].detail
+    assert os.path.join(WORKING_DIR, "geo", "down.1.bgeo.sc") in by_step["down"].detail
+    assert "Write Files" in by_step["up"].remedy
+
+
 # -- outputs that cannot be delivered ------------------------------------------
 
 

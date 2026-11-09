@@ -2076,6 +2076,95 @@ def test_closing_without_cancel_leaves_a_job_whose_tasks_were_all_offered() -> N
     assert h.summary().final_phase is CookPhase.COOKING
 
 
+def _all_cached(*, in_cook_set: Optional[bool] = True) -> Tuple[NodeInfo, ...]:
+    """CHAIN with every item PDG took from cache, so nothing is left to offer."""
+    nodes: Tuple[NodeInfo, ...] = nodes_for(CHAIN, {"a": "__PDG_DIR__/geo/a.{i}.bgeo.sc"})
+    return tuple(
+        dataclasses.replace(
+            node,
+            items=(),
+            in_cook_set=in_cook_set,
+            cached_items=tuple(dataclasses.replace(i, cached=True) for i in node.items),
+        )
+        for node in nodes
+    )
+
+
+def test_a_cook_pdg_ends_with_every_item_from_cache_is_refused_naming_each_step() -> None:
+    """When PDG took every item from files, nothing is offered and no job is built.
+
+    Without a refusal the cook ends with no job and no message, and the artist
+    can't tell why nothing reached the farm.
+    """
+    h: Harness = Harness(nodes=_all_cached())
+    h.start()
+    with pytest.raises(GraphRefusedError) as raised:
+        h.scheduler.on_stop_cook(False)
+    by_step: Dict[str, str] = {r.subject: r.detail for r in raised.value.verdict.refusals}
+    assert set(by_step) == {"a", "b"}
+    assert {r.scenario for r in raised.value.verdict.refusals} == {RefusalScenario.CACHED_OUTPUTS}
+    assert f"{WORKING_DIR}/geo/a.0.bgeo.sc" in by_step["a"]
+    assert "no job was created" in by_step["a"]
+    for call in ("bundle_dir", "submit", "open_job", "put_payload", "release"):
+        assert h.events.count(call) == 0, call
+    summary: CookSummary = h.summary()
+    assert summary.final_phase is CookPhase.REFUSED and not summary.stopped_by_user
+    assert summary.refusals == (RefusalScenario.CACHED_OUTPUTS,)
+
+
+def test_an_artists_stop_before_any_offer_reads_nothing_and_refuses_nothing() -> None:
+    """The artist stopped the cook, so its cached items say nothing about why no job was built."""
+    h: Harness = Harness(nodes=_all_cached())
+    h.start()
+    assert h.scheduler.on_stop_cook(True)
+    assert h.events.count("read_graph") == 0
+    assert h.summary().refusals == ()
+
+
+def test_a_cook_that_ends_with_cached_steps_outside_it_is_not_refused() -> None:
+    """Items an earlier cook left cached on nodes this cook doesn't touch are not this cook's problem."""
+    h: Harness = Harness(nodes=_all_cached(in_cook_set=False))
+    h.start()
+    assert h.scheduler.on_stop_cook(False)
+    assert h.summary().refusals == () and h.summary().final_phase is CookPhase.CONNECTED
+
+
+def test_a_cook_that_already_offered_an_item_reads_no_cache_at_its_end() -> None:
+    """Once an item was offered the snapshot already judged the cache, so the end reads nothing again."""
+    h: Harness = Harness().cooking()
+    for name in ("a_1", "b_0"):
+        h.scheduler.on_schedule(handle(name))
+    h.host.nodes = _all_cached()
+    assert h.scheduler.on_stop_cook(False)
+    assert h.events.count("read_graph") == 1
+    assert h.summary().refusals == ()
+
+
+def test_with_validation_off_a_cook_from_cache_logs_the_refusal_as_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An artist who turned validation off still sees why no job was built, as a warning."""
+    h: Harness = Harness(nodes=_all_cached(), validate_graph=False)
+    h.start()
+    with caplog.at_level(logging.WARNING, logger=PACKAGE_LOGGER):
+        assert h.scheduler.on_stop_cook(False)
+    assert "a (cached_outputs): Not refused, because graph validation is off." in caplog.text
+    assert h.summary().refusals == ()
+
+
+def test_a_graph_that_cannot_be_read_at_the_end_closes_the_cook_quietly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed read at the end must still close the cook, and must not invent a refusal."""
+    h: Harness = Harness(nodes=_all_cached())
+    h.start()
+    h.events.faults["read_graph"] = RuntimeError("context gone")
+    with caplog.at_level(logging.WARNING, logger=PACKAGE_LOGGER):
+        assert h.scheduler.on_stop_cook(False)
+    assert "Could not read which work items PDG cooked from cache" in caplog.text
+    assert h.summary().refusals == () and h.scheduler._cook is None
+
+
 def test_an_end_with_tasks_pdg_never_offered_fails_the_job_and_names_them(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

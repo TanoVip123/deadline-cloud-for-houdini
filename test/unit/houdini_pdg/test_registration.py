@@ -389,6 +389,59 @@ def test_a_cook_starts_connected_with_the_cook_set_as_names(
     assert scheduler.onStopCook(False) is True
 
 
+class _CachedItem:
+    """A ``pdg.WorkItem`` PDG cooked from cache, with one expected output file."""
+
+    def __init__(self, node: str, index: int, path: str) -> None:
+        self.name: str = f"{node}_{index}"
+        self.index: int = index
+        self.id: int = 100 + index
+        self.node: Any = types.SimpleNamespace(name=node)
+        self.command: str = f"hython {node}.py"
+        self.state: Any = types.SimpleNamespace(name="CookedCache")
+        self.expectedOutputFiles: List[Any] = [types.SimpleNamespace(path=path, tag="file/geo")]
+
+
+def _cooked_from_cache(network: Network, tmp_path: Path) -> Any:
+    """A started cook of ``render`` in which PDG took every item of sim and render from cache."""
+    scheduler: Any = _scheduler(network)
+    network.context.cookSet = [network.node("render")]
+    assert scheduler.onStartCook(False, [network.node("render")]) is True
+    scheduler.dependency_graph = (
+        {
+            _CachedItem("sim", 0, str(tmp_path / "geo" / "sim.0.bgeo.sc")): [],
+            _CachedItem("render", 1, str(tmp_path / "geo" / "render.1.exr")): [],
+        },
+        {},
+        [],
+    )
+    return scheduler
+
+
+def test_a_cook_that_ends_with_every_item_from_cache_shows_why_on_the_node(
+    scene: FakeHou, tmp_path: Path
+) -> None:
+    """With every item cooked from files, PDG offers nothing, so the end of the cook must say why.
+
+    The error names each step in the cook and one of its files, and no job is made.
+    """
+    network: Network = build_network(PYRO_BONFIRE)
+    scheduler: Any = _cooked_from_cache(network, tmp_path)
+    assert scheduler.onStopCook(False) is True
+    (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
+    assert "sim:" in error and str(tmp_path / "geo" / "sim.0.bgeo.sc") in error
+    assert "render:" in error and str(tmp_path / "geo" / "render.1.exr") in error
+    assert "montage:" not in error and "no job was created" in error
+
+
+def test_an_artists_stop_of_a_cook_from_cache_shows_nothing(scene: FakeHou, tmp_path: Path) -> None:
+    """The artist stopped it, so the node shows no error for the cached items."""
+    network: Network = build_network(PYRO_BONFIRE)
+    scheduler: Any = _cooked_from_cache(network, tmp_path)
+    assert scheduler.onStopCook(True) is True
+    assert not [call for call in scheduler.calls if call[0] == "cookError"]
+
+
 def test_an_empty_cook_set_is_not_read_as_cooking_nothing(scene: FakeHou, caplog: Any) -> None:
     """An empty set would leave every node out, so the cook treats it as unknown."""
     scheduler: Any = _scheduler(build_network(PYRO_BONFIRE))

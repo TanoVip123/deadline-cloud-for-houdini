@@ -56,7 +56,9 @@ def node_infos(
     With ``only_items_in_cook``, read during a cook, an item PDG will not schedule
     is left out, and a node whose every generated item is left out is outside the
     cook: cooking one work item cooks it and its upstream items, not their nodes.
-    Outside a cook the item states are an earlier cook's, so every item is kept.
+    A node whose items PDG took from cache stays in the cook when it is in the cook
+    set or upstream of a node in the cook. Outside a cook the item states are an
+    earlier cook's, so every item is kept.
     """
     # The PDG nodes by name. The first of two nodes with one name wins, and a
     # nameless or unreadable node is skipped.
@@ -84,10 +86,20 @@ def node_infos(
         None if cook_set is None else {str(name) for name in _iterate(cook_set)}
     )
 
+    def upstream_of(name: str) -> Set[str]:
+        """The node's upstream nodes, from the network's wires when they could be read."""
+        return wiring.get(name, set()) if wiring is not None else item_upstream.get(name, set())
+
+    # A node PDG took from cache has no item left, but it is in the cook when the
+    # cook asked for it or for a node below it, because cooking a node cooks its inputs.
+    cooked: Set[str] = {name for name, left in items.items() if left} | (requested or set())
+    from_cache: Set[str] = {name for name in outside if cached.get(name)}
+    from_cache_in_cook: Set[str] = from_cache & _with_ancestors(cooked, upstream_of)
+
     def in_cook(name: str) -> Optional[bool]:
         """Whether the node is in the cook, or None when the cook set is unknown."""
         if name in outside:
-            return False
+            return name in from_cache_in_cook
         # A node with items is in the cook whatever the set says: the set is taken
         # at the cook's start, before an HDA's inner nodes exist.
         return None if requested is None else (name in requested or bool(items.get(name)))
@@ -98,9 +110,7 @@ def node_infos(
     for name in sorted(pdg_nodes):
         pdg_node: Any = pdg_nodes[name]
         hom: Any = _call(pdg_node, "topNode")
-        upstream: Set[str] = (
-            wiring.get(name, set()) if wiring is not None else item_upstream.get(name, set())
-        )
+        upstream: Set[str] = upstream_of(name)
         # A step's own parms are judged by the scene walk, so only a node with no
         # job script has its expressions, file parms and Python code read.
         job_script: bool = _has_job_script(pdg_node)
@@ -143,6 +153,20 @@ def node_infos(
             )
         )
     return tuple(infos)
+
+
+def _with_ancestors(names: Set[str], upstream_of: Callable[[str], Set[str]]) -> Set[str]:
+    """``names`` and every node upstream of them. Terminates on a cycle."""
+    # Walk upstream with a visited set, so a cyclic wiring is walked once.
+    found: Set[str] = set()
+    stack: List[str] = list(names)
+    while stack:
+        current: str = stack.pop()
+        if current in found:
+            continue
+        found.add(current)
+        stack.extend(upstream_of(current))
+    return found
 
 
 def collect_scene_reads(
