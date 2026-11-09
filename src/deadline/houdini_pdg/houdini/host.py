@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import threading
+from types import ModuleType
 from typing import (
     AbstractSet,
     Any,
@@ -35,7 +36,7 @@ import pdg  # type: ignore[import-not-found]
 from ..errors import CookSetupError, PayloadTransferError
 from ..graph import GraphSnapshot, NodeInfo, synthesize
 from ..ports import ItemOutcome, ItemState, SceneFiles, T, WorkItemHandle
-from ..scene_reads import ReadReport, SceneReads, match_reads
+from ..scene_reads import ReadReport, SceneReads, match_reads, _path_key
 from ..validation import Refusal, RefusalScenario, ValidationContext, Verdict, validate, waived
 from . import readers
 from .settings import SchedulerSettings
@@ -431,6 +432,17 @@ def _absolute(path: str) -> str:
     return os.path.normpath(os.path.abspath(os.path.expanduser(stripped))) if stripped else ""
 
 
+def _absolute_key(path: str, paths: ModuleType = os.path) -> str:
+    """``path`` made absolute and spelled by ``_path_key``, for comparing it with another path."""
+    return _path_key(paths.abspath(paths.expanduser(path.strip())), paths)
+
+
+def _without(found: Iterable[str], drop: Iterable[str], paths: ModuleType = os.path) -> Set[str]:
+    """``found`` less each path that names a file in ``drop``, however each is spelled."""
+    dropped: Set[str] = {_absolute_key(path, paths) for path in drop if path.strip()}
+    return {path for path in found if _absolute_key(path, paths) not in dropped}
+
+
 # -- the graph ----------------------------------------------------------------
 
 
@@ -596,7 +608,7 @@ def _scene_files(node: Any) -> SceneFiles:
     hip: str = str(hou.hipFile.path() or "")
     hip_file: str = _absolute(hip) if hip else ""
     found: Dict[str, Set[str]] = _scene_assets(node)
-    paths: Set[str] = set(found) - {hip_file} - _integration_libraries()
+    paths: Set[str] = _without(found, {hip_file} | _integration_libraries())
     _refuse_unbounded(paths, found, os.environ)
     # Job attachments rejects a directory listed as a file. An asset library can
     # be stored expanded, as a directory.
@@ -701,10 +713,8 @@ def _refuse_unbounded(
     Attaching such a path would hash every file below it before anything is
     submitted, so the cook would hang with no message.
     """
-    # Each home directory that is set, folded for case where paths ignore it.
-    homes: List[str] = [
-        os.path.normcase(_absolute(env[name])) for name in _HOME_VARIABLES if env.get(name)
-    ]
+    # Each home directory that is set. ``_is_unbounded`` spells it as it spells the path.
+    homes: List[str] = [env[name] for name in _HOME_VARIABLES if env.get(name)]
     unbounded: List[str] = sorted(path for path in paths if _is_unbounded(path, homes))
     if not unbounded:
         return
@@ -716,14 +726,19 @@ def _refuse_unbounded(
     )
 
 
-def _is_unbounded(path: str, homes: Sequence[str]) -> bool:
-    """Whether ``path`` is a filesystem root, one of ``homes``, or a directory that holds one."""
+def _is_unbounded(path: str, homes: Sequence[str], paths: ModuleType = os.path) -> bool:
+    """Whether ``path`` is a filesystem root, one of ``homes``, or a directory that holds one.
+
+    Both sides are compared by ``_absolute_key``, so separators and case don't matter
+    where the filesystem ignores them.
+    """
     # A root is its own parent. Above home means home starts with this path.
-    folded: str = os.path.normcase(os.path.normpath(path))
-    if os.path.dirname(folded) == folded:
+    folded: str = _absolute_key(path, paths)
+    if paths.dirname(folded) == folded:
         return True
-    prefix: str = folded.rstrip(os.sep) + os.sep
-    return any(home == folded or home.startswith(prefix) for home in homes)
+    prefix: str = folded.rstrip(paths.sep) + paths.sep
+    keys: List[str] = [_absolute_key(home, paths) for home in homes if home.strip()]
+    return any(home == folded or home.startswith(prefix) for home in keys)
 
 
 # -- pre-cook checks ----------------------------------------------------------

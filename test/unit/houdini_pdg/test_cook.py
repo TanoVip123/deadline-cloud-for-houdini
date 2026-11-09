@@ -2076,10 +2076,16 @@ def test_closing_without_cancel_leaves_a_job_whose_tasks_were_all_offered() -> N
     assert h.summary().final_phase is CookPhase.COOKING
 
 
+#: The root of this OS's current drive, so a test path is absolute on Windows too.
+_DRIVE_ROOT: str = os.path.abspath(os.sep)
+
+
 def _all_cached() -> Tuple[NodeInfo, ...]:
     """CHAIN with every item PDG took from cache, so nothing is left and each node is outside the cook."""
-    # Each node's items move to its cached items, and a's declare a file.
-    nodes: Tuple[NodeInfo, ...] = nodes_for(CHAIN, {"a": "__PDG_DIR__/geo/a.{i}.bgeo.sc"})
+    # Each node's items move to its cached items, and a's declare a file spelled
+    # with "/", as Houdini spells paths on Windows too.
+    cache: str = _DRIVE_ROOT.replace("\\", "/").rstrip("/") + "/proj/cache/geo"
+    nodes: Tuple[NodeInfo, ...] = nodes_for(CHAIN, {"a": cache + "/a.{i}.bgeo.sc"})
     return tuple(
         dataclasses.replace(
             node,
@@ -2105,7 +2111,8 @@ def test_a_cook_pdg_ends_with_every_item_from_cache_is_refused_naming_each_step(
     by_step: Dict[str, str] = {r.subject: r.detail for r in raised.value.verdict.refusals}
     assert set(by_step) == {"a", "b"}
     assert {r.scenario for r in raised.value.verdict.refusals} == {RefusalScenario.CACHED_OUTPUTS}
-    assert f"{WORKING_DIR}/geo/a.0.bgeo.sc" in by_step["a"]
+    # The refusal names the file in this OS's spelling.
+    assert os.path.join(_DRIVE_ROOT, "proj", "cache", "geo", "a.0.bgeo.sc") in by_step["a"]
     assert "no job was created" in by_step["a"]
     for call in ("bundle_dir", "submit", "open_job", "put_payload", "release"):
         assert h.events.count(call) == 0, call

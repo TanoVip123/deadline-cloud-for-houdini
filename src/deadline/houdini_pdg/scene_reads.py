@@ -19,6 +19,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from types import ModuleType
 from typing import (
     AbstractSet,
     Dict,
@@ -256,28 +257,45 @@ def match_reads(
     )
 
 
+def _path_key(path: str, paths: ModuleType = os.path) -> str:
+    """``path`` spelled one way, for comparing it with another path.
+
+    It is normalized, so ``/`` and ``\\`` are one separator on Windows, and its case
+    is folded where the filesystem ignores case. ``paths`` is ``os.path``, or
+    ``ntpath`` in a test of Windows rules.
+    """
+    return paths.normcase(paths.normpath(path))
+
+
 def reads_opening(
-    files: AbstractSet[str], reads: Sequence[SceneRead], working_dir: str
+    files: AbstractSet[str],
+    reads: Sequence[SceneRead],
+    working_dir: str,
+    paths: ModuleType = os.path,
 ) -> Tuple[SceneRead, ...]:
-    """The reads that open one of ``files``, which are normalized paths.
+    """The reads that open one of ``files``, with both sides compared by ``_path_key``.
 
     A plain read matches by its path. A read that depends on a work item matches
     when a file starts with its static prefix, with the same working-directory
-    guard as producer matching.
+    guard as producer matching. Houdini gives ``/`` paths on Windows too, so they
+    match the same files spelled with ``\\``.
     """
-    working: str = os.path.normpath(working_dir) if working_dir else ""
+    # Both sides are spelled one way, so "/" and "\" paths match on Windows.
+    keys: Set[str] = {_path_key(path, paths) for path in files if path}
+    working: str = _path_key(working_dir, paths) if working_dir else ""
     found: List[SceneRead] = []
     for read in reads:
         if not _depends_on_work_item(read.raw):
-            if read.path and os.path.normpath(read.path) in files:
+            if read.path and _path_key(read.path, paths) in keys:
                 found.append(read)
             continue
         # A prefix with no directory, or one that holds the working directory,
         # would match everything, so it matches nothing.
-        prefix, directory = _normalize_prefix(read.static_prefix)
-        if not directory or (working and _is_below(working, directory)):
+        prefix, directory = _normalize_prefix(read.static_prefix, paths)
+        if not directory or (working and _is_below(working, paths.normcase(directory), paths)):
             continue
-        if any(path.startswith(prefix) for path in files):
+        folded: str = paths.normcase(prefix)
+        if any(key.startswith(folded) for key in keys):
             found.append(read)
     return tuple(found)
 
@@ -345,13 +363,13 @@ def _resolve(path: str, working_dir: str) -> str:
     return os.path.normpath(os.path.expandvars(path.replace(PDG_DIR_TOKEN, working_dir)))
 
 
-def _is_below(path: str, ancestor: str) -> bool:
+def _is_below(path: str, ancestor: str, paths: ModuleType = os.path) -> bool:
     """Whether ``path`` is ``ancestor`` or under it. ``/a/bc`` is not under ``/a/b``."""
     if not path or not ancestor:
         return False
     if path == ancestor:
         return True
-    return path.startswith(ancestor.rstrip(os.sep) + os.sep)
+    return path.startswith(ancestor.rstrip(paths.sep) + paths.sep)
 
 
 def _output_roots(snapshot: GraphSnapshot, working_dir: str) -> Tuple[_Producer, ...]:
@@ -428,7 +446,7 @@ def _producer_of(
     return (at_best[0], tuple(at_best)) if at_best else ("", ())
 
 
-def _normalize_prefix(prefix: str) -> Tuple[str, str]:
+def _normalize_prefix(prefix: str, paths: ModuleType = os.path) -> Tuple[str, str]:
     """The prefix with its directory part normalized, and that directory.
 
     The last component is kept as typed, because it is where the expression
@@ -436,11 +454,11 @@ def _normalize_prefix(prefix: str) -> Tuple[str, str]:
     separator is kept too. Both are ``""`` when the prefix has no directory.
     """
     # Only the part before the last separator is a directory that can be normalized.
-    head, tail = os.path.split(prefix)
+    head, tail = paths.split(prefix)
     if not head:
         return "", ""
-    directory: str = os.path.normpath(head)
-    return os.path.join(directory, tail), directory
+    directory: str = paths.normpath(head)
+    return paths.join(directory, tail), directory
 
 
 def _prefix_matches(

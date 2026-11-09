@@ -12,7 +12,9 @@ from __future__ import annotations
 
 # Standard library, hypothesis for the "for any reads" properties, and the public
 # surface of ``graph`` and ``scene_reads`` only.
+import ntpath
 import os
+import posixpath
 from typing import Dict, FrozenSet, List, Sequence, Set, Tuple
 
 import pytest
@@ -847,24 +849,17 @@ def test_a_write_parm_is_known_by_its_name_or_by_its_node_type(
     assert is_output_parm(node_type, parm) is expected
 
 
-def test_reads_opening_matches_a_file_by_path_or_by_static_prefix() -> None:
-    """A plain read matches only the exact file, and a prefix read matches the files under its prefix.
-
-    A sibling file in the same directory is not a match, so a node that writes a
-    log next to a step's input is not refused.
-    """
-    # One written file, and four step reads: the file, its sibling, a prefix that
-    # covers it, and a prefix too wide to judge.
-    files: FrozenSet[str] = frozenset({f"{WORK}/mid/x.txt"})
-    exact: SceneRead = _read("karma", f"{WORK}/mid/x.txt")
-    sibling: SceneRead = _read("karma", f"{WORK}/mid/y.txt")
+def _reads_of_mid(root: str) -> Tuple[SceneRead, ...]:
+    """Four step reads under ``root``: a file, its sibling, a prefix over it, and one too wide."""
+    exact: SceneRead = _read("karma", f"{root}/mid/x.txt")
+    sibling: SceneRead = _read("karma", f"{root}/mid/y.txt")
     prefixed: SceneRead = SceneRead(
         step="karma",
         node_path="/obj/karma",
         parm="file",
         raw="$HIP/mid/`@name`.txt",
         path="",
-        static_prefix=f"{WORK}/mid/",
+        static_prefix=f"{root}/mid/",
     )
     # A prefix at the working directory would match every file, so it matches none.
     too_wide: SceneRead = SceneRead(
@@ -873,7 +868,38 @@ def test_reads_opening_matches_a_file_by_path_or_by_static_prefix() -> None:
         parm="file",
         raw="$HIP/`@name`",
         path="",
-        static_prefix=f"{WORK}/",
+        static_prefix=f"{root}/",
     )
-    found: Tuple[SceneRead, ...] = reads_opening(files, [exact, sibling, prefixed, too_wide], WORK)
-    assert found == (exact, prefixed)
+    return exact, sibling, prefixed, too_wide
+
+
+def test_reads_opening_matches_a_file_by_path_or_by_static_prefix() -> None:
+    """A plain read matches only the exact file, and a prefix read matches the files under its prefix.
+
+    A sibling file in the same directory is not a match, so a node that writes a
+    log next to a step's input is not refused. The reads are spelled with "/", as
+    Houdini spells them on Windows too, and the file in this OS's spelling.
+    """
+    root: str = os.path.abspath(os.sep)
+    reads: Tuple[SceneRead, ...] = _reads_of_mid(root.replace("\\", "/").rstrip("/") + "/proj")
+    files: FrozenSet[str] = frozenset({os.path.join(root, "proj", "mid", "x.txt")})
+    found: Tuple[SceneRead, ...] = reads_opening(files, reads, os.path.join(root, "proj"))
+    assert found == (reads[0], reads[2])
+
+
+def test_reads_opening_ignores_separators_and_case_on_windows_only() -> None:
+    """On Windows ``C:/proj/mid/x.txt`` and ``c:\\Proj\\MID\\x.txt`` are one file, so the read opens it.
+
+    A miss would let a node that writes a step's input go unrefused, so the step
+    would read a file the farm never gets.
+    """
+    # The file in Windows spelling, and the reads with "/" and other case.
+    files: FrozenSet[str] = frozenset({r"c:\Proj\MID\x.txt"})
+    reads: Tuple[SceneRead, ...] = _reads_of_mid("C:/proj")
+    found: Tuple[SceneRead, ...] = reads_opening(files, reads, r"c:\PROJ", ntpath)
+    assert found == (reads[0], reads[2])
+    # On Linux the case differs, so nothing matches.
+    assert (
+        reads_opening(frozenset({"/Proj/MID/x.txt"}), _reads_of_mid("/proj"), "/proj", posixpath)
+        == ()
+    )

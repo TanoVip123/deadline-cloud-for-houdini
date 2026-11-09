@@ -723,7 +723,7 @@ def _scene_walk_file_uses(ctx: ValidationContext) -> Dict[str, List[str]]:
     written: Dict[str, Set[str]] = {}
     for write in report.node_writes:
         if write.path:
-            written.setdefault(write.step, set()).add(os.path.normpath(write.path))
+            written.setdefault(write.step, set()).add(write.path)
     for node in ctx.nodes:
         files: Set[str] = written.get(node.name, set()) | {
             _resolve(declared.path, ctx.working_dir, ctx.env)
