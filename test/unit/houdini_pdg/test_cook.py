@@ -2163,6 +2163,22 @@ def test_a_graph_that_cannot_be_read_at_the_end_closes_the_cook_quietly(
     assert h.summary().refusals == () and h.scheduler._cook is None
 
 
+def test_a_cook_from_cache_is_still_refused_when_the_journal_cannot_record_its_end() -> None:
+    """A journal that raises at the close must not hide why no job was built.
+
+    The close raises out of the cook, and the node must still show the refusal.
+    """
+    # The journal raises while recording the summary of an all-cached cook.
+    h: Harness = Harness(nodes=_all_cached())
+    h.start()
+    h.events.faults["closed"] = RuntimeError("disk full")
+    with pytest.raises(GraphRefusedError) as raised:
+        h.scheduler.on_stop_cook(False)
+    assert {r.scenario for r in raised.value.verdict.refusals} == {RefusalScenario.CACHED_OUTPUTS}
+    assert h.journal.handler not in logging.getLogger(PACKAGE_LOGGER).handlers
+    assert h.events.count("submit") == 0
+
+
 def test_an_end_with_tasks_pdg_never_offered_fails_the_job_and_names_them(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
