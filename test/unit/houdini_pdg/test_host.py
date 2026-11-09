@@ -6,13 +6,15 @@ from __future__ import annotations
 
 import json
 import logging
+import ntpath
 import os
+import posixpath
 import subprocess
 import sys
 import threading
 import types
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Set, Tuple
 
 import pytest
 
@@ -421,7 +423,8 @@ def test_a_reads_static_prefix_has_its_variables_expanded(
     hom.set_parm("other", "${NO_SUCH_VARIABLE_X}/geo/`@pdg_index`.bgeo", kind="FileReference")
     reads: SceneReads = HoudiniPdgHost(network.scheduler()).read_scene()
     prefixes: Dict[str, str] = {read.parm: read.static_prefix for read in reads.reads}
-    assert prefixes["file"] == os.path.join(str(tmp_path / "scene"), "geo") + "/"
+    # Houdini puts $HIP's value in place and keeps the authored "/geo/" as typed.
+    assert prefixes["file"] == str(tmp_path / "scene") + "/geo/"
     assert prefixes["other"] == ""
 
 
@@ -640,12 +643,35 @@ def test_a_folder_below_home_is_attached(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert host.scene_files().directories == (os.path.join(home, "caches"),)
 
 
-def test_the_home_comparison_ignores_case_where_the_filesystem_does() -> None:
-    """Windows paths ignore case, so ``C:\\Users\\Ana`` and ``c:\\users\\ana`` are one folder."""
-    home: str = os.path.normcase(os.path.abspath(os.path.join(os.sep, "Users", "Ana")))
-    spelled: str = os.path.join(os.sep, "USERS", "ANA") if os.name == "nt" else home
-    assert host_module._is_unbounded(spelled, [home])
-    assert not host_module._is_unbounded(os.path.join(home, "proj"), [home])
+def test_the_home_comparison_ignores_case_and_separators_where_windows_does() -> None:
+    """On Windows ``C:/Users/Ana`` and ``c:\\users\\ana`` are one folder, and on Linux they aren't.
+
+    A miss on Windows would let a parm that names home attach the whole home
+    directory, so the cook would hang hashing it.
+    """
+    # Home itself, a folder above it and a drive root, in each spelling.
+    for spelled in (r"C:\USERS\ANA", "C:/Users/Ana", "c:/users", "D:/"):
+        assert host_module._is_unbounded(spelled, [r"C:\Users\Ana"], ntpath), spelled
+    # A folder inside home, and a sibling whose name only starts with home's.
+    for spelled in (r"C:\Users\Ana\proj", "c:/users/anabel"):
+        assert not host_module._is_unbounded(spelled, [r"C:\Users\Ana"], ntpath), spelled
+    # Linux paths keep their case.
+    assert not host_module._is_unbounded("/Home/ana", ["/home/ana"], posixpath)
+    assert host_module._is_unbounded("/home/ana/", ["/home/ana"], posixpath)
+
+
+def test_the_scene_file_and_integration_library_are_left_out_however_they_are_spelled() -> None:
+    """The ``.hip`` and this integration's own library are never attached as assets.
+
+    Houdini can name one file with ``/`` in one place and ``\\`` or other case in
+    another, and on Windows that is still the same file.
+    """
+    found: Set[str] = {r"C:\Proj\scene.hip", r"C:\Proj\tex\a.png", r"C:\Tools\otls\dc.hda"}
+    drop: Set[str] = {"c:/proj/Scene.hip", "C:/TOOLS/otls/dc.hda"}
+    assert host_module._without(found, drop, ntpath) == {r"C:\Proj\tex\a.png"}
+    # On Linux case makes them different files, so only the exact spelling is dropped.
+    linux: Set[str] = {"/proj/scene.hip", "/proj/Scene.hip"}
+    assert host_module._without(linux, {"/proj//scene.hip"}, posixpath) == {"/proj/Scene.hip"}
 
 
 # -- settings -----------------------------------------------------------------
