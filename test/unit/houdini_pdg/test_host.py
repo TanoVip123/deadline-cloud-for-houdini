@@ -904,16 +904,16 @@ def test_a_new_override_to_another_scheduler_is_refused_while_pdg_still_names_th
     assert {info.name: info for info in infos}["render"].scheduler_override == "../localscheduler"
 
 
-def test_a_new_override_naming_another_scheduler_by_its_bare_name_is_refused(
+def test_an_override_naming_a_sibling_scheduler_by_its_bare_name_is_not_refused(
     scene: FakeHou,
 ) -> None:
-    """A bare name resolves to no child of the step, so without the network lookup it was cleared."""
-    # The parm names a sibling Local Scheduler by name, while PDG still reports this scheduler.
+    """PDG resolves an override from the step, so a bare sibling name falls back to this scheduler."""
+    # The parm names a sibling Local Scheduler by name, and PDG reports this scheduler.
     network: Network = build_network(PYRO_BONFIRE)
     network.topnet.add(FakeNode("/obj/topnet1/localscheduler"))
     network.node("render").hom.set_parm("topscheduler", "localscheduler")
     assert network.node("render").scheduler_name == "deadlinecloudscheduler1"
-    assert (RefusalScenario.MULTIPLE_SCHEDULERS, "render") in _refused(_verdict(network))
+    assert (RefusalScenario.MULTIPLE_SCHEDULERS, "render") not in _refused(_verdict(network))
 
 
 def test_an_override_that_now_names_this_scheduler_is_cleared_while_pdg_names_the_old_one(

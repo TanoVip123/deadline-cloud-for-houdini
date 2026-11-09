@@ -552,9 +552,8 @@ def _own_overrides_cleared(
 def _override_target(hom: Any) -> str:
     """The path of the node a step's override names, or ``""`` when it names none."""
     value: str = readers._scheduler_override(hom)
-    # A path is relative to the step, so a bare name finds a sibling only from the network.
-    target: str = _path_of(_call(hom, "node", value))
-    return target or _path_of(_call(_call(hom, "parent"), "node", value))
+    # PDG resolves the path from the step, so a bare sibling name names no node.
+    return _path_of(_call(hom, "node", value))
 
 
 def _names_own(
