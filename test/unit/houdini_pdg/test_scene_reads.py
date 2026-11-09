@@ -880,6 +880,7 @@ def test_reads_opening_matches_a_file_by_path_or_by_static_prefix() -> None:
     log next to a step's input is not refused. The reads are spelled with "/", as
     Houdini spells them on Windows too, and the file in this OS's spelling.
     """
+    # This OS's drive root, so the paths are absolute on Windows too.
     root: str = os.path.abspath(os.sep)
     reads: Tuple[SceneRead, ...] = _reads_of_mid(root.replace("\\", "/").rstrip("/") + "/proj")
     files: FrozenSet[str] = frozenset({os.path.join(root, "proj", "mid", "x.txt")})
