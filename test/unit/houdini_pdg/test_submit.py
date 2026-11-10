@@ -602,3 +602,37 @@ def test_a_missing_listed_file_is_shown_before_anything_is_generated(
     assert submit(node, get_setting=_workstation) is False
     assert "input_filenames1" in scene.messages.calls[0][0]
     assert display.generate_calls == []
+
+
+class _Unprintable:
+    """A value Houdini hands back that can't be turned into text, as a broken node might."""
+
+    def __str__(self) -> str:
+        raise RuntimeError("unreadable")
+
+
+def test_a_scene_walk_that_fails_after_the_generate_still_gets_a_verdict(
+    scene: FakeHou,
+) -> None:
+    """With no scene reads, Submit must judge the generated items alone, not stop on the missing reads.
+
+    One step's node can't be read, so the scene walk reports itself unavailable.
+    """
+    # render's node gives a name that can't be turned into text, after a full generate.
+    network: FakeNetwork = _network()
+    network.node("render").hom.name = lambda: _Unprintable()  # type: ignore[method-assign]
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    assert "Steps: 3, tasks: 3" in scene.messages.calls[0][0]
+
+
+def test_submit_reads_the_items_with_partitions_expanded(scene: FakeHou) -> None:
+    """Submit must read the same expanded graph the cook reads, or the two could judge different jobs.
+
+    In Houdini 21.0 the expanded graph gave every step its items with no false refusal.
+    """
+    network: FakeNetwork = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    scheduler: Any = network.context.schedulers["deadlinecloudscheduler1"]
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    assert scheduler.calls == [("dependencyGraph", True)]
