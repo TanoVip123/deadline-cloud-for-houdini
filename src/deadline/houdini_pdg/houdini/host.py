@@ -315,26 +315,35 @@ class HoudiniPdgHost:
 
 
 def run_pre_cook_checks(
-    node: Any, *, interactive: bool, cook_set: Optional[AbstractSet[str]] = None
-) -> Verdict:
+    node: Any,
+    *,
+    cook_set: Optional[AbstractSet[str]] = None,
+    dependency_graph: Any = None,
+) -> Tuple[Verdict, GraphSnapshot]:
     """The checks before a cook on the scheduler ``node`` starts, from the TOP Cook button or Submit.
 
-    The unsaved ``.hip`` prompt first, then the refusals the topology alone can show.
-    A refusal or a cancel starts nothing. With ``interactive``, unsaved changes are
-    saved first, or the artist cancels, which raises ``UserInitiatedCancel``. With no
-    UI, the prompt becomes a refusal. ``cook_set`` names the nodes the cook runs.
+    Returns the verdict, with a refusal for an unsaved ``.hip``, and the job's shape.
+    ``cook_set`` names the nodes the cook runs. With no ``dependency_graph``, only the
+    topology is judged. With one, every check runs on its generated items.
     """
 
-    # One trip to the main thread for the prompt and both checks, since each waits on the UI.
-    def check() -> Verdict:
-        if interactive:
-            prompt_to_save(node)
+    # One trip to the main thread for both checks, since each waits on the UI.
+    def check() -> Tuple[Verdict, GraphSnapshot]:
+        found: Verdict
+        snapshot: GraphSnapshot
         # A settings problem is reported by the cook when it starts, so the topology
         # is still judged without it.
-        found: Verdict = _check_network(
-            node, _get_or_create_graph_context(node), _read_settings_or_none(node), cook_set, None
-        )[0]
-        return Verdict(refusals=found.refusals + _check_saved_scene(), advisories=found.advisories)
+        found, snapshot = _check_network(
+            node,
+            _get_or_create_graph_context(node),
+            _read_settings_or_none(node),
+            cook_set,
+            dependency_graph,
+        )
+        verdict: Verdict = Verdict(
+            refusals=found.refusals + _check_saved_scene(), advisories=found.advisories
+        )
+        return verdict, snapshot
 
     return on_main_thread(check)
 
@@ -1236,7 +1245,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         settings: SchedulerSettings = read_scheduler_settings(node)
         requirements: Optional[Dict[str, Any]] = read_host_requirements(node)
         inputs: List[Tuple[str, str]] = read_listed_inputs(node)
-        # The graph context and the cook set are read once, for every check below.
+        # The graph context and the cook set that the steps below use.
         context: Any = _get_or_create_graph_context(node)
         cook_set: Optional[FrozenSet[str]] = _find_cook_set(context, display)
         # A job shape over a quota is known from the wires, so nothing is generated for
@@ -1267,11 +1276,10 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             context, "schedulerForName", _call(node, "getPDGNodeName") or node.name()
         )
         dependency_graph: Any = _call(scheduler, "dependencyGraph", True)
-        checked: Verdict
+        verdict: Verdict
         snapshot: GraphSnapshot
-        checked, snapshot = _check_network(node, context, settings, cook_set, dependency_graph)
-        verdict: Verdict = Verdict(
-            refusals=checked.refusals + _check_saved_scene(), advisories=checked.advisories
+        verdict, snapshot = run_pre_cook_checks(
+            node, cook_set=cook_set, dependency_graph=dependency_graph
         )
         if verdict.refusals:
             raise GraphRefusedError(verdict)

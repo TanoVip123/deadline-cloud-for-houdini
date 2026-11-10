@@ -144,9 +144,7 @@ class DeadlineCloudPDGScheduler(PyScheduler):
             names: Optional[FrozenSet[str]] = cook_set_names(cook_set)
             if not generate:
                 # A generate submits nothing, so only a cook is checked.
-                _refuse(
-                    run_pre_cook_checks(host.scheduler_node(), interactive=False, cook_set=names)
-                )
+                _refuse(run_pre_cook_checks(host.scheduler_node(), cook_set=names)[0])
             clock: SystemClock = SystemClock()
             clients: _DeadlineCloudCalls = self._clients()
             self._core = PdgScheduler(

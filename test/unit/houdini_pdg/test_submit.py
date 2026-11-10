@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import types
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -22,7 +23,7 @@ from .houdini_fakes import (
     install_hou,
 )
 
-from deadline.houdini_pdg.houdini.host import submit
+from deadline.houdini_pdg.houdini.host import run_pre_cook_checks, submit
 
 _SAVE: Tuple[str, ...] = ("Save", "Always Save", "Cancel")
 _CONFIRM: Tuple[str, ...] = ("Submit", "Cancel")
@@ -667,3 +668,28 @@ def test_submit_reads_the_items_with_partitions_expanded(scene: FakeHou) -> None
     scheduler: Any = network.context.schedulers["deadlinecloudscheduler1"]
     assert submit(network.scheduler_node, get_setting=_workstation) is True
     assert scheduler.calls == [("dependencyGraph", True)]
+
+
+def test_submit_checks_the_generated_items_through_the_cook_buttons_checks(scene: FakeHou) -> None:
+    """Submit and the TOP Cook button must share one check path, so a check added there covers both.
+
+    A copy of the checks in Submit would pass every other test and drift later.
+    """
+    # Record each call of the shared checks and the graph it was given, without patching them.
+    graphs: List[Any] = []
+    code: types.CodeType = run_pre_cook_checks.__code__
+
+    def record(frame: types.FrameType, event: str, _arg: Any) -> None:
+        if event == "call" and frame.f_code is code:
+            graphs.append(frame.f_locals["dependency_graph"])
+
+    network: FakeNetwork = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    scheduler: Any = network.context.schedulers["deadlinecloudscheduler1"]
+    previous: Any = sys.getprofile()
+    sys.setprofile(record)
+    try:
+        assert submit(network.scheduler_node, get_setting=_workstation) is True
+    finally:
+        sys.setprofile(previous)
+    assert len(graphs) == 1 and graphs[0] is scheduler.dependency_graph

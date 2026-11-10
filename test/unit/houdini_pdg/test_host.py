@@ -41,6 +41,7 @@ from deadline.houdini_pdg.houdini import host as host_module
 from deadline.houdini_pdg.houdini.host import (
     HoudiniPdgHost,
     cook_set_names,
+    prompt_to_save,
     read_host_requirements,
     read_scheduler_settings,
     run_pre_cook_checks,
@@ -937,9 +938,11 @@ def test_without_a_ui_scene_reads_run_on_the_calling_thread(
 # -- pre-cook checks ----------------------------------------------------------
 
 
-def _verdict(network: FakeNetwork, interactive: bool = False) -> Verdict:
-    """The pre-cook verdict for the network's scheduler node."""
-    return run_pre_cook_checks(network.scheduler_node, interactive=interactive)
+def _verdict(network: FakeNetwork, prompt: bool = False) -> Verdict:
+    """The scheduler node's pre-cook verdict, after the save prompt when ``prompt``."""
+    if prompt:
+        prompt_to_save(network.scheduler_node)
+    return run_pre_cook_checks(network.scheduler_node)[0]
 
 
 def _refused(verdict: Verdict) -> List[Tuple[RefusalScenario, str]]:
@@ -1188,7 +1191,7 @@ def test_save_at_the_prompt_saves_and_leaves_nothing_to_refuse(scene: FakeHou) -
     """The prompt comes before the checks, so a save there clears the unsaved-scene refusal."""
     scene.hip_file.unsaved = True
     network: FakeNetwork = _auto_save_network(0)
-    assert _verdict(network, interactive=True).accepted()
+    assert _verdict(network, prompt=True).accepted()
     assert scene.hip_file.saves == 1
     assert [buttons for _, buttons in scene.messages.calls] == [_BUTTONS]
     assert network.scheduler_node.parm("auto_save_hip").sets == []  # type: ignore[union-attr]
@@ -1201,12 +1204,12 @@ def test_always_save_saves_and_turns_auto_save_on_so_the_next_submit_does_not_as
     scene.hip_file.unsaved = True
     scene.messages.choice = 1
     network: FakeNetwork = _auto_save_network(0)
-    assert _verdict(network, interactive=True).accepted()
+    assert _verdict(network, prompt=True).accepted()
     assert scene.hip_file.saves == 1
     assert network.scheduler_node.parm("auto_save_hip").sets == [1]  # type: ignore[union-attr]
     # The next submit with changes saves without asking.
     scene.hip_file.unsaved = True
-    assert _verdict(network, interactive=True).accepted()
+    assert _verdict(network, prompt=True).accepted()
     assert len(scene.messages.calls) == 1 and scene.hip_file.saves == 2
 
 
@@ -1217,7 +1220,7 @@ def test_cancel_at_the_save_prompt_raises_user_initiated_cancel(scene: FakeHou) 
         scene.hip_file.unsaved = True
         network: FakeNetwork = _auto_save_network(0)
         with pytest.raises(UserInitiatedCancel):
-            _verdict(network, interactive=True)
+            _verdict(network, prompt=True)
         assert scene.hip_file.saves == 0
         assert network.scheduler_node.parm("auto_save_hip").sets == []  # type: ignore[union-attr]
 
@@ -1225,13 +1228,13 @@ def test_cancel_at_the_save_prompt_raises_user_initiated_cancel(scene: FakeHou) 
 def test_with_auto_save_on_unsaved_changes_are_saved_without_asking(scene: FakeHou) -> None:
     """The toggle means the artist chose to save on every submit."""
     scene.hip_file.unsaved = True
-    assert _verdict(_auto_save_network(1), interactive=True).accepted()
+    assert _verdict(_auto_save_network(1), prompt=True).accepted()
     assert scene.messages.calls == [] and scene.hip_file.saves == 1
 
 
 def test_a_saved_scene_gets_no_save_prompt(scene: FakeHou) -> None:
     """A scene with nothing to save must not ask, so a saved scene submits without that dialog."""
-    assert _verdict(_auto_save_network(0), interactive=True).accepted()
+    assert _verdict(_auto_save_network(0), prompt=True).accepted()
     assert scene.messages.calls == [] and scene.hip_file.saves == 0
 
 
@@ -1239,16 +1242,16 @@ def test_a_never_saved_scene_is_refused_without_a_prompt(scene: FakeHou) -> None
     """A new scene needs a file name, which the save prompt cannot ask for."""
     scene.hip_file.new = True
     scene.hip_file.unsaved = True
-    verdict: Verdict = _verdict(build_network(PYRO_BONFIRE), interactive=True)
+    verdict: Verdict = _verdict(build_network(PYRO_BONFIRE), prompt=True)
     assert [r.scenario for r in verdict.refusals] == [RefusalScenario.UNSAVED_SCENE]
     assert scene.messages.calls == []
 
 
-def test_without_a_ui_the_interactive_check_does_not_prompt(scene: FakeHou) -> None:
+def test_without_a_ui_the_save_prompt_does_not_ask(scene: FakeHou) -> None:
     """There is no artist to answer a prompt in hython."""
     scene.ui = False
     scene.hip_file.unsaved = True
-    assert _verdict(build_network(PYRO_BONFIRE), interactive=True).accepted()
+    assert _verdict(build_network(PYRO_BONFIRE), prompt=True).accepted()
     assert scene.messages.calls == []
 
 
