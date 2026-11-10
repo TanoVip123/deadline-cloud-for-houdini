@@ -58,6 +58,8 @@ class RawItem:
     #: Whether the cook being read will schedule the item, from its PDG state.
     #: None when unknown.
     in_cook: Optional[bool] = None
+    #: Whether PDG marked the item cooked from cache, from its PDG state.
+    cached: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,6 +104,12 @@ class NodeInfo:
     #: ``(parm, code)`` for each Python code parm, such as a Python Processor's
     #: generate code. Read only for nodes that run no job script.
     python_code: Tuple[Tuple[str, str], ...] = ()
+    #: Whether the node's own Generate When parm makes it dynamic: True for "each"
+    #: or "all upstream items are cooked", False for "generated", None otherwise.
+    dynamic_by_parm: Optional[bool] = None
+    #: Items the cook's graph read left out because PDG cooked them from cache,
+    #: on a node in this cook. Their tasks never reach the farm, so validation refuses the step.
+    cached_items: Tuple[RawItem, ...] = ()
 
     @property
     def is_schedulable(self) -> bool:
@@ -254,7 +262,7 @@ def synthesize(
     by_name: Dict[str, NodeInfo] = {node.name: node for node in sorted(nodes, key=lambda n: n.name)}
     schedulable: Set[str] = {name for name, node in by_name.items() if node.is_schedulable}
 
-    projected: Dict[str, Set[str]] = _project(by_name, schedulable)
+    projected: Dict[str, Set[str]] = project_steps(by_name, schedulable)
     merged, accepted, refused = _merge_data_edges(projected, data_edges or {}, schedulable)
     # No edge is pruned, even one a longer path implies: a worker syncs outputs only
     # from its step's direct dependencies, so removing an edge removes files.
@@ -300,7 +308,9 @@ def synthesize(
     )
 
 
-def _project(by_name: Mapping[str, NodeInfo], schedulable: AbstractSet[str]) -> Dict[str, Set[str]]:
+def project_steps(
+    by_name: Mapping[str, NodeInfo], schedulable: AbstractSet[str]
+) -> Dict[str, Set[str]]:
     """Each step's nearest schedulable upstream nodes, walking through the nodes that map to nothing.
 
     Iterative with a visited set, so a cyclic or dangling ``upstream`` terminates.
@@ -328,6 +338,14 @@ def _project(by_name: Mapping[str, NodeInfo], schedulable: AbstractSet[str]) -> 
         found.discard(name)
         projected[name] = found
     return projected
+
+
+def find_ancestors_among(nodes: Sequence[NodeInfo], among: AbstractSet[str]) -> Dict[str, Set[str]]:
+    """Each node's ancestors, by its upstream wires, that are in ``among``. Terminates on a cycle."""
+    # A wire to a name no node has adds no ancestor.
+    upstream: Dict[str, Set[str]] = {node.name: set(node.upstream) for node in nodes}
+    known: Set[str] = set(among) & upstream.keys()
+    return {name: _ancestors(upstream, name) & known for name in upstream}
 
 
 def _ancestors(deps: Mapping[str, AbstractSet[str]], start: str) -> Set[str]:

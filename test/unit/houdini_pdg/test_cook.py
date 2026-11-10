@@ -79,7 +79,7 @@ from deadline.houdini_pdg.ports import (
     WorkItemHandle,
 )
 from deadline.houdini_pdg.scene_reads import ReadReport, SceneRead, SceneReads
-from deadline.houdini_pdg.validation import RefusalScenario
+from deadline.houdini_pdg.validation import Refusal, RefusalScenario, Verdict
 
 _T0: datetime = datetime(2026, 1, 1, tzinfo=timezone.utc)
 WORKING_DIR: str = "/proj/cook"
@@ -260,6 +260,8 @@ class FakeHost:
         self.reasons: Dict[int, Tuple[str, str]] = {}
         #: Whether generation is being watched.
         self.watching: bool = False
+        #: What the cook asked to hear when generation passes a quota.
+        self.on_quota_exceeded: Optional[Callable[[Verdict], bool]] = None
 
     def read_graph(self) -> Sequence[NodeInfo]:
         self.events("read_graph")
@@ -283,10 +285,18 @@ class FakeHost:
     def set_working_dir(self, path: str) -> None:
         self.events("set_working_dir", path)
 
-    def watch_generation(self, cook_set: Optional[AbstractSet[str]]) -> None:
+    def watch_generation(
+        self,
+        cook_set: Optional[AbstractSet[str]],
+        on_quota_exceeded: Optional[Callable[[Verdict], bool]] = None,
+    ) -> None:
         # A watch takes effect after the call's hook, as a real one would once registered.
         self.events("watch_generation", cook_set)
         self.watching = True
+        self.on_quota_exceeded = on_quota_exceeded
+
+    def host_requirements(self) -> Optional[Dict[str, Any]]:
+        return None
 
     def pending_generation(self) -> Sequence[str]:
         # Each queued answer is used once: names, or an error to raise.
@@ -305,6 +315,15 @@ class FakeHost:
     def failure_reason(self, item_id: int) -> Tuple[str, str]:
         self.events("failure_reason", item_id)
         return self.reasons.get(item_id, ("", ""))
+
+    def houdini_version(self) -> str:
+        return "21.0"
+
+    def queue_parameter_values(self) -> List[Dict[str, Any]]:
+        return []
+
+    def on_main_thread(self, read: Callable[[], Any]) -> Any:
+        return read()
 
 
 class FakeSubmitter:
@@ -454,9 +473,11 @@ class Harness:
         scene: SceneReads = SceneReads(),
         validate_graph: bool = True,
         journal: Optional[CookJournal] = None,
+        output_directories: Tuple[str, ...] = (),
     ) -> None:
         # The fakes share one event log, so a test can check the order of calls.
         self.validate_graph: bool = validate_graph
+        self.output_directories: Tuple[str, ...] = output_directories
         self.events: Events = Events()
         self.clock: FakeClock = FakeClock()
         self.host: FakeHost = FakeHost(
@@ -480,7 +501,9 @@ class Harness:
     def _read_settings(self) -> SchedulerSettings:
         self.events("read_settings")
         # The default settings, so a test that keeps validation on relies on the default.
-        settings: SchedulerSettings = SchedulerSettings(working_dir=WORKING_DIR)
+        settings: SchedulerSettings = SchedulerSettings(
+            working_dir=WORKING_DIR, output_directories=self.output_directories
+        )
         return (
             settings if self.validate_graph else dataclasses.replace(settings, validate_graph=False)
         )
@@ -2065,6 +2088,177 @@ def test_closing_without_cancel_leaves_a_job_whose_tasks_were_all_offered() -> N
     h.scheduler.on_stop_cook(False)
     assert (h.job.cancels, h.job.fails) == (0, 0)
     assert h.summary().final_phase is CookPhase.COOKING
+
+
+#: The root of this OS's current drive, so a test path is absolute on Windows too.
+_DRIVE_ROOT: str = os.path.abspath(os.sep)
+
+
+def _all_cached() -> Tuple[NodeInfo, ...]:
+    """CHAIN with every item PDG took from cache, so nothing is left and each node is outside the cook."""
+    # Each node's items move to its cached items, and a's declare a file spelled
+    # with "/", as Houdini spells paths on Windows too.
+    cache: str = _DRIVE_ROOT.replace("\\", "/").rstrip("/") + "/proj/cache/geo"
+    nodes: Tuple[NodeInfo, ...] = nodes_for(CHAIN, {"a": cache + "/a.{i}.bgeo.sc"})
+    return tuple(
+        dataclasses.replace(
+            node,
+            items=(),
+            in_cook_set=False,
+            cached_items=tuple(dataclasses.replace(i, cached=True) for i in node.items),
+        )
+        for node in nodes
+    )
+
+
+def test_a_cook_pdg_ends_with_every_item_from_cache_is_refused_naming_each_step() -> None:
+    """When PDG took every item from files, nothing is offered and no job is built.
+
+    Without a refusal the cook ends with no job and no message, and the artist
+    can't tell why nothing reached the farm.
+    """
+    # PDG ends the cook without offering an item, and without a stop by the artist.
+    h: Harness = Harness(nodes=_all_cached())
+    h.start()
+    with pytest.raises(GraphRefusedError) as raised:
+        h.scheduler.on_stop_cook(False)
+    by_step: Dict[str, str] = {r.subject: r.detail for r in raised.value.verdict.refusals}
+    assert set(by_step) == {"a", "b"}
+    assert {r.scenario for r in raised.value.verdict.refusals} == {RefusalScenario.CACHED_OUTPUTS}
+    # The refusal names the file in this OS's spelling.
+    assert os.path.join(_DRIVE_ROOT, "proj", "cache", "geo", "a.0.bgeo.sc") in by_step["a"]
+    assert "no job was created" in by_step["a"]
+    for call in ("bundle_dir", "submit", "open_job", "put_payload", "release"):
+        assert h.events.count(call) == 0, call
+    summary: CookSummary = h.summary()
+    assert summary.final_phase is CookPhase.REFUSED and not summary.stopped_by_user
+    assert summary.refusals == (RefusalScenario.CACHED_OUTPUTS,)
+
+
+@pytest.mark.parametrize("listed, refused_", [((), True), (("/renders",), False)])
+def test_a_step_writing_to_a_listed_output_directory_feeds_the_step_below(
+    listed: Tuple[str, ...], refused_: bool
+) -> None:
+    """The cook judges outputs against the node's folders, or a listed folder would still be refused."""
+    h: Harness = Harness(outputs={"a": "/renders/a.{i}.exr"}, output_directories=listed)
+    h.start()
+    if refused_:
+        with pytest.raises(GraphRefusedError):
+            h.scheduler.on_schedule(handle("a_0"))
+    else:
+        assert h.scheduler.on_schedule(handle("a_0")) is ScheduleResult.SUCCEEDED
+
+
+def _over_quota() -> Verdict:
+    """What the host finds when one step generates more tasks than a step may have."""
+    return Verdict(
+        refusals=(
+            Refusal(
+                scenario=RefusalScenario.QUOTA_EXCEEDED,
+                subject="b",
+                detail="10,001 tasks per step, more than the limit of 10,000.",
+                remedy="Reduce the cook's scope.",
+            ),
+        )
+    )
+
+
+def test_a_quota_crossed_while_pdg_generates_refuses_the_cook_it_stops() -> None:
+    """The stop that follows is a cancel, so without the refusal the artist sees only a stopped cook."""
+    # Generation reports the quota, then PDG stops the cook as canceled.
+    h: Harness = Harness()
+    h.start()
+    assert h.host.on_quota_exceeded is not None and h.host.on_quota_exceeded(_over_quota())
+    with pytest.raises(GraphRefusedError) as raised:
+        h.scheduler.on_stop_cook(True)
+    assert [r.subject for r in raised.value.verdict.refusals] == ["b"]
+    assert h.summary().final_phase is CookPhase.REFUSED and not h.summary().stopped_by_user
+    assert h.summary().refusals == (RefusalScenario.QUOTA_EXCEEDED,)
+    assert h.events.count("submit") == 0
+
+
+def test_with_validation_off_a_quota_crossed_while_generating_does_not_stop_the_cook() -> None:
+    """Validation off keeps every refusal as a warning, so generation is not stopped for one."""
+    # Validation is off, and generation reports a step over its quota.
+    h: Harness = Harness(validate_graph=False)
+    h.start()
+    assert h.host.on_quota_exceeded is not None
+    assert h.host.on_quota_exceeded(_over_quota()) is False
+    assert h.phase() is CookPhase.CONNECTED
+
+
+def test_a_quota_crossed_after_the_snapshot_changes_nothing() -> None:
+    """Once the job exists, the snapshot already judged its quotas, so a late report is ignored."""
+    # The job is already cooking when generation reports a quota.
+    h: Harness = Harness().cooking()
+    assert h.host.on_quota_exceeded is not None
+    assert h.host.on_quota_exceeded(_over_quota()) is False
+    assert h.phase() is CookPhase.COOKING
+
+
+def test_an_artists_stop_before_any_offer_reads_nothing_and_refuses_nothing() -> None:
+    """The artist stopped the cook, so its cached items say nothing about why no job was built."""
+    # The same cook, stopped by the artist.
+    h: Harness = Harness(nodes=_all_cached())
+    h.start()
+    assert h.scheduler.on_stop_cook(True)
+    assert h.events.count("read_graph") == 0
+    assert h.summary().refusals == ()
+
+
+def test_a_cook_that_already_offered_an_item_reads_no_cache_at_its_end() -> None:
+    """Once an item was offered the snapshot already judged the cache, so the end reads nothing again."""
+    # The job runs every item, then the graph changes before PDG ends the cook.
+    h: Harness = Harness().cooking()
+    for name in ("a_1", "b_0"):
+        h.scheduler.on_schedule(handle(name))
+    h.host.nodes = _all_cached()
+    assert h.scheduler.on_stop_cook(False)
+    assert h.events.count("read_graph") == 1
+    assert h.summary().refusals == ()
+
+
+def test_with_validation_off_a_cook_from_cache_logs_the_refusal_as_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An artist who turned validation off still sees why no job was built, as a warning."""
+    # Validation is off, so the refusal is waived.
+    h: Harness = Harness(nodes=_all_cached(), validate_graph=False)
+    h.start()
+    with caplog.at_level(logging.WARNING, logger=PACKAGE_LOGGER):
+        assert h.scheduler.on_stop_cook(False)
+    assert "a (cached_outputs): Not refused, because graph validation is off." in caplog.text
+    assert h.summary().refusals == ()
+
+
+def test_a_graph_that_cannot_be_read_at_the_end_closes_the_cook_quietly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failed read at the end must still close the cook, and must not invent a refusal."""
+    # The graph read raises once PDG ends the cook.
+    h: Harness = Harness(nodes=_all_cached())
+    h.start()
+    h.events.faults["read_graph"] = RuntimeError("context gone")
+    with caplog.at_level(logging.WARNING, logger=PACKAGE_LOGGER):
+        assert h.scheduler.on_stop_cook(False)
+    assert _traceback_logged(caplog, "Could not read which work items PDG cooked from cache.")
+    assert h.summary().refusals == () and h.scheduler._cook is None
+
+
+def test_a_cook_from_cache_is_still_refused_when_the_journal_cannot_record_its_end() -> None:
+    """A journal that raises at the close must not hide why no job was built.
+
+    The close raises out of the cook, and the node must still show the refusal.
+    """
+    # The journal raises while recording the summary of an all-cached cook.
+    h: Harness = Harness(nodes=_all_cached())
+    h.start()
+    h.events.faults["closed"] = RuntimeError("disk full")
+    with pytest.raises(GraphRefusedError) as raised:
+        h.scheduler.on_stop_cook(False)
+    assert {r.scenario for r in raised.value.verdict.refusals} == {RefusalScenario.CACHED_OUTPUTS}
+    assert h.journal.handler not in logging.getLogger(PACKAGE_LOGGER).handlers
+    assert h.events.count("submit") == 0
 
 
 def test_an_end_with_tasks_pdg_never_offered_fails_the_job_and_names_them(

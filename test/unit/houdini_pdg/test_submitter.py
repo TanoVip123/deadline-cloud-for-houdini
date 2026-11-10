@@ -11,7 +11,19 @@ import re
 import sys
 from configparser import ConfigParser
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
+from typing import (
+    AbstractSet,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Type,
+    cast,
+)
 
 import jsonschema
 import pytest
@@ -37,9 +49,17 @@ from deadline.houdini_pdg.errors import (
     PDGSchedulerError,
     QuotaExceededError,
 )
-from deadline.houdini_pdg.graph import DeclaredFile, GraphSnapshot, StepSpec, WorkItemSpec
-from deadline.houdini_pdg.ports import SceneFiles
+from deadline.houdini_pdg.graph import (
+    DeclaredFile,
+    GraphSnapshot,
+    NodeInfo,
+    StepSpec,
+    WorkItemSpec,
+)
+from deadline.houdini_pdg.ports import ItemOutcome, SceneFiles, WorkItemHandle
+from deadline.houdini_pdg.scene_reads import SceneReads
 from deadline.houdini_pdg.submitter import PdgSubmitter, PdgSubmitterSettings
+from deadline.houdini_pdg.validation import Verdict
 
 WORKING_DIR: str = "/proj/pdgtemp"
 # Made-up resource IDs in the service's shape: a prefix and 32 hex digits.
@@ -100,7 +120,81 @@ class FakeNode:
     def _check(self) -> None:
         # A read outside the allowed window would run off Houdini's main thread.
         if self._allowed is not None and not self._allowed[0]:
-            raise AssertionError("The node was read outside read_node.")
+            raise AssertionError("The node was read outside the host's on_main_thread.")
+
+
+class FakeHost:
+    """The scene side of the submitter: its files, Houdini's version, and the node's queue values.
+
+    ``allowed`` opens while ``on_main_thread`` runs a read, so a node built with the
+    same list fails any read made outside it. The cook's own methods are never used.
+    """
+
+    def __init__(
+        self,
+        *,
+        scene: Optional[SceneFiles] = None,
+        queue_values: Optional[List[Dict[str, Any]]] = None,
+        allowed: Optional[List[bool]] = None,
+    ) -> None:
+        self.scene: SceneFiles = scene or SceneFiles(hip_file="/proj/scene.hip")
+        self.queue_values: List[Dict[str, Any]] = queue_values or []
+        self.allowed: List[bool] = allowed if allowed is not None else [False]
+        self.main_thread_reads: int = 0
+        #: The block the node's Host Requirements tab gives, or None for any worker.
+        self.requirements: Optional[Dict[str, Any]] = None
+
+    def scene_files(self) -> SceneFiles:
+        return self.scene
+
+    def houdini_version(self) -> str:
+        return "21.0.631"
+
+    def queue_parameter_values(self) -> List[Dict[str, Any]]:
+        return self.queue_values
+
+    def host_requirements(self) -> Optional[Dict[str, Any]]:
+        return self.requirements
+
+    def on_main_thread(self, read: Callable[[], Any]) -> Any:
+        # Count the read, and open the window a guarded node checks.
+        self.main_thread_reads += 1
+        self.allowed[0] = True
+        try:
+            return read()
+        finally:
+            self.allowed[0] = False
+
+    def read_graph(self) -> Sequence[NodeInfo]:
+        raise AssertionError("The submitter does not read the graph.")
+
+    def read_scene(self) -> SceneReads:
+        raise AssertionError("The submitter does not read the scene's file parms.")
+
+    def serialize(self, item: WorkItemHandle) -> str:
+        raise AssertionError("The submitter does not serialize work items.")
+
+    def notify(self, item: WorkItemHandle, outcome: ItemOutcome) -> None:
+        raise AssertionError("The submitter does not report work items.")
+
+    def set_working_dir(self, path: str) -> None:
+        raise AssertionError("The submitter does not set the working directory.")
+
+    def watch_generation(
+        self,
+        cook_set: Optional[AbstractSet[str]],
+        on_quota_exceeded: Optional[Callable[[Verdict], bool]] = None,
+    ) -> None:
+        raise AssertionError("The submitter does not watch generation.")
+
+    def pending_generation(self) -> Sequence[str]:
+        raise AssertionError("The submitter does not watch generation.")
+
+    def stop_watching_generation(self) -> None:
+        raise AssertionError("The submitter does not watch generation.")
+
+    def failure_reason(self, item_id: int) -> Tuple[str, str]:
+        raise AssertionError("The submitter does not read work item logs.")
 
 
 class FakeCreateJob:
@@ -189,26 +283,25 @@ def make_submitter(
     get_setting: Optional[Callable[[str], str]] = None,
     queue_values: Optional[List[Dict[str, Any]]] = None,
     job_attachments: Optional[Callable[[str, str], Tuple[str, str]]] = None,
+    output_directories: Sequence[str] = (),
 ) -> PdgSubmitter:
     """A submitter whose workstation, scene, file system, queue, and Houdini reads are all fakes."""
     # By default nothing is on disk and the node has no queue parameter values. The file system
     # holds native paths, as the submitter normalizes what it looks up.
     lines: List[str] = log if log is not None else []
     existing: Set[str] = {os.path.normpath(path) for path in files or set()}
-    values: List[Dict[str, Any]] = queue_values or []
     return PdgSubmitter(
         node=node or FakeNode(),
+        host=FakeHost(scene=scene, queue_values=queue_values),
         working_dir=WORKING_DIR,
         snapshot=snapshot,
         create_job=create_job or FakeCreateJob(),
         log=lines.append,
-        scene_files=lambda: scene or SceneFiles(hip_file="/proj/scene.hip"),
         file_exists=lambda path: path in existing,
         job_attachments=job_attachments or (lambda farm, queue: ("bucket-a", "DeadlineCloud")),
         cook_id=COOK_ID,
         get_setting=get_setting or workstation(),
-        houdini_version=lambda: "21.0.631",
-        queue_parameter_values=lambda node: values,
+        output_directories=output_directories,
     )
 
 
@@ -485,6 +578,50 @@ def test_the_node_queue_parameters_are_declared_first_and_valued() -> None:
     assert names[:2] == ["CondaPackages", "CondaChannels"]
     values: Dict[str, Any] = values_by_name(sub.get_parameter_values(settings_, []))
     assert values["CondaPackages"] == "houdini=21.0.* houdini-openjd=0.7.*"
+
+
+_GPU_LINUX: Dict[str, Any] = {
+    "attributes": [{"name": "attr.worker.os.family", "anyOf": ["linux"]}],
+    "amounts": [{"name": "amount.worker.gpu", "min": 1}],
+}
+
+
+@settings(max_examples=25, deadline=None)
+@given(snapshots())
+def test_the_host_requirements_go_on_every_step_and_the_template_still_decodes(
+    snapshot: GraphSnapshot,
+) -> None:
+    """One set for the whole job, as the ROP does, so every step of a session runs on matching workers."""
+    template: Dict[str, Any] = make_submitter(snapshot).get_job_template(
+        make_submitter(snapshot).get_settings(), host_requirements=_GPU_LINUX
+    )
+    assert [s["hostRequirements"] for s in template["steps"]] == [_GPU_LINUX] * len(snapshot.steps)
+    decode_job_template(template=template)
+
+
+def test_without_host_requirements_no_step_has_any() -> None:
+    """Any worker may run the job, so a step must not carry an empty block the service refuses."""
+    template: Dict[str, Any] = template_for(GraphSnapshot(steps=(step("a", 1), step("b", 1))))
+    assert all("hostRequirements" not in s for s in template["steps"])
+
+
+def test_editing_one_steps_requirements_leaves_the_others_alone() -> None:
+    """Each step gets its own copy, so a later change to one step can't reach the rest."""
+    # Build a two step template, then change the first step's copy.
+    sub: PdgSubmitter = make_submitter(GraphSnapshot(steps=(step("a", 1), step("b", 1))))
+    template: Dict[str, Any] = sub.get_job_template(sub.get_settings(), _GPU_LINUX)
+    template["steps"][0]["hostRequirements"]["amounts"].clear()
+    assert template["steps"][1]["hostRequirements"] == _GPU_LINUX
+
+
+def test_the_submitted_bundle_carries_the_nodes_host_requirements(tmp_path: Path) -> None:
+    """The submitter takes the block from the host, so what the node sets is what the job gets."""
+    # The host gives a block, and the bundle is written as the cook writes it.
+    sub: PdgSubmitter = make_submitter()
+    cast(FakeHost, sub._host).requirements = _GPU_LINUX
+    sub.submit(GraphSnapshot(steps=(step("a", 1),)), str(tmp_path / "bundle"))
+    bundle: Dict[str, Any] = read_bundle(tmp_path / "bundle")
+    assert bundle["template"]["steps"][0]["hostRequirements"] == _GPU_LINUX
 
 
 def test_the_description_reaches_the_template() -> None:
@@ -836,14 +973,12 @@ def test_the_workstation_farm_and_queue_are_read_and_its_config_is_never_written
     log: List[str] = []
     PdgSubmitter(
         node=FakeNode(),
+        host=FakeHost(),
         working_dir=WORKING_DIR,
         create_job=create,
         log=log.append,
-        scene_files=lambda: SceneFiles(hip_file="/proj/scene.hip"),
         file_exists=lambda path: False,
         job_attachments=location,
-        houdini_version=lambda: "21.0.631",
-        queue_parameter_values=lambda node: [],
     ).submit(GraphSnapshot(steps=(step("a", 1),)), str(tmp_path / "bundle"))
 
     assert asked == [(FARM, QUEUE)]
@@ -1215,40 +1350,44 @@ def test_the_template_needs_a_snapshot() -> None:
         sub.get_job_template(sub.get_settings())
 
 
-def test_every_node_read_goes_through_the_injected_reader() -> None:
-    """Houdini crashes when a PDG thread reads the scene, so every node read must use read_node."""
-    # The node, the version, and the queue values all fail outside read_node.
-    allowed: List[bool] = [False]
-
-    def read_node(read: Callable[[], Any]) -> Any:
-        allowed[0] = True
-        try:
-            return read()
-        finally:
-            allowed[0] = False
-
-    def guarded(value: Any) -> Callable[..., Any]:
-        def read(*args: Any) -> Any:
-            assert allowed[0], "read outside read_node"
-            return value
-
-        return read
-
-    # Use every read path: settings, template, and parameter values.
+def test_every_node_read_goes_through_the_hosts_main_thread_reader() -> None:
+    """Houdini crashes when a PDG thread reads the scene, so every node read must use the host's on_main_thread."""
+    # The node fails any read made outside the host's reader. Use every read path:
+    # settings, template, and parameter values.
+    host: FakeHost = FakeHost()
     sub: PdgSubmitter = PdgSubmitter(
-        node=FakeNode({"priority": 10}, allowed=allowed),
+        node=FakeNode({"priority": 10}, allowed=host.allowed),
+        host=host,
         working_dir=WORKING_DIR,
         snapshot=GraphSnapshot(steps=(step("a", 1),)),
         job_attachments=lambda farm, queue: ("b", "p"),
-        read_node=read_node,
         get_setting=workstation(),
-        houdini_version=guarded("21.0.631"),
-        queue_parameter_values=guarded([]),
     )
     settings_: PdgSubmitterSettings = sub.get_settings()
     sub.get_job_template(settings_)
     sub.get_parameter_values(settings_, [])
     assert settings_.priority == 10
+    assert host.main_thread_reads >= 2
+
+
+def test_the_hosts_version_and_queue_values_reach_the_job() -> None:
+    """The submitter takes Houdini's version and the node's queue values from the host, not from Houdini directly."""
+    # A host with a distinct version and queue value, so a default could not pass.
+    host: FakeHost = FakeHost(queue_values=[{"name": "CondaChannels", "value": "my-channel"}])
+    sub: PdgSubmitter = PdgSubmitter(
+        node=FakeNode(),
+        host=host,
+        working_dir=WORKING_DIR,
+        snapshot=GraphSnapshot(steps=(step("a", 1),)),
+        job_attachments=lambda farm, queue: ("b", "p"),
+        get_setting=workstation(),
+    )
+    settings_: PdgSubmitterSettings = sub.get_settings()
+    values: List[Dict[str, Any]] = sub.get_parameter_values(settings_, [])
+    assert {"name": "CondaChannels", "value": "my-channel"} in values
+    template: Dict[str, Any] = sub.get_job_template(settings_)
+    (init_file,) = template["jobEnvironments"][0]["script"]["embeddedFiles"]
+    assert yaml.safe_load(init_file["data"])["version"] == "21.0.631"
 
 
 # ---------------------------------------------------------------- queue lookup
@@ -1270,3 +1409,32 @@ def test_a_queue_without_job_attachments_cannot_cook(
     """Every payload is stored in the bucket, so the cook must refuse a queue without one, naming it."""
     with pytest.raises(CookSetupError, match=QUEUE):
         submitter_module._queue_job_attachments(FARM, QUEUE, client=FakeDeadline(attachments))
+
+
+def test_the_nodes_output_directories_join_the_working_directory_in_the_bundle(
+    tmp_path: Path,
+) -> None:
+    """Each task uploads what it writes there only if the job lists the folder as an output."""
+    create: FakeCreateJob = FakeCreateJob()
+    sub: PdgSubmitter = make_submitter(create_job=create, output_directories=("/renders/shot",))
+    sub.submit(GraphSnapshot(steps=(step("a", 1),)), str(tmp_path / "bundle"))
+    bundle: Dict[str, Any] = read_bundle(tmp_path / "bundle")
+    outputs: List[str] = bundle["asset_references"]["assetReferences"]["outputs"]["directories"]
+    assert sorted(outputs) == sorted([WORKING_DIR, "/renders/shot"])
+    # The library asks before attaching a path it doesn't know, and no artist sees a PDG thread.
+    assert "/renders/shot" in create.calls[0][1]["known_asset_paths"]
+    # The worker learns the folders from the session's init data, so it can scan them.
+    (environment,) = bundle["template"]["jobEnvironments"]
+    init: Dict[str, Any] = yaml.safe_load(environment["script"]["embeddedFiles"][0]["data"])
+    assert init["pdg"]["output_directories"] == ["/renders/shot"]
+    decode_job_template(template=bundle["template"])
+
+
+def test_without_output_directories_the_init_data_is_as_before(tmp_path: Path) -> None:
+    """A job from a node with an empty tab must read the same on an adaptor that doesn't know the field."""
+    # Submit with no output folders, then read the session's init data.
+    sub: PdgSubmitter = make_submitter()
+    sub.submit(GraphSnapshot(steps=(step("a", 1),)), str(tmp_path / "bundle"))
+    (environment,) = read_bundle(tmp_path / "bundle")["template"]["jobEnvironments"]
+    init: Dict[str, Any] = yaml.safe_load(environment["script"]["embeddedFiles"][0]["data"])
+    assert set(init["pdg"]) == {"pdg_dir", "bucket", "root_prefix"}

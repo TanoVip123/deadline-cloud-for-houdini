@@ -15,16 +15,27 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
-from types import ModuleType
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import AbstractSet, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from .graph import PDG_DIR_TOKEN, PDG_TOKEN_PREFIX, GraphSnapshot, NodeInfo, WorkItemSpec
+from .graph import (
+    PDG_DIR_TOKEN,
+    PDG_TOKEN_PREFIX,
+    GraphSnapshot,
+    NodeInfo,
+    RawItem,
+    WorkItemSpec,
+    find_ancestors_among,
+    project_steps,
+)
 from .scene_reads import (
     AttributeVariableUse,
     ReadReport,
     ReadVerdict,
     SceneRead,
     _depends_on_work_item,
+    _is_below,
+    job_folders,
+    reads_opening,
 )
 
 _logger: logging.Logger = logging.getLogger(__name__)
@@ -37,6 +48,9 @@ class RefusalScenario(Enum):
     #: An in-process node that writes files a step reads, or reads files a step
     #: writes. Neither reaches the other side without a shared filesystem.
     IN_PROCESS_NODE = "in_process_node"
+    #: A step set to cook In-Process. PDG cooks its items on this machine and
+    #: never offers them to the scheduler, so its tasks would never run.
+    IN_PROCESS_STEP = "in_process_step"
     RUNTIME_FILE_UNPRODUCED = "runtime_file_unproduced"
     ROP_BATCH = "rop_batch"
     MULTIPLE_SCHEDULERS = "multiple_schedulers"
@@ -100,6 +114,9 @@ class ValidationContext:
     #: itself unavailable is passed as None for the same reason.
     reads: Optional[ReadReport] = None
     working_dir: str = ""
+    #: The node's extra output folders. A task uploads what it writes in them, as in
+    #: ``working_dir``, so each check treats them as part of the cook.
+    output_directories: Tuple[str, ...] = ()
     env: Optional[Mapping[str, str]] = None
     quotas: Quotas = Quotas()
     exists: Callable[[str], bool] = os.path.exists
@@ -214,21 +231,21 @@ def _skipped() -> Verdict:
 #: ``$NAME`` or ``${NAME}``.
 _VARIABLE: "re.Pattern[str]" = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 
-_OUTSIDE_WORKING_DIR: str = "outside the working directory"
+_OUTSIDE_JOB_FOLDERS: str = "outside the working directory and every output folder"
 _UNEXPANDED_VARIABLE: str = "unexpanded variable"
 
 # How the artist's message describes each reason, so it reads after "are".
 _UNDELIVERABLE_PHRASES: Dict[str, str] = {
-    _OUTSIDE_WORKING_DIR: _OUTSIDE_WORKING_DIR,
+    _OUTSIDE_JOB_FOLDERS: _OUTSIDE_JOB_FOLDERS,
     _UNEXPANDED_VARIABLE: "left with an unexpanded variable",
 }
 
 # The remedy for each reason an output cannot be delivered. An unexpanded
 # variable needs a different fix than a path outside the delivered tree.
 _UNDELIVERABLE_REMEDIES: Dict[str, str] = {
-    _OUTSIDE_WORKING_DIR: (
-        "Point the working directory at the tree these nodes write to, which is usually "
-        "$HIP, or change the nodes to write under it."
+    _OUTSIDE_JOB_FOLDERS: (
+        "Point the working directory, or an output folder on the Job Attachments tab, at the "
+        "tree these nodes write to, which is usually $HIP, or change the nodes to write under one."
     ),
     _UNEXPANDED_VARIABLE: (
         "Give the variable a real path instead of another variable, or use $HIP."
@@ -264,6 +281,14 @@ def _expand(path: str, env: Optional[Mapping[str, str]]) -> str:
     return _VARIABLE.sub(replace, path)
 
 
+def environment_with_hip(hip_file: str) -> Dict[str, str]:
+    """This process's environment, with ``HIP`` set to the folder of ``hip_file`` when it is unset."""
+    env: Dict[str, str] = dict(os.environ)
+    if not env.get("HIP") and hip_file:
+        env["HIP"] = os.path.dirname(hip_file)
+    return env
+
+
 def _resolve(path: str, working_dir: str, env: Optional[Mapping[str, str]]) -> str:
     """A declared or authored path as it reads on this workstation."""
     # Substitute the PDG directory token for the session's working directory, then
@@ -271,30 +296,16 @@ def _resolve(path: str, working_dir: str, env: Optional[Mapping[str, str]]) -> s
     return os.path.normpath(_expand(path.replace(PDG_DIR_TOKEN, working_dir), env))
 
 
-def _is_below(path: str, ancestor: str, paths: ModuleType = os.path) -> bool:
-    """Whether ``path`` is ``ancestor`` or under it. ``/a/bc`` is not under ``/a/b``.
-
-    ``paths`` is ``os.path``, or ``ntpath`` in a test of Windows rules.
-    """
-    if not path or not ancestor:
-        return False
-    # Fold case where the platform ignores it, so C:\Work is under c:\work on Windows.
-    child: str = paths.normcase(path)
-    parent: str = paths.normcase(ancestor)
-    if child == parent:
-        return True
-    # Compare against the ancestor plus a separator, so a sibling whose name only
-    # starts with the ancestor's is not counted as under it.
-    return child.startswith(parent.rstrip(paths.sep) + paths.sep)
-
-
 def _undeliverable_reason(
-    path: str, working_dir: str, env: Optional[Mapping[str, str]] = None
+    path: str,
+    working_dir: str,
+    env: Optional[Mapping[str, str]] = None,
+    output_directories: Sequence[str] = (),
 ) -> str:
     """Why this declared output cannot reach a dependent step, or ``""``."""
-    # A PDG token makes the path session-relative, and an absolute path inside the
-    # working directory is in the attachment tree, so both are deliverable. A
-    # surviving ``$`` or a path outside the working directory is not.
+    # A PDG token makes the path session-relative, and an absolute path inside one of
+    # the job's folders is uploaded, so both are deliverable. A surviving ``$`` or a
+    # path outside every folder is not.
     if PDG_TOKEN_PREFIX in path:
         return ""
     resolved: str = os.path.normpath(_expand(path, env))
@@ -303,16 +314,38 @@ def _undeliverable_reason(
     if not working_dir:
         # Nothing to compare against, so refusing on a guess is worse than skipping.
         return ""
-    if _is_below(resolved, os.path.normpath(working_dir)):
+    if _is_inside_job(resolved, working_dir, output_directories):
         return ""
-    return _OUTSIDE_WORKING_DIR
+    return _OUTSIDE_JOB_FOLDERS
+
+
+def _is_inside_job(path: str, working_dir: str, output_directories: Sequence[str]) -> bool:
+    """Whether ``path`` is in the working directory or one of the extra output folders."""
+    return any(_is_below(path, folder) for folder in job_folders(working_dir, output_directories))
 
 
 # -- the graph's shape --------------------------------------------------------
 
 
+def _find_dynamic_causes(nodes: Sequence[NodeInfo]) -> List[NodeInfo]:
+    """The dynamic nodes that cause the dynamism, not those PDG flags only for being below one."""
+    dynamic: Set[str] = {node.name for node in nodes if node.is_dynamic}
+    above: Dict[str, Set[str]] = find_ancestors_among(nodes, dynamic)
+    causes: List[NodeInfo] = [
+        node
+        for node in nodes
+        if node.is_dynamic and (node.dynamic_by_parm or not above.get(node.name))
+    ]
+    # A cycle of dynamic nodes has no top, so each one is named rather than none.
+    return causes or [node for node in nodes if node.is_dynamic]
+
+
 def _check_dynamic_nodes(ctx: ValidationContext) -> Verdict:
-    """A node that generates its items while the cook runs has no tasks to describe."""
+    """A node that generates its items while the cook runs has no tasks to describe.
+
+    One refusal per cause: a node is named when its own parm makes it dynamic or
+    no dynamic node is above it.
+    """
     return Verdict(
         refusals=tuple(
             Refusal(
@@ -320,15 +353,15 @@ def _check_dynamic_nodes(ctx: ValidationContext) -> Verdict:
                 subject=node.name,
                 detail=(
                     "This node generates its work items while the cook runs, so the job "
-                    "cannot describe its tasks before it is submitted."
+                    "cannot describe its tasks before it is submitted. The nodes below it "
+                    "are dynamic for the same reason."
                 ),
                 remedy=(
-                    "Replace it with a node that generates its items up front, or cook this "
-                    "network with another scheduler."
+                    "Set its Generate When to All Upstream Items are Generated, or cook "
+                    "this network with another scheduler."
                 ),
             )
-            for node in ctx.nodes
-            if node.is_dynamic
+            for node in _find_dynamic_causes(ctx.nodes)
         )
     )
 
@@ -406,51 +439,77 @@ def _check_quotas(ctx: ValidationContext) -> Verdict:
     The service validates the same ceilings, but only after the scene is uploaded,
     and names neither the node nor a number.
     """
-    quotas: Quotas = ctx.quotas
     steps: Tuple = ctx.snapshot.steps
+    # How many dependencies carry data decides whether the graph is untidy or
+    # inexpressible at step granularity: an ordering edge can be pruned, while
+    # dropping a data edge removes files from a session.
+    carrying: Dict[str, str] = {
+        step.name: (
+            f" {len(step.data_dependencies)} of them carry data a task reads, so they "
+            "cannot be pruned."
+        )
+        for step in steps
+        if step.data_dependencies
+    }
+    return _quota_refusals(
+        [step.name for step in steps],
+        ctx.quotas,
+        count_steps=True,
+        tasks={step.name: step.task_count for step in steps},
+        dependencies={step.name: step.dependencies for step in steps},
+        carrying=carrying,
+    )
+
+
+def _quota_refusals(
+    names: Sequence[str],
+    quotas: Quotas,
+    *,
+    count_steps: bool,
+    tasks: Optional[Mapping[str, int]] = None,
+    dependencies: Optional[Mapping[str, AbstractSet[str]]] = None,
+    carrying: Optional[Mapping[str, str]] = None,
+    note: str = "",
+) -> Verdict:
+    """Refuse each quota the counts cross: the job's tasks and steps, then each step's, then consumers.
+
+    ``count_steps`` judges the step count. ``tasks`` and ``dependencies`` are by step name,
+    and either may be unknown yet. ``carrying`` adds a step's data dependency text, and
+    ``note`` ends each task refusal.
+    """
     refusals: List[Refusal] = []
-
     # Job-wide ceilings: the task total across every step, and the step count.
-    total: int = ctx.snapshot.total_tasks
-    if total > quotas.max_tasks_per_job:
+    if tasks is not None and sum(tasks.values()) > quotas.max_tasks_per_job:
         refusals.append(
-            _quota_refusal(_WHOLE_COOK, total, quotas.max_tasks_per_job, _TASKS_PER_JOB)
-        )
-    if len(steps) > quotas.max_steps_per_job:
-        refusals.append(
-            _quota_refusal(_WHOLE_COOK, len(steps), quotas.max_steps_per_job, _STEPS_PER_JOB)
-        )
-
-    # Per-step ceilings: a step's own task count, and its dependency count.
-    for step in steps:
-        if step.task_count > quotas.max_tasks_per_step:
-            refusals.append(
-                _quota_refusal(
-                    step.name, step.task_count, quotas.max_tasks_per_step, _TASKS_PER_STEP
-                )
+            _quota_refusal(
+                _WHOLE_COOK, sum(tasks.values()), quotas.max_tasks_per_job, _TASKS_PER_JOB, note
             )
-        if len(step.dependencies) > quotas.max_step_dependencies:
-            # How many carry data decides whether the graph is untidy or
-            # inexpressible at step granularity: an ordering edge can be pruned,
-            # while dropping a data edge removes files from a session.
-            carrying: int = len(step.data_dependencies)
+        )
+    if count_steps and len(names) > quotas.max_steps_per_job:
+        refusals.append(
+            _quota_refusal(_WHOLE_COOK, len(names), quotas.max_steps_per_job, _STEPS_PER_JOB)
+        )
+    # Per-step ceilings: a step's own task count, and its dependency count.
+    for name in names:
+        if tasks is not None and tasks[name] > quotas.max_tasks_per_step:
+            refusals.append(
+                _quota_refusal(name, tasks[name], quotas.max_tasks_per_step, _TASKS_PER_STEP, note)
+            )
+        if dependencies is not None and len(dependencies[name]) > quotas.max_step_dependencies:
             refusals.append(
                 _quota_refusal(
-                    step.name,
-                    len(step.dependencies),
+                    name,
+                    len(dependencies[name]),
                     quotas.max_step_dependencies,
                     _DEPENDENCIES_PER_STEP,
-                    extra=(
-                        f" {carrying} of them carry data a task reads, so they cannot be " "pruned."
-                        if carrying
-                        else ""
-                    ),
+                    (carrying or {}).get(name, ""),
                 )
             )
-
     # The consumer ceiling counts, for each step, how many other steps depend on
     # it, by inverting the dependency edges each step lists upstream.
-    consumers: Counter = Counter(dependency for step in steps for dependency in step.dependencies)
+    consumers: Counter = Counter(
+        dependency for deps in (dependencies or {}).values() for dependency in deps
+    )
     for name, count in sorted(consumers.items()):
         if count > quotas.max_step_consumers:
             refusals.append(
@@ -459,7 +518,45 @@ def _check_quotas(ctx: ValidationContext) -> Verdict:
     return Verdict(refusals=tuple(refusals))
 
 
-def _check_no_farm_work(ctx: ValidationContext) -> Verdict:
+def check_shape_quotas(nodes: Sequence[NodeInfo], quotas: Quotas = Quotas()) -> Verdict:
+    """Refuse the steps, dependencies and consumers the wires already show over a quota.
+
+    It runs before generation, on the nodes that are steps and in the cook. A data
+    edge found later can only add a dependency, so each refusal here stands.
+    """
+    by_name: Dict[str, NodeInfo] = {node.name: node for node in nodes}
+    schedulable: Set[str] = {name for name, node in by_name.items() if node.is_schedulable}
+    steps: Set[str] = {name for name in schedulable if by_name[name].in_cook_set is not False}
+    # A step outside the cook has no items, so the job keeps no edge to it.
+    projected: Dict[str, Set[str]] = project_steps(by_name, schedulable)
+    return _quota_refusals(
+        sorted(steps),
+        quotas,
+        count_steps=True,
+        dependencies={name: projected[name] & steps for name in steps},
+    )
+
+
+def check_generated_counts(counts: Mapping[str, int], quotas: Quotas = Quotas()) -> Verdict:
+    """Refuse the task counts of the steps generated so far, once a step or the job is over.
+
+    PDG is still generating, so the refusal says the generation was stopped.
+    """
+    # The wires and the snapshot judge the step count, so only the tasks are judged here.
+    found: Verdict = _quota_refusals(
+        sorted(counts),
+        quotas,
+        count_steps=False,
+        tasks=counts,
+        note=" PDG was still generating, so the generation was stopped.",
+    )
+    # The step that passed its limit is named first, since it is the one to make smaller.
+    return Verdict(
+        refusals=tuple(sorted(found.refusals, key=lambda refusal: refusal.subject == _WHOLE_COOK))
+    )
+
+
+def check_no_farm_work(ctx: ValidationContext) -> Verdict:
     """Refuse a cook that generated items but no step for a worker to run.
 
     The job template requires at least one step, so a snapshot with none is
@@ -496,11 +593,43 @@ def _check_no_farm_work(ctx: ValidationContext) -> Verdict:
                     f"describe no steps and the service would reject it. {len(in_process)} "
                     "node(s) were read and every one of them cooks in this Houdini session."
                 ),
-                remedy=(
-                    "Cook a node that runs on a worker, such as a ROP Fetch, or a Python "
-                    "Script TOP set to Cook (Out-of-Process). A network of only in-process "
-                    "nodes has nothing to send to a farm, so cook it with another scheduler."
+                remedy=_NO_FARM_WORK_REMEDY,
+            ),
+        )
+    )
+
+
+_NO_FARM_WORK_REMEDY: str = (
+    "Cook a node that runs on a worker, such as a ROP Fetch, or a Python Script TOP set "
+    "to Cook (Out-of-Process). A network of only in-process nodes has nothing to send to "
+    "a farm, so cook it with another scheduler."
+)
+
+
+def check_cook_set_has_steps(
+    nodes: Sequence[NodeInfo], cook_set: Optional[AbstractSet[str]]
+) -> Verdict:
+    """Refuse a cook set that names no step, before anything is generated.
+
+    It stands down when the set is unknown or names a node that isn't read, since
+    an asset's inner steps may not exist yet.
+    """
+    # Only a set whose every node is read and known to run no job script is refused.
+    if not cook_set:
+        return Verdict()
+    by_name: Dict[str, NodeInfo] = {node.name: node for node in nodes}
+    if any(name not in by_name or by_name[name].schedulable is not False for name in cook_set):
+        return Verdict()
+    return Verdict(
+        refusals=(
+            Refusal(
+                scenario=RefusalScenario.NO_FARM_WORK,
+                subject=_examples(sorted(cook_set)),
+                detail=(
+                    "No node in this cook runs a command on a worker, so every node would "
+                    "cook in this Houdini session and the job would have no steps."
                 ),
+                remedy=_NO_FARM_WORK_REMEDY,
             ),
         )
     )
@@ -515,8 +644,16 @@ def _check_steps_without_items(ctx: ValidationContext) -> Verdict:
     set is incomplete.
     """
     by_name: Dict[str, NodeInfo] = {node.name: node for node in ctx.nodes}
-    dynamic: Set[str] = {node.name for node in ctx.nodes if node.is_dynamic}
-    dropped: List[str] = [name for name in ctx.snapshot.steps_without_items if name not in dynamic]
+    # These nodes have no items for a reason another check names, and so does
+    # every dropped step below one, so each cause gets one message there.
+    causes: Set[str] = {node.name for node in ctx.nodes if _explains_missing_items(node)}
+    above: Dict[str, Set[str]] = find_ancestors_among(ctx.nodes, causes)
+    explained: Set[str] = causes | {
+        name for name in ctx.snapshot.steps_without_items if above.get(name)
+    }
+    dropped: List[str] = [
+        name for name in ctx.snapshot.steps_without_items if name not in explained
+    ]
 
     def requested(name: str) -> bool:
         # A dropped node is a race only when the cook asked for it. Unknown means
@@ -549,9 +686,9 @@ def _check_steps_without_items(ctx: ValidationContext) -> Verdict:
         missing: Tuple[str, ...] = tuple(
             name
             for name in ctx.snapshot.dependencies_on_dropped.get(step.name, ())
-            if name not in dynamic
+            if name not in explained
         )
-        if not missing or step.name in dynamic:
+        if not missing or step.name in explained:
             continue
         refusals.append(
             Refusal(
@@ -586,7 +723,48 @@ def _check_steps_without_items(ctx: ValidationContext) -> Verdict:
     return Verdict(refusals=tuple(refusals), advisories=advisories)
 
 
+def _explains_missing_items(node: NodeInfo) -> bool:
+    """Whether another refusal already says why this node has no items here."""
+    return bool(
+        node.is_dynamic
+        or _is_in_process_step(node)
+        or node.cached_items
+        or node.cook_type == _SERVICE
+        or _is_command_server(node)
+        or node.scheduler_override
+    )
+
+
 # -- the node's kind ----------------------------------------------------------
+
+
+def _is_in_process_step(node: NodeInfo) -> bool:
+    """Whether a node runs a job script but is set to cook In-Process."""
+    return bool(node.is_schedulable) and node.cook_type == _IN_PROCESS
+
+
+def _check_in_process_steps(ctx: ValidationContext) -> Verdict:
+    """Refuse a step whose cook type is In-Process.
+
+    PDG cooks its items in this Houdini session and never offers them to the
+    scheduler, so its tasks would never be released and the job would fail late.
+    """
+    return Verdict(
+        refusals=tuple(
+            Refusal(
+                scenario=RefusalScenario.IN_PROCESS_STEP,
+                subject=node.name,
+                detail=(
+                    "This node runs a command, but its cook type is In-Process, so PDG cooks "
+                    "its work items in this Houdini session and never sends them to the farm. "
+                    "Its tasks in the job would never run."
+                ),
+                remedy="Set the node's Cook Type (pdg_cooktype) to Out-of-Process.",
+            )
+            for node in ctx.nodes
+            if _is_in_process_step(node)
+        )
+    )
 
 
 def _nearest_steps(start: str, edges: Mapping[str, Set[str]], targets: Set[str]) -> List[str]:
@@ -655,6 +833,43 @@ def _node_file_uses(node: NodeInfo) -> List[str]:
     return uses
 
 
+def _scene_walk_file_uses(ctx: ValidationContext) -> Dict[str, List[str]]:
+    """Each way a node that is not a step touches a step's files that the scene walk shows, by node name.
+
+    A node reads a step's file when a file parm's path matches a file a step
+    writes, and writes one when a write parm or a declared output is a file a step
+    reads.
+    """
+    report: ReadReport = ctx.reads or ReadReport()
+    uses: Dict[str, List[str]] = {}
+    for match in report.node_reads:
+        if match.verdict is not ReadVerdict.EXTERNAL:
+            uses.setdefault(match.read.step, []).append(
+                f"its '{match.read.parm}' parm reads '{match.read.path}', which the step "
+                f"'{match.producer}' writes"
+            )
+    # The files each node writes, from its write parms and its items' declared
+    # outputs, and the step reads that open one of them.
+    written: Dict[str, Set[str]] = {}
+    for write in report.node_writes:
+        if write.path:
+            written.setdefault(write.step, set()).add(write.path)
+    for node in ctx.nodes:
+        files: Set[str] = written.get(node.name, set()) | {
+            _resolve(declared.path, ctx.working_dir, ctx.env)
+            for item in node.items
+            for declared in item.declared_outputs
+        }
+        opened: Tuple[SceneRead, ...] = reads_opening(
+            files, report.step_reads, ctx.working_dir, output_directories=ctx.output_directories
+        )
+        uses.setdefault(node.name, []).extend(
+            f"it writes a file that the step '{read.step}' reads through its '{read.parm}' parm"
+            for read in opened
+        )
+    return uses
+
+
 def _check_non_step_file_use(ctx: ValidationContext) -> Verdict:
     """Refuse a node that is not a step, has a step above it, and touches a step's files.
 
@@ -671,6 +886,7 @@ def _check_non_step_file_use(ctx: ValidationContext) -> Verdict:
         for parent in node.upstream:
             if parent in downstream:
                 downstream[parent].add(node.name)
+    walked: Dict[str, List[str]] = _scene_walk_file_uses(ctx)
 
     refusals: List[Refusal] = []
     advisories: List[Advisory] = []
@@ -689,7 +905,9 @@ def _check_non_step_file_use(ctx: ValidationContext) -> Verdict:
         between: str = f"below {_examples(above)}"
         if below:
             between += f" and above {_examples(below)}"
-        uses: List[str] = _node_file_uses(node)
+        # Two parms the walk reached under one node can give the same reason, so
+        # each reason is kept once.
+        uses: List[str] = list(dict.fromkeys(_node_file_uses(node) + walked.get(node.name, [])))
         if uses:
             refusals.append(
                 Refusal(
@@ -853,17 +1071,20 @@ def _cached_output(item: WorkItemSpec, ctx: ValidationContext) -> str:
 
 
 def _check_cached_outputs(ctx: ValidationContext) -> Verdict:
-    """Refuse a step with an item whose declared outputs already exist on this machine.
+    """Refuse a step in this cook with an item whose declared outputs already exist here, or that PDG cooked from cache.
 
-    PDG's default cache mode marks such an item cooked from cache and never
-    schedules it, so its task never runs and the job waits forever. A node set to
-    Write Files, or a path that still holds a token or a variable, is skipped.
+    With Cache Mode Automatic or Read Files, PDG cooks such an item from cache and
+    never offers it to this scheduler, so its task never runs on the farm. A node
+    set to Write Files, or a path that still holds a token or a variable, is
+    skipped for the files on disk.
     """
     refusals: List[Refusal] = []
-    # Write Files ignores existing results, so a node set to it is never cached.
+    # Write Files ignores existing results, so a node set to it is never cached,
+    # and a step outside this cook is not this cook's to judge.
     writes_always: Set[str] = {n.name for n in ctx.nodes if n.cache_mode == _WRITE_FILES}
+    outside: Set[str] = {n.name for n in ctx.nodes if n.in_cook_set is False}
     for step in ctx.snapshot.steps:
-        if step.name in writes_always:
+        if step.name in writes_always or step.name in outside:
             continue
         # Each item with a result on disk is one PDG would skip, so the step is
         # refused when any item does, and the first such file is the example.
@@ -872,25 +1093,77 @@ def _check_cached_outputs(ctx: ValidationContext) -> Verdict:
         ]
         if not present_files:
             continue
-        cached: int = len(present_files)
-        example: str = present_files[0]
         refusals.append(
             Refusal(
                 scenario=RefusalScenario.CACHED_OUTPUTS,
                 subject=step.name,
-                detail=(
-                    f"{cached} of this step's {step.task_count} work item(s) declare outputs "
-                    f"that already exist, for example '{example}'. PDG would mark them cooked "
-                    "from cache and never schedule them, so their tasks would never run and "
-                    "the job would wait for them forever."
-                ),
-                remedy=(
-                    "Set the node's Cache Mode (pdg_cachemode) to Write Files, or delete its "
-                    "results before cooking (Delete Selected Node Results From Disk)."
-                ),
+                detail=f"{len(present_files)} of this step's {step.task_count} work item(s) declare "
+                f"outputs that already exist, for example '{present_files[0]}'. With Cache "
+                "Mode Automatic or Read Files, PDG cooks such an item from cache and never "
+                "offers it to this scheduler, so its task would not run on the farm.",
+                remedy=_CACHED_OUTPUTS_REMEDY,
+            )
+        )
+    # A step refused for its files is named once.
+    refused: Set[str] = {refusal.subject for refusal in refusals}
+    from_cache: Tuple[Refusal, ...] = check_cooked_from_cache(ctx).refusals
+    return Verdict(
+        refusals=tuple(refusals) + tuple(r for r in from_cache if r.subject not in refused)
+    )
+
+
+def check_cooked_from_cache(ctx: ValidationContext, *, offered_nothing: bool = False) -> Verdict:
+    """Refuse each step in this cook that has an item PDG cooked from cache, naming one of its files.
+
+    ``offered_nothing`` is for a cook that ended before PDG offered any work item,
+    so no job was created.
+    """
+    refusals: List[Refusal] = []
+    for node in ctx.nodes:
+        # PDG already took these items from an earlier cook's files. The graph read
+        # records them only for a node in this cook, so every node that has them is judged.
+        if not node.cached_items or not node.is_schedulable:
+            continue
+        example: str = _cached_example(node.cached_items, ctx)
+        outcome: str = (
+            "and offered no work item to this scheduler, so no job was created."
+            if offered_nothing
+            else "and never offered them to this scheduler, so the job would leave their "
+            "tasks out and the steps below would read the local results."
+        )
+        refusals.append(
+            Refusal(
+                scenario=RefusalScenario.CACHED_OUTPUTS,
+                subject=node.name,
+                detail=f"PDG cooked {len(node.cached_items)} of this step's work item(s) from files "
+                f"already on this machine, for example '{example}', {outcome}",
+                remedy=_CACHED_OUTPUTS_REMEDY,
             )
         )
     return Verdict(refusals=tuple(refusals))
+
+
+_CACHED_OUTPUTS_REMEDY: str = (
+    "Set the node's Cache Mode (pdg_cachemode) to Write Files, or delete its "
+    "results before cooking (Delete Selected Node Results From Disk)."
+)
+
+
+def _cached_example(items: Sequence[RawItem], ctx: ValidationContext) -> str:
+    """A cached item's output that exists here, else its first declared output, else its name."""
+    # A file on disk says why PDG skipped the item, so it is preferred.
+    resolved: List[str] = [
+        _resolve(declared.path, ctx.working_dir, ctx.env)
+        for item in items
+        for declared in item.declared_outputs
+    ]
+    for path in resolved:
+        try:
+            if ctx.exists(path):
+                return path
+        except Exception:
+            _logger.debug("Could not test whether '%s' exists.", path, exc_info=True)
+    return resolved[0] if resolved else items[0].name
 
 
 # -- the scene's file references ----------------------------------------------
@@ -912,7 +1185,11 @@ def _check_undeliverable_outputs(ctx: ValidationContext) -> Verdict:
             (declared.path, reason)
             for item in step.items
             for declared in item.declared_outputs
-            if (reason := _undeliverable_reason(declared.path, ctx.working_dir, ctx.env))
+            if (
+                reason := _undeliverable_reason(
+                    declared.path, ctx.working_dir, ctx.env, ctx.output_directories
+                )
+            )
         ]
         if not offenders:
             continue
@@ -921,12 +1198,15 @@ def _check_undeliverable_outputs(ctx: ValidationContext) -> Verdict:
         reasons: List[str] = list(dict.fromkeys(reason for _path, reason in offenders))
         example: str = offenders[0][0]
         resolved: str = _resolve(example, ctx.working_dir, ctx.env)
-        root: str = ctx.working_dir or "the working directory, which is not set"
+        # The job's folders, as one quoted list. With no extra folder it is the working directory.
+        root: str = "', '".join(
+            (ctx.working_dir or "the working directory, which is not set",) + ctx.output_directories
+        )
         detail: str = (
             f"{len(offenders)} of this step's declared output path(s) are "
             f"{' or '.join(_UNDELIVERABLE_PHRASES[reason] for reason in reasons)}, for "
-            f"example '{example}', which resolves to '{resolved}'. The job's root is "
-            f"'{root}'."
+            f"example '{example}', which resolves to '{resolved}'. The job's "
+            f"{'root is' if not ctx.output_directories else 'folders are'} '{root}'."
         )
         # A leaf's missing files break nothing downstream, so it is only advised.
         if step.name in leaves:
@@ -1020,8 +1300,8 @@ def _check_scene_directory(ctx: ValidationContext) -> Verdict:
         return Verdict()
     scene: str = os.path.normpath(scene_dir)
     root: str = os.path.normpath(ctx.working_dir)
-    # When the scene sits under the working directory, $HIP paths are delivered.
-    if _is_below(scene, root):
+    # When the scene sits under one of the job's folders, $HIP paths are delivered.
+    if _is_inside_job(scene, ctx.working_dir, ctx.output_directories):
         return Verdict()
     return Verdict(
         advisories=(
@@ -1030,10 +1310,10 @@ def _check_scene_directory(ctx: ValidationContext) -> Verdict:
                 subject=scene,
                 detail=(
                     f"The scene is in '{scene}' and the working directory is '{root}'. The "
-                    "working directory is the only tree the job carries, so any node writing "
-                    "a path relative to $HIP writes outside it and its files cannot reach a "
-                    "step below. Set the working directory to $HIP unless every node already "
-                    "declares session-relative outputs."
+                    "working directory and the output folders are the only trees the job "
+                    "carries, so any node writing a path relative to $HIP writes outside them "
+                    "and its files cannot reach a step below. Set the working directory to $HIP "
+                    "unless every node already declares session-relative outputs."
                 ),
             ),
         )
@@ -1148,7 +1428,6 @@ def _check_unreachable_local_files(ctx: ValidationContext) -> Verdict:
     if ctx.reads is None:
         return _skipped()
 
-    root: str = os.path.normpath(ctx.working_dir) if ctx.working_dir else ""
     missing: List[SceneRead] = []
     # Per step, the reachable assets outside the working directory, so a step that
     # carries several large files is advised once.
@@ -1164,9 +1443,13 @@ def _check_unreachable_local_files(ctx: ValidationContext) -> Verdict:
         if _REACHABLE_PREFIX.match((read.raw or "").strip()) or PDG_TOKEN_PREFIX in read.path:
             continue
         resolved: str = os.path.normpath(_expand(read.path, ctx.env))
-        # A surviving variable, a relative path, or a path inside the working
-        # directory is unanswerable or already carried, so it is skipped.
-        if "$" in resolved or not os.path.isabs(resolved) or _is_below(resolved, root):
+        # A surviving variable, a relative path, or a path inside one of the job's
+        # folders is unanswerable or already carried, so it is skipped.
+        if (
+            "$" in resolved
+            or not os.path.isabs(resolved)
+            or _is_inside_job(resolved, ctx.working_dir, ctx.output_directories)
+        ):
             continue
         try:
             reachable: bool = ctx.exists(resolved)
@@ -1218,10 +1501,11 @@ def _check_unreachable_local_files(ctx: ValidationContext) -> Verdict:
 # new row: no other check and no part of ``validate`` changes.
 _CHECKS: Tuple[Tuple[RefusalScenario, Callable[[ValidationContext], Verdict]], ...] = (
     (RefusalScenario.DYNAMIC_NODE, _check_dynamic_nodes),
-    (RefusalScenario.NO_FARM_WORK, _check_no_farm_work),
+    (RefusalScenario.NO_FARM_WORK, check_no_farm_work),
     (RefusalScenario.ROP_BATCH, _check_rop_batch),
     (RefusalScenario.QUOTA_EXCEEDED, _check_quotas),
     (RefusalScenario.STEP_WITHOUT_ITEMS, _check_steps_without_items),
+    (RefusalScenario.IN_PROCESS_STEP, _check_in_process_steps),
     (RefusalScenario.IN_PROCESS_NODE, _check_non_step_file_use),
     (RefusalScenario.SERVICE_NODE, _check_service_nodes),
     (RefusalScenario.MULTIPLE_SCHEDULERS, _check_schedulers),

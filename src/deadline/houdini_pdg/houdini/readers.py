@@ -13,7 +13,7 @@ import re
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Set, Tuple
 
 from ..graph import DeclaredFile, NodeInfo, RawItem
-from ..scene_reads import IGNORE_PARMS, IGNORE_VALUE_PREFIXES, OUTPUT_PARMS, SceneRead, SceneReads
+from ..scene_reads import IGNORE_PARMS, IGNORE_VALUE_PREFIXES, SceneRead, SceneReads, is_output_parm
 
 _logger: logging.Logger = logging.getLogger(__name__)
 
@@ -31,6 +31,9 @@ _SCHEDULER_OVERRIDE_PARM: str = "topscheduler"
 _OUTSIDE_COOK_STATES: FrozenSet[str] = frozenset(
     {"Uncooked", "Dirty", "CookedSuccess", "CookedFail", "CookedCancel", "CookedCache"}
 )
+
+# The ``pdg.workItemState`` name of an item PDG took from an earlier cook's files.
+_CACHED_STATE: str = "CookedCache"
 
 # The authored text of a parm that only copies another parm's value.
 _CHANNEL_REFERENCES: Tuple[str, ...] = ("chs(", "chsraw(", "ch(")
@@ -53,7 +56,8 @@ def node_infos(
     With ``only_items_in_cook``, read during a cook, an item PDG will not schedule
     is left out, and a node whose every generated item is left out is outside the
     cook: cooking one work item cooks it and its upstream items, not their nodes.
-    Outside a cook the item states are an earlier cook's, so every item is kept.
+    Items PDG took from cache are kept aside only on a node in the cook: one the
+    cook set names, or one with items left. Outside a cook every item is kept.
     """
     # The PDG nodes by name. The first of two nodes with one name wins, and a
     # nameless or unreadable node is skipped.
@@ -67,16 +71,21 @@ def node_infos(
     # is outside the cook.
     items, item_upstream, attributes = _generated(dependency_graph)
     outside: Set[str] = set()
+    cached: Dict[str, Tuple[RawItem, ...]] = {}
+    requested: Optional[Set[str]] = (
+        None if cook_set is None else {str(name) for name in _iterate(cook_set)}
+    )
     if only_items_in_cook:
         for name in list(items):
             kept: List[RawItem] = [item for item in items[name] if item.in_cook is not False]
+            # Items PDG cooked from cache are kept aside, so validation can refuse the
+            # step. A node outside the cook set with none left holds an earlier cook's.
+            if kept or requested is None or name in requested:
+                cached[name] = tuple(item for item in items[name] if item.cached)
             if not kept:
                 outside.add(name)
             items[name] = kept
     wiring: Optional[Dict[str, Set[str]]] = _hom_wiring(pdg_nodes)
-    requested: Optional[Set[str]] = (
-        None if cook_set is None else {str(name) for name in _iterate(cook_set)}
-    )
 
     def in_cook(name: str) -> Optional[bool]:
         """Whether the node is in the cook, or None when the cook set is unknown."""
@@ -111,11 +120,13 @@ def node_infos(
                 cook_type=_cook_type(pdg_node, hom),
                 scheduler_override=_scheduler_override(hom),
                 cache_mode=_cache_mode(hom),
+                dynamic_by_parm=_dynamic_by_parm(hom),
                 node_type_name=_node_type_name(hom),
                 in_locked_asset=bool(_call(hom, "isInsideLockedHDA")),
                 expressions=() if job_script else _expressions(hom),
                 file_parms=() if job_script else _file_parm_texts(hom),
                 python_code=() if job_script else _python_code(hom),
+                cached_items=cached.get(name, ()),
             )
         )
 
@@ -171,6 +182,7 @@ def collect_scene_reads(
             for node in reached:
                 node_path: str = _path_of(node)
                 node_name: str = _name_of(node)
+                node_type: str = _node_type_name(node)
                 for parm, raw, value, owner in _file_parms(node, node_name):
                     reads.append(
                         SceneRead(
@@ -179,7 +191,7 @@ def collect_scene_reads(
                             parm=parm,
                             raw=raw,
                             path=value,
-                            is_output=parm in OUTPUT_PARMS,
+                            is_output=is_output_parm(node_type, parm),
                             static_prefix=_static_prefix(raw, owner, expand),
                         )
                     )
@@ -332,6 +344,7 @@ def _raw_item(work_item: Any, depends_on: Any) -> Optional[RawItem]:
     # Read batching from the child: the dependency graph's items are batch children,
     # so PDG's ``isBatch`` is False on every one of them.
     parent: Any = _attr(work_item, "batchParent", None)
+    cached: bool = _enum_name(_attr(work_item, "state", None)) == _CACHED_STATE
     return RawItem(
         name=name,
         index=_as_int(_attr(work_item, "index", 0), 0),
@@ -340,11 +353,21 @@ def _raw_item(work_item: Any, depends_on: Any) -> Optional[RawItem]:
         is_out_of_process=bool(_attr(work_item, "isOutOfProcess", False)),
         is_batch=bool(_attr(work_item, "isBatch", False)),
         batch_parent=_str_attr(parent, "name") if parent is not None else "",
-        declared_outputs=_declared(_attr(work_item, "expectedOutputFiles", ())),
-        declared_inputs=_declared(_attr(work_item, "inputFiles", ())),
+        declared_outputs=_declared_outputs(work_item, cached),
+        declared_inputs=declared_files(_attr(work_item, "inputFiles", ())),
         depends_on=tuple(n for n in (_str_attr(d, "name") for d in _iterate(depends_on)) if n),
         in_cook=_in_cook(_attr(work_item, "state", None)),
+        cached=cached,
     )
+
+
+def _declared_outputs(work_item: Any, cached: bool) -> Tuple[DeclaredFile, ...]:
+    """The item's declared outputs. A cached item's come from its results, when it has any."""
+    # An item PDG cooked from cache holds the files it found in ``outputFiles``.
+    found: Tuple[DeclaredFile, ...] = (
+        declared_files(_attr(work_item, "outputFiles", ())) if cached else ()
+    )
+    return found or declared_files(_attr(work_item, "expectedOutputFiles", ()))
 
 
 def _in_cook(state: Any) -> Optional[bool]:
@@ -358,7 +381,7 @@ def _in_cook(state: Any) -> Optional[bool]:
     return True if name else None
 
 
-def _declared(files: Any) -> Tuple[DeclaredFile, ...]:
+def declared_files(files: Any) -> Tuple[DeclaredFile, ...]:
     """Declared files with a path. PDG gives file objects; a ``(path, tag)`` pair is read too."""
     declared: List[DeclaredFile] = []
     for entry in _iterate(files):
@@ -429,6 +452,27 @@ def _cache_mode(hom: Any) -> Optional[str]:
         return str(parm.menuLabels()[list(parm.menuItems()).index(parm.evalAsString())])
     except Exception:
         return None
+
+
+# Generate When labels, by whether they make the node generate while the cook runs.
+_GENERATE_WHEN: Dict[str, bool] = {
+    "Each Upstream Item is Cooked": True,
+    "All Upstream Items are Cooked": True,
+    "All Upstream Items are Generated": False,
+}
+
+
+def _dynamic_by_parm(hom: Any) -> Optional[bool]:
+    """Whether the node's own Generate When makes it dynamic, read by label. None for Automatic or unknown."""
+    # The menu's tokens are out of label order, so the label names the setting.
+    parm: Any = _call(hom, "parm", "pdg_workitemgeneration")
+    if parm is None:
+        return None
+    try:
+        label: str = str(parm.menuLabels()[list(parm.menuItems()).index(parm.evalAsString())])
+    except Exception:
+        return None
+    return _GENERATE_WHEN.get(label)
 
 
 def _scheduler_override(hom: Any) -> str:

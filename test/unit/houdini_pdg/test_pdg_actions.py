@@ -1316,3 +1316,57 @@ def test_a_scene_that_fails_to_load_is_left_to_the_job_script(
     assert houdini.run(FakeStorage(), [payload(STOCK)]) == [0]
     assert len(houdini.events("hip_load")) == 1
     assert [e["hip_modtime"] for e in houdini.events("cook")] == [None]
+
+
+# -- the node's extra output folders -------------------------------------------
+
+
+def test_downloading_maps_each_output_directory_to_this_worker(
+    pdg_dir: str, tmp_path: Path
+) -> None:
+    """The workstation's folder doesn't exist here, so the client scans the folder the rules map it to."""
+    # Download an item for a session with one output folder and a rule for it.
+    worker: str = str(tmp_path / "mnt" / "renders")
+    rules: List[RuntimeRule] = [rule("/studio/renders", worker, runtime=True)]
+    client_args: Dict[str, Any] = download_pdg_work_item(
+        FakeStorage(payload()),
+        ADDRESS,
+        args(pdg_dir, output_directories=["/studio/renders"]),
+        rules,
+    )[0]
+    assert client_args["mapped_output_directories"] == [[worker, "/studio/renders"]]
+
+
+def test_without_output_directories_the_clients_arguments_are_as_before(pdg_dir: str) -> None:
+    """A session from an older submitter sends no list, and the client must get what it got before."""
+    client_args: Dict[str, Any] = download_pdg_work_item(
+        FakeStorage(payload()), ADDRESS, args(pdg_dir), []
+    )[0]
+    assert "mapped_output_directories" not in client_args
+
+
+def test_a_silent_command_reports_what_it_wrote_in_an_output_directory(
+    pdg_dir: str, tmp_path: Path, scripts: Path
+) -> None:
+    """Without the scan, a file written there was uploaded but never reached the step below.
+
+    It is reported by the workstation's path, which is how the scheduler and PDG know the folder.
+    """
+    # The command writes one file in the output folder, as the worker sees it.
+    worker: Path = tmp_path / "mnt" / "renders"
+    worker.mkdir(parents=True)
+    (worker / "old.exr").write_text("before the item")
+    os.utime(worker / "old.exr", (0, 0))
+    command: str = run_script(scripts, "write.py", str(worker / "beauty" / "b.1.exr"))
+    (worker / "beauty").mkdir()
+    storage: FakeStorage = FakeStorage(payload(command))
+    rules: List[RuntimeRule] = [rule("/studio/renders", str(worker), runtime=True)]
+    item_args: Dict[str, Any] = args(
+        pdg_dir, record_outputs=True, output_directories=["/studio/renders"]
+    )
+    out: io.StringIO = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        client_args, outputs_file = download_pdg_work_item(storage, ADDRESS, item_args, rules)
+        PdgWorkItemRunner(clock=SystemClock()).run_work_item(json.loads(json.dumps(client_args)))
+    publish_pdg_outputs(storage, ADDRESS, outputs_file)
+    assert storage.published == [(ADDRESS, [OutputFile("/studio/renders/beauty/b.1.exr", "")])]

@@ -19,7 +19,19 @@ import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, FrozenSet, List, Mapping, Optional, Pattern, Sequence, Set, Tuple
+from types import ModuleType
+from typing import (
+    AbstractSet,
+    Dict,
+    FrozenSet,
+    List,
+    Mapping,
+    Optional,
+    Pattern,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from .graph import PDG_DIR_TOKEN, GraphSnapshot
 
@@ -51,6 +63,9 @@ IGNORE_VALUE_PREFIXES: Tuple[str, ...] = ("opdef:", "oplib:", "temp:", "op:")
 OUTPUT_PARMS: FrozenSet[str] = frozenset(
     {
         "destfile",  # File Copy
+        "destfolder",  # File Copy
+        "outputfile",  # JSON Output
+        "outputpath",  # Invoke
         "copoutput",  # Composite ROP
         "sopoutput",  # Geometry ROP
         "dopoutput",  # Dynamics ROP
@@ -67,6 +82,19 @@ OUTPUT_PARMS: FrozenSet[str] = frozenset(
     }
 )
 
+#: Write parms whose name other node types use for a read, such as Geometry
+#: Import's ``filepath``. They count as writes only on these node types.
+OUTPUT_PARMS_BY_NODE_TYPE: Mapping[str, FrozenSet[str]] = {
+    "textoutput": frozenset({"filepath"}),
+    "csvoutput": frozenset({"filepath", "csvfilepath"}),
+}
+
+
+def is_output_parm(node_type: str, parm: str) -> bool:
+    """Whether ``parm`` names where a node of type ``node_type`` writes."""
+    return parm in OUTPUT_PARMS or parm in OUTPUT_PARMS_BY_NODE_TYPE.get(node_type, frozenset())
+
+
 # Prefixes that resolve on a worker: $HIP, $PDG_DIR, $PDG_TEMP, and PDG's own
 # tokens. Path mapping rewrites literal paths, not Houdini variables, so any other
 # authored prefix points at the workstation. A variable counts only as a whole
@@ -81,8 +109,10 @@ _VARIABLE: Pattern[str] = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 
 @dataclass(frozen=True)
 class SceneRead:
-    """One file-reference parm that a step's tasks evaluate."""
+    """One file-reference parm that a TOP node's work evaluates."""
 
+    #: The TOP node whose walk reached the parm. Usually a step, but a node that
+    #: maps to no step can be walked too.
     step: str
     node_path: str
     parm: str
@@ -167,59 +197,151 @@ class ReadReport:
     #: workstation path.
     unportable: Tuple[SceneRead, ...] = ()
     attribute_variables: Tuple[AttributeVariableUse, ...] = ()
+    #: Every step read that is not a write, so a check can ask which steps read a
+    #: given file.
+    step_reads: Tuple[SceneRead, ...] = ()
+    #: Reads by TOP nodes that map to no step, each matched like a step's read.
+    #: They add no data edge.
+    node_reads: Tuple[ReadMatch, ...] = ()
+    #: Write parms of TOP nodes that map to no step.
+    node_writes: Tuple[SceneRead, ...] = ()
 
 
 def match_reads(
-    snapshot: GraphSnapshot, reads: Sequence[SceneRead], working_dir: str
+    snapshot: GraphSnapshot,
+    reads: Sequence[SceneRead],
+    working_dir: str,
+    *,
+    output_directories: Sequence[str] = (),
 ) -> ReadReport:
     """Attribute each read to the step whose outputs cover it.
 
     A plain read takes an exact output directory over the deepest enclosing root,
     with every test stopping at a path separator, and ignores a root at or above
-    ``working_dir``, which would cover everything. A read that depends on a work
-    item is matched by its static prefix instead, against every step's files.
+    ``working_dir`` or one of ``output_directories``, which would cover every step
+    writing there. A read that depends on a work item is matched by its static
+    prefix instead, against every step's files. Reads by nodes that map to no step
+    are matched the same way, but kept apart in ``node_reads`` and ``node_writes``.
     """
-    producers: Tuple[_Producer, ...] = _output_roots(snapshot, working_dir)
+    # The job's folders, which no root or prefix may hold.
+    folders: Tuple[str, ...] = job_folders(working_dir, output_directories)
+    producers: Tuple[_Producer, ...] = _output_roots(snapshot, working_dir, folders)
     existing: Dict[str, Set[str]] = {step.name: set(step.dependencies) for step in snapshot.steps}
+    # A node that maps to no step adds no edge, so its reads are set aside here.
+    skipped: Set[str] = set(snapshot.skipped_nodes)
+    own: List[SceneRead] = [read for read in reads if read.step not in skipped]
+    others: List[SceneRead] = [read for read in reads if read.step in skipped]
 
     matches: List[ReadMatch] = []
     edges: Dict[str, Set[str]] = {}
-    for read in reads:
+    for read in own:
         if read.is_output:
             # A write is not a read. Two File Copy nodes writing one sequence at
             # different frame offsets would otherwise depend on each other.
             continue
-        if _depends_on_work_item(read.raw):
-            # Evaluated outside any work item, its path means nothing, so it is
-            # matched by its static prefix. A prefix that matches no step adds no
-            # match at all, so no check judges the meaningless path.
-            for match in _prefix_matches(read, producers, existing, working_dir):
-                matches.append(match)
-                if match.verdict in (ReadVerdict.COVERED, ReadVerdict.EDGE_ADDED):
-                    edges.setdefault(read.step, set()).add(match.producer)
-            continue
-        # A plain read has one producer, or none, and a verdict from how the
-        # reading step relates to it.
-        producer, candidates = _producer_of(read.path, producers, prefer=read.step)
-        verdict: ReadVerdict = _verdict(read.step, producer, existing)
         # Covered matches count too, so an existing edge that carries data is kept.
-        if verdict in (ReadVerdict.COVERED, ReadVerdict.EDGE_ADDED):
-            edges.setdefault(read.step, set()).add(producer)
-        matches.append(
-            ReadMatch(
-                read=read,
-                producer=producer,
-                verdict=verdict,
-                ambiguous_with=tuple(s for s in candidates if s != producer),
-            )
-        )
+        for match in _match_read(read, producers, existing, folders):
+            matches.append(match)
+            if match.verdict in (ReadVerdict.COVERED, ReadVerdict.EDGE_ADDED):
+                edges.setdefault(read.step, set()).add(match.producer)
 
+    # Reads by nodes that are not steps are matched the same way, but kept apart.
+    node_reads: List[ReadMatch] = [
+        match
+        for read in others
+        if not read.is_output
+        for match in _match_read(read, producers, existing, folders)
+    ]
     return ReadReport(
         matches=tuple(matches),
         data_edges={step: frozenset(found) for step, found in sorted(edges.items())},
-        unportable=_unportable(reads, working_dir),
-        attribute_variables=_attribute_variables(reads, snapshot),
+        unportable=_unportable(own, working_dir),
+        attribute_variables=_attribute_variables(own, snapshot),
+        step_reads=tuple(read for read in own if not read.is_output),
+        node_reads=tuple(node_reads),
+        node_writes=tuple(read for read in others if read.is_output),
     )
+
+
+def job_folders(
+    working_dir: str, output_directories: Sequence[str], paths: ModuleType = os.path
+) -> Tuple[str, ...]:
+    """The folders the job uploads: the working directory, then each extra output folder, normalized."""
+    return tuple(paths.normpath(folder) for folder in (working_dir, *output_directories) if folder)
+
+
+def _path_key(path: str, paths: ModuleType = os.path) -> str:
+    """``path`` spelled one way, for comparing it with another path.
+
+    It is normalized, so ``/`` and ``\\`` are one separator on Windows, and its case
+    is folded where the filesystem ignores case. ``paths`` is ``os.path``, or
+    ``ntpath`` in a test of Windows rules.
+    """
+    return paths.normcase(paths.normpath(path))
+
+
+def reads_opening(
+    files: AbstractSet[str],
+    reads: Sequence[SceneRead],
+    working_dir: str,
+    paths: ModuleType = os.path,
+    *,
+    output_directories: Sequence[str] = (),
+) -> Tuple[SceneRead, ...]:
+    """The reads that open one of ``files``, with both sides compared by ``_path_key``.
+
+    A plain read matches by its path. A read that depends on a work item matches
+    when a file starts with its static prefix, with the same guard on the job's
+    folders as producer matching. Houdini gives ``/`` paths on Windows too, so they
+    match the same files spelled with ``\\``.
+    """
+    # Both sides are spelled one way, so "/" and "\" paths match on Windows.
+    keys: Set[str] = {_path_key(path, paths) for path in files if path}
+    folders: List[str] = [
+        _path_key(folder, paths) for folder in job_folders(working_dir, output_directories, paths)
+    ]
+    found: List[SceneRead] = []
+    for read in reads:
+        if not _depends_on_work_item(read.raw):
+            if read.path and _path_key(read.path, paths) in keys:
+                found.append(read)
+            continue
+        # A prefix with no directory, or one that holds one of the job's folders,
+        # would match everything, so it matches nothing.
+        prefix, directory = _normalize_prefix(read.static_prefix, paths)
+        if not directory or any(
+            _is_below(folder, paths.normcase(directory), paths) for folder in folders
+        ):
+            continue
+        folded: str = paths.normcase(prefix)
+        if any(key.startswith(folded) for key in keys):
+            found.append(read)
+    return tuple(found)
+
+
+def _match_read(
+    read: SceneRead,
+    producers: Sequence[_Producer],
+    existing: Mapping[str, Set[str]],
+    folders: Sequence[str],
+) -> List[ReadMatch]:
+    """The read's matches: by static prefix when it depends on a work item, else one by its path."""
+    if _depends_on_work_item(read.raw):
+        # Evaluated outside any work item, its path means nothing, so it is
+        # matched by its static prefix. A prefix that matches no step adds no
+        # match at all, so no check judges the meaningless path.
+        return _prefix_matches(read, producers, existing, folders)
+    # A plain read has one producer, or none, and a verdict from how the
+    # reading node relates to it.
+    producer, candidates = _producer_of(read.path, producers, prefer=read.step)
+    return [
+        ReadMatch(
+            read=read,
+            producer=producer,
+            verdict=_verdict(read.step, producer, existing),
+            ambiguous_with=tuple(s for s in candidates if s != producer),
+        )
+    ]
 
 
 def _depends_on_work_item(raw: str) -> bool:
@@ -251,7 +373,7 @@ class _Producer:
     #: Every output path the step declares, resolved like ``directories``.
     files: FrozenSet[str]
     #: The deepest directory holding all of them, or ``""`` when that would sit
-    #: at or above the working directory.
+    #: at or above one of the job's folders.
     root: str
 
 
@@ -260,22 +382,31 @@ def _resolve(path: str, working_dir: str) -> str:
     return os.path.normpath(os.path.expandvars(path.replace(PDG_DIR_TOKEN, working_dir)))
 
 
-def _is_below(path: str, ancestor: str) -> bool:
-    """Whether ``path`` is ``ancestor`` or under it. ``/a/bc`` is not under ``/a/b``."""
+def _is_below(path: str, ancestor: str, paths: ModuleType = os.path) -> bool:
+    """Whether ``path`` is ``ancestor`` or under it. ``/a/bc`` is not under ``/a/b``.
+
+    ``paths`` is ``os.path``, or ``ntpath`` in a test of Windows rules.
+    """
     if not path or not ancestor:
         return False
-    if path == ancestor:
+    # Fold case where the platform ignores it, so C:\Work is under c:\work on Windows.
+    child: str = paths.normcase(path)
+    parent: str = paths.normcase(ancestor)
+    if child == parent:
         return True
-    return path.startswith(ancestor.rstrip(os.sep) + os.sep)
+    # Compare against the ancestor plus a separator, so a sibling whose name only
+    # starts with the ancestor's is not counted as under it.
+    return child.startswith(parent.rstrip(paths.sep) + paths.sep)
 
 
-def _output_roots(snapshot: GraphSnapshot, working_dir: str) -> Tuple[_Producer, ...]:
+def _output_roots(
+    snapshot: GraphSnapshot, working_dir: str, folders: Sequence[str]
+) -> Tuple[_Producer, ...]:
     """Each step's output files and directories, and the root that identifies the step.
 
     The root lets a read evaluated at one wedge or frame match outputs declared
     for every wedge: ``geo/cache/wedge0..N`` share the root ``geo/cache``.
     """
-    working: str = os.path.normpath(working_dir) if working_dir else ""
     producers: List[_Producer] = []
     for step in snapshot.steps:
         # Only outputs with a directory count. A bare file name says nothing
@@ -289,22 +420,22 @@ def _output_roots(snapshot: GraphSnapshot, working_dir: str) -> Tuple[_Producer,
         if not files:
             continue
         directories: Set[str] = {os.path.dirname(path) for path in files}
-        root: str = _root(directories, working)
+        root: str = _root(directories, folders)
         producers.append(_Producer(step.name, frozenset(directories), frozenset(files), root))
     return tuple(producers)
 
 
-def _root(directories: Set[str], working: str) -> str:
+def _root(directories: Set[str], folders: Sequence[str]) -> str:
     """The deepest directory holding all of ``directories``, or ``""``.
 
     It is ``""`` when the directories mix absolute and relative paths, or when the
-    root would hold the working directory and so cover every read in the project.
+    root would hold one of the job's folders and so cover every read in it.
     """
     try:
         root: str = os.path.commonpath(sorted(directories))
     except ValueError:  # absolute and relative mixed
         return ""
-    return "" if working and _is_below(working, root) else root
+    return "" if any(_is_below(folder, root) for folder in folders) else root
 
 
 def _producer_of(
@@ -343,7 +474,7 @@ def _producer_of(
     return (at_best[0], tuple(at_best)) if at_best else ("", ())
 
 
-def _normalize_prefix(prefix: str) -> Tuple[str, str]:
+def _normalize_prefix(prefix: str, paths: ModuleType = os.path) -> Tuple[str, str]:
     """The prefix with its directory part normalized, and that directory.
 
     The last component is kept as typed, because it is where the expression
@@ -351,33 +482,32 @@ def _normalize_prefix(prefix: str) -> Tuple[str, str]:
     separator is kept too. Both are ``""`` when the prefix has no directory.
     """
     # Only the part before the last separator is a directory that can be normalized.
-    head, tail = os.path.split(prefix)
+    head, tail = paths.split(prefix)
     if not head:
         return "", ""
-    directory: str = os.path.normpath(head)
-    return os.path.join(directory, tail), directory
+    directory: str = paths.normpath(head)
+    return paths.join(directory, tail), directory
 
 
 def _prefix_matches(
     read: SceneRead,
     producers: Sequence[_Producer],
     existing: Mapping[str, Set[str]],
-    working_dir: str,
+    folders: Sequence[str],
 ) -> List[ReadMatch]:
     """One match for each step with a declared output path that starts with the read's static prefix.
 
     The test is on the string, not separator-bounded, so a prefix may end inside a
     directory or a file name: ``$HIP/geo/$OS/wedge`@wedgeindex`/...`` has the prefix
     ``<hip>/geo/pyro_cache/wedge``, which covers ``wedge0`` to ``wedgeN``. A prefix
-    whose directory is at or above the working directory would cover every step,
-    so it matches nothing. When the reading step writes there itself, the read is
-    its own.
+    whose directory is at or above one of the job's folders would cover every step
+    writing there, so it matches nothing. When the reading step writes there
+    itself, the read is its own.
     """
-    # A prefix with no directory, or one that holds the working directory, would
+    # A prefix with no directory, or one that holds one of the job's folders, would
     # match nothing useful or everything, so it matches nothing.
     prefix, directory = _normalize_prefix(read.static_prefix)
-    working: str = os.path.normpath(working_dir) if working_dir else ""
-    if not directory or (working and _is_below(working, directory)):
+    if not directory or any(_is_below(folder, directory) for folder in folders):
         return []
     # A step writing under the prefix itself is most likely reading its own output,
     # so that one SELF match stands alone and names no other step.

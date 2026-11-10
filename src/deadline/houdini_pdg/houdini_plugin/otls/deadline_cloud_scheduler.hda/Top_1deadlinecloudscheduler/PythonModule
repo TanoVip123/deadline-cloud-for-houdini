@@ -1,0 +1,20 @@
+"""Button callbacks of the Deadline Cloud scheduler node."""
+
+
+def callback(kwargs):
+    """Submit runs the scheduler's own flow. Every other button is the ROP's."""
+    if kwargs["parm"].name() == "submit":
+        from deadline.houdini_pdg.houdini.host import submit
+
+        submit(kwargs["node"])
+        return
+    from deadline_cloud_for_houdini.submitter import callback as rop_callback
+
+    rop_callback(kwargs)
+
+
+def update_queue_parameters_callback(kwargs):
+    """Show the default farm and queue, and rebuild the queue parameters, as the ROP does."""
+    from deadline_cloud_for_houdini.submitter import update_queue_parameters_callback as rop
+
+    rop(kwargs)

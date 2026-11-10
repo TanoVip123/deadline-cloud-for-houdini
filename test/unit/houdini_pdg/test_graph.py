@@ -29,6 +29,7 @@ from deadline.houdini_pdg.graph import (
     StepSpec,
     TaskKey,
     WorkItemSpec,
+    find_ancestors_among,
     synthesize,
 )
 
@@ -801,3 +802,17 @@ def test_the_lookups_survive_equality_and_copying() -> None:
     assert clone == used
     assert clone.item(TaskKey("a", 1)) == used.item(TaskKey("a", 1))
     assert clone.item_by_name("a_1") == used.item_by_name("a_1")
+
+
+def test_finding_ancestors_ends_on_a_cycle_and_skips_a_missing_name() -> None:
+    """A wire can name a node that is being deleted, and a broken graph can loop, and neither may hang."""
+    nodes: List[NodeInfo] = [
+        _node("a", ["b", "gone"]),
+        _node("b", ["a"]),
+        _node("c", ["a"]),
+    ]
+    assert find_ancestors_among(nodes, {"a", "b", "gone"}) == {
+        "a": {"a", "b"},
+        "b": {"a", "b"},
+        "c": {"a", "b"},
+    }
