@@ -1512,7 +1512,7 @@ def test_the_output_directories_are_read_into_the_cooks_settings(
 def test_an_output_directory_that_overlaps_the_working_directory_is_refused(
     scene: FakeHou, relative: str
 ) -> None:
-    """The working directory is already uploaded, so an overlap would upload one file twice."""
+    """A task's scan walks the working directory and the folder, so an overlap records a file twice."""
     node: FakeNode = _settings_node(working_dir="$HIP")
     _set_list_parm(node, "output_directories", "output_dir", [os.path.join("$HIP", relative)])
     with pytest.raises(CookSetupError, match=f"{SCHEDULER_PATH}/output_dir1 .*working directory"):
@@ -1526,6 +1526,33 @@ def test_an_output_directory_beside_the_working_directory_is_accepted(
     node: FakeNode = _settings_node(working_dir="$HIP")
     _set_list_parm(node, "output_directories", "output_dir", [str(tmp_path / "scene") + "_renders"])
     assert read_scheduler_settings(node).output_directories == (str(tmp_path / "scene_renders"),)
+
+
+@pytest.mark.parametrize("order", [("out", "out/frames"), ("out/frames", "out")])
+def test_two_output_directories_that_hold_one_another_are_refused(
+    scene: FakeHou, tmp_path: Path, order: Tuple[str, str]
+) -> None:
+    """A task's scan walks both, so it would record each file in the inner one twice."""
+    node: FakeNode = _settings_node(working_dir="$HIP")
+    _set_list_parm(
+        node, "output_directories", "output_dir", [str(tmp_path / path) for path in order]
+    )
+    with pytest.raises(CookSetupError, match="output_dir1.*output_dir2.*hold one another"):
+        read_scheduler_settings(node)
+
+
+def test_two_output_directories_with_a_shared_name_start_are_accepted(
+    scene: FakeHou, tmp_path: Path
+) -> None:
+    """Folders whose names only start alike don't hold one another."""
+    node: FakeNode = _settings_node(working_dir="$HIP")
+    _set_list_parm(
+        node, "output_directories", "output_dir", [str(tmp_path / "out"), str(tmp_path / "out2")]
+    )
+    assert read_scheduler_settings(node).output_directories == (
+        str(tmp_path / "out"),
+        str(tmp_path / "out2"),
+    )
 
 
 def test_an_output_directory_at_home_is_refused_naming_its_parm(

@@ -445,8 +445,8 @@ def _read_output_directories(node: Any, working_dir: str) -> Tuple[str, ...]:
     """The Job Attachments tab's output folders, absolute, each checked against the working directory.
 
     A node from before the tab has none. Raises ``CookSetupError`` naming the parm of a
-    folder with an unset variable, one that overlaps the working directory, or one that
-    is a drive or home directory.
+    folder with an unset variable, one that overlaps the working directory or another
+    folder, or one that is a drive or home directory.
     """
     folders: Dict[str, Set[str]] = {}
     for index in range(1, int(_parm(node, "output_directories", 0, as_text=False)) + 1):
@@ -461,7 +461,8 @@ def _read_output_directories(node: Any, working_dir: str) -> Tuple[str, ...]:
                 f"The '{parm_path}' parm names a variable that is not set: '{value}'."
             )
         folders.setdefault(_absolute(value), set()).add(parm_path)
-    # The working directory is already uploaded, so a folder in it or above it uploads twice.
+    # A task's scan walks the working directory and each folder, so an overlap records files twice.
+    # The upload sends each file once (deadline 0.60.11, job_attachments/asset_sync.py:653-662).
     working: str = _absolute_key(working_dir)
     overlapping: List[str] = sorted(
         parm
@@ -474,6 +475,21 @@ def _read_output_directories(node: Any, working_dir: str) -> Tuple[str, ...]:
             f"The output folder in {', '.join(overlapping)} overlaps the working directory "
             f"'{working_dir}', which every task already uploads. Remove it, or point it at a "
             "folder outside the working directory."
+        )
+    # The same goes for two folders where one holds the other.
+    nested: List[str] = sorted(
+        {
+            parm
+            for folder in folders
+            for other in folders
+            if folder != other and _is_below(_absolute_key(folder), _absolute_key(other))
+            for parm in folders[folder] | folders[other]
+        }
+    )
+    if nested:
+        raise CookSetupError(
+            f"The output folders in {', '.join(nested)} hold one another, so a task would "
+            "record each file in the inner one twice. Keep only the outer folder."
         )
     _refuse_unbounded(folders)
     return tuple(sorted(folders))
