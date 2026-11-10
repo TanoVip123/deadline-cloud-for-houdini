@@ -19,6 +19,11 @@ The job's settings, the farm and queue, and the queue's parameters work the
 same way as on the Deadline Cloud ROP. The settings are stored on the node,
 so they are saved with the scene.
 
+When you create the node or load its scene, the node lays out its parameters
+as this version of the node does, and keeps the queue's parameters, such as its
+Conda packages, with their values. Any other spare parameter on the node is
+removed too, because it can't be told apart from an older version's tabs.
+
 == Cooking ==
 
 You can start a cook in two ways. Both run the same checks first, and a
