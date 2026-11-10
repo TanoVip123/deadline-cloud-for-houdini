@@ -163,19 +163,22 @@ def _shared_tab(name: str, properties: str, settings: str) -> FakeTemplate:
     )
 
 
-def _definition() -> List[FakeTemplate]:
-    """The current definition's layout: four tabs, then Submit."""
+def _four_tabs(shared: FakeTemplate, pdg: str, attachments: str, host: str) -> List[FakeTemplate]:
+    """The four tabs, with the given folder names, after the given Shared Job Settings tab."""
     return [
-        _shared_tab("job_settings", "folder0", "folder1"),
-        FakeTemplate("job_settings_1", "PDG", [FakeTemplate("working_dir")]),
-        FakeTemplate("job_settings_2", "Job Attachments", [FakeTemplate("output_directories")]),
-        FakeTemplate(
-            "host_requirements",
-            "Host Requirements",
-            [FakeTemplate("hr_mode"), FakeTemplate("hr_os")],
-        ),
-        FakeTemplate("submit"),
+        shared,
+        FakeTemplate(pdg, "PDG", [FakeTemplate("working_dir")]),
+        FakeTemplate(attachments, "Job Attachments", [FakeTemplate("output_directories")]),
+        FakeTemplate(host, "Host Requirements", [FakeTemplate("hr_mode"), FakeTemplate("hr_os")]),
     ]
+
+
+def _definition() -> List[FakeTemplate]:
+    """The current definition's layout: four tabs, with Submit last in Shared Job Settings."""
+    shared: FakeTemplate = _shared_tab("job_settings", "folder0", "folder1")
+    assert shared.children is not None
+    shared.children.append(FakeTemplate("submit"))
+    return _four_tabs(shared, "job_settings_1", "job_settings_2", "host_requirements")
 
 
 #: The values of the definition's own parms, which must survive the rebuild.
@@ -227,13 +230,52 @@ def scene(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeHou:
     return install_hou(monkeypatch, hip)
 
 
+def _frozen_submit_below_tabs_node() -> FakeLayoutNode:
+    """A node made on the four-tab definition that had Submit below the tabs, outside any tab.
+
+    The ROP's queue update stored that layout on the node, so its tabs are spare folders
+    and Submit still follows them.
+    """
+    # The old four tabs as spare folders, with the Conda folder in the first, then Submit.
+    shared: FakeTemplate = _shared_tab("job_settings51", "folder2", "folder3")
+    assert shared.children is not None
+    shared.children.append(_conda())
+    layout: List[FakeTemplate] = _four_tabs(shared, "folder4", "folder5", "folder6")
+    layout.append(FakeTemplate("submit"))
+    spare: Set[str] = {"job_settings51", "folder2", "folder3", "folder4", "folder5", "folder6"}
+    spare |= set(_conda().names())
+    values: Dict[str, Any] = {**_REAL_VALUES, **_CONDA_VALUES, "queue_env_do_not_use_Conda": (0,)}
+    return FakeLayoutNode(_definition(), layout, spare, values)
+
+
 def test_an_old_nodes_stored_tabs_are_rebuilt_from_the_definition(scene: FakeHou) -> None:
     """A node saved on the two-tab definition showed the new parms below Submit, outside any tab."""
-    # Rebuild the old node, then read its tabs and what comes last.
+    # Rebuild the old node, then read its tabs and check nothing is left outside them.
     node: FakeLayoutNode = _frozen_two_tab_node()
     rebuild_layout_from_definition(node)
     assert node.tabs() == ["Shared Job Settings", "PDG", "Job Attachments", "Host Requirements"]
-    assert [entry.name() for entry in node.layout][-1] == "submit"
+    assert all(entry.children is not None for entry in node.layout)
+
+
+def test_an_old_nodes_submit_below_the_tabs_moves_into_shared_job_settings(
+    scene: FakeHou,
+) -> None:
+    """Submit below the tabs moved down with the tallest tab, so a loaded node must not keep it there."""
+    # Rebuild the node saved with Submit after the tabs, then read where Submit is.
+    node: FakeLayoutNode = _frozen_submit_below_tabs_node()
+    rebuild_layout_from_definition(node)
+    assert node.tabs() == ["Shared Job Settings", "PDG", "Job Attachments", "Host Requirements"]
+    assert all(entry.children is not None for entry in node.layout)
+    assert node.folder("Shared Job Settings") == [
+        "folder0",
+        "folder1",
+        "submit",
+        "queue_env_do_not_use_Conda",
+    ]
+    # Only the Conda fields are spare, and every value comes back.
+    assert node.spare == set(_conda().names())
+    assert {name: node.values[name] for name in _REAL_VALUES} == _REAL_VALUES
+    assert {name: node.values[name] for name in _CONDA_VALUES} == _CONDA_VALUES
 
 
 def test_the_conda_fields_stay_in_shared_job_settings_with_their_values(scene: FakeHou) -> None:
@@ -241,9 +283,11 @@ def test_the_conda_fields_stay_in_shared_job_settings_with_their_values(scene: F
     # Rebuild the old node, then read where the Conda folder is and what its fields hold.
     node: FakeLayoutNode = _frozen_two_tab_node()
     rebuild_layout_from_definition(node)
+    # The Conda folder is added after the definition's own parms, so it follows Submit.
     assert node.folder("Shared Job Settings") == [
         "folder0",
         "folder1",
+        "submit",
         "queue_env_do_not_use_Conda",
     ]
     assert node.folder("Conda") == [_PACKAGES, _CHANNELS]
@@ -265,5 +309,5 @@ def test_a_new_node_keeps_the_definitions_layout_and_gets_no_spare_parm(scene: F
     node: FakeLayoutNode = FakeLayoutNode(_definition(), _definition(), set(), dict(_REAL_VALUES))
     rebuild_layout_from_definition(node)
     assert node.tabs() == ["Shared Job Settings", "PDG", "Job Attachments", "Host Requirements"]
-    assert node.folder("Shared Job Settings") == ["folder0", "folder1"]
+    assert node.folder("Shared Job Settings") == ["folder0", "folder1", "submit"]
     assert node.spare == set() and node.values == _REAL_VALUES

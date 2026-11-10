@@ -228,3 +228,15 @@ def test_the_custom_requirement_lists_have_the_entries_the_host_reads(
     kind, block = _lists(NODE_SCRIPT)[name]
     assert kind == "multiparm" and 'disablewhen "{ hr_mode == all }"' in block
     assert re.findall(r'name\s+"(hr_\w+#)"', block) == entries
+
+
+def test_submit_is_the_last_parm_of_shared_job_settings_and_nothing_follows_the_tabs() -> None:
+    """A Submit below the tabs moves down with the tallest tab, so it sits in the first tab."""
+    # Top-level entries are indented four spaces, and the tabs are the only ones besides help.
+    top_level: List[str] = re.findall(r"\n    (\w+)\s*\{", NODE_SCRIPT)
+    assert top_level == ["help", "group", "group", "group", "group"]
+    # The first tab's direct entries are indented eight spaces, and Submit comes last.
+    start: int = NODE_SCRIPT.index('\n    group {\n        name    "job_settings"\n')
+    tab: str = NODE_SCRIPT[start : NODE_SCRIPT.index("\n    }\n", start)]
+    entries: List[Tuple[str, str]] = re.findall(r'\n        (\w+)\s*\{\s*name\s+"(\w+)"', tab)
+    assert entries == [("groupsimple", "folder0"), ("groupsimple", "folder1"), ("parm", "submit")]

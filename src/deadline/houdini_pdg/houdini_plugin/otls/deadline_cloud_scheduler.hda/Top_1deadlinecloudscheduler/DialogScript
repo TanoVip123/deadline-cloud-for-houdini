@@ -131,6 +131,15 @@
                 help    "Show the default farm and queue, and refresh the queue's parameters below."
             }
         }
+        parm {
+            name    "submit"
+            label   "Submit"
+            type    button
+            default { "0" }
+            parmtag { "script_callback" "hou.phm().callback(kwargs)" }
+            parmtag { "script_callback_language" "python" }
+            help    "Check the scene, confirm the job, and cook the TOP network's display node as one AWS Deadline Cloud job."
+        }
 
     }
 
@@ -463,15 +472,5 @@
                 help    "The values, separated by commas."
             }
         }
-    }
-
-    parm {
-        name    "submit"
-        label   "Submit"
-        type    button
-        default { "0" }
-        parmtag { "script_callback" "hou.phm().callback(kwargs)" }
-        parmtag { "script_callback_language" "python" }
-        help    "Check the scene, confirm the job, and cook the TOP network's display node as one AWS Deadline Cloud job."
     }
 }

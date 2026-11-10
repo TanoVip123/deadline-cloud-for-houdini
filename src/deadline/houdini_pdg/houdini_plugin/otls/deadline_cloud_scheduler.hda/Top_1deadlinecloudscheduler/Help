@@ -35,9 +35,10 @@ check that fails starts nothing and creates no job.
   change a parm on a SOP outside the TOP network, dirty the network or click
   __Generate__ before you cook, or use __Submit__, which does that itself.
 
-* Click __Submit__ on this node. If the scene has unsaved changes, it first
-  saves them, or asks you to. Then it checks that the TOP network cooks on this
-  scheduler, and runs the checks that need only the network's topology. If
+* Click __Submit__ on this node's Shared Job Settings tab. If the scene has
+  unsaved changes, it first saves them, or asks you to. Then it checks that
+  the TOP network cooks on this scheduler, and runs the checks that need only
+  the network's topology. If
   they pass, it generates the work items and runs every check on them. It
   stops generating as soon as a step or the job has more tasks than Deadline
   Cloud allows. Then it shows the job's farm, queue, name, priority, working
@@ -111,6 +112,11 @@ Update Queue Parameters:
     #id: update_queue_parameters
     Show the default farm and queue again, and refresh the queue's parameters,
     such as its Conda packages.
+
+Submit:
+    #id: submit
+    Check the scene, confirm the job, and cook the TOP network's display node
+    as one AWS Deadline Cloud job.
 
 == PDG ==
 
@@ -201,8 +207,3 @@ Custom Attributes:
     #id: hr_attributes
     Attributes your fleet defines, each with a name, any of or all of, and
     comma-separated values.
-
-Submit:
-    #id: submit
-    Check the scene, confirm the job, and cook the TOP network's display node
-    as one AWS Deadline Cloud job.
