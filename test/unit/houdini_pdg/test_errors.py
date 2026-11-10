@@ -26,12 +26,12 @@ def _refusal(subject: str, detail: str = "is wrong.", remedy: str = "Fix it.") -
 
 
 def test_each_refusal_is_on_its_own_line_after_a_header() -> None:
-    """The artist asked for one refusal per line, because a long joined line was unreadable."""
+    """Each refusal is a "- " bullet on its own line, so the artist can tell where one ends."""
     verdict: Verdict = Verdict(refusals=(_refusal("a", "x.", "y."), _refusal("b", "p.", "q.")))
     assert str(GraphRefusedError(verdict)).split("\n") == [
         "The graph was refused (2 refusal(s)):",
-        "a: x. y.",
-        "b: p. q.",
+        "- a: x. y.",
+        "- b: p. q.",
     ]
 
 
@@ -39,12 +39,12 @@ def test_each_refusal_is_on_its_own_line_after_a_header() -> None:
 def test_n_refusals_give_a_header_and_n_lines_each_starting_with_its_subject(
     texts: List[Tuple[str, str, str]],
 ) -> None:
-    """For any refusals, the text has one header and one line per refusal, in order."""
+    """For any refusals, the text has one header and one bullet line per refusal, in order."""
     # Build the refusals, then split the text and match each line to its subject.
     refusals: Tuple[Refusal, ...] = tuple(_refusal(s, d, r) for s, d, r in texts)
     lines: List[str] = format_refusals(refusals).split("\n")
     assert len(lines) == len(refusals) + 1
-    assert all(line.startswith(f"{s}: ") for line, (s, _, _) in zip(lines[1:], texts))
+    assert all(line.startswith(f"- {s}: ") for line, (s, _, _) in zip(lines[1:], texts))
 
 
 def test_the_node_error_carries_the_same_lines() -> None:
