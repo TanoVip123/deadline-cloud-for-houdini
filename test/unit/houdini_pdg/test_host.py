@@ -1520,6 +1520,7 @@ def test_an_output_folder_at_home_is_refused_naming_its_parm(
 
 def test_the_host_reads_the_requirements_from_its_scheduler_node(scene: FakeHou) -> None:
     """The submitter asks the host, so the host must read the node the cook runs on."""
+    # Copy a tab asking for one GPU onto the network's own scheduler node.
     network: Network = build_network(PYRO_BONFIRE)
     node: FakeNode = _requirements_node(hr_mode="custom", hr_gpu_min=1)
     for parm in node.parms():

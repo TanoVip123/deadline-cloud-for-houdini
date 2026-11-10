@@ -479,6 +479,7 @@ def test_a_node_whose_pdg_name_differs_from_its_name_is_named_as_pdg_names_it(
     scene: FakeHou,
 ) -> None:
     """PDG names a node inside a subnet differently, and the cook set check reads PDG's names."""
+    # The wedge gets a PDG name unlike its node name, and is displayed.
     network: Network = _network()
     network.node("wedge1").name = "subnet1_wedge1"
     network.topnet.display = network.node("subnet1_wedge1").hom
