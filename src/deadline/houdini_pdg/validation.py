@@ -454,6 +454,7 @@ def _check_quotas(ctx: ValidationContext) -> Verdict:
     return _quota_refusals(
         [step.name for step in steps],
         ctx.quotas,
+        count_steps=True,
         tasks={step.name: step.task_count for step in steps},
         dependencies={step.name: step.dependencies for step in steps},
         carrying=carrying,
@@ -464,6 +465,7 @@ def _quota_refusals(
     names: Sequence[str],
     quotas: Quotas,
     *,
+    count_steps: bool,
     tasks: Optional[Mapping[str, int]] = None,
     dependencies: Optional[Mapping[str, AbstractSet[str]]] = None,
     carrying: Optional[Mapping[str, str]] = None,
@@ -471,8 +473,9 @@ def _quota_refusals(
 ) -> Verdict:
     """Refuse each quota the counts cross: the job's tasks and steps, then each step's, then consumers.
 
-    ``tasks`` and ``dependencies`` are by step name, and either may be unknown yet.
-    ``carrying`` adds a step's data dependency text, and ``note`` ends each task refusal.
+    ``count_steps`` judges the step count. ``tasks`` and ``dependencies`` are by step name,
+    and either may be unknown yet. ``carrying`` adds a step's data dependency text, and
+    ``note`` ends each task refusal.
     """
     refusals: List[Refusal] = []
     # Job-wide ceilings: the task total across every step, and the step count.
@@ -482,7 +485,7 @@ def _quota_refusals(
                 _WHOLE_COOK, sum(tasks.values()), quotas.max_tasks_per_job, _TASKS_PER_JOB, note
             )
         )
-    if dependencies is not None and len(names) > quotas.max_steps_per_job:
+    if count_steps and len(names) > quotas.max_steps_per_job:
         refusals.append(
             _quota_refusal(_WHOLE_COOK, len(names), quotas.max_steps_per_job, _STEPS_PER_JOB)
         )
@@ -527,7 +530,10 @@ def check_shape_quotas(nodes: Sequence[NodeInfo], quotas: Quotas = Quotas()) -> 
     # A step outside the cook has no items, so the job keeps no edge to it.
     projected: Dict[str, Set[str]] = project_steps(by_name, schedulable)
     return _quota_refusals(
-        sorted(steps), quotas, dependencies={name: projected[name] & steps for name in steps}
+        sorted(steps),
+        quotas,
+        count_steps=True,
+        dependencies={name: projected[name] & steps for name in steps},
     )
 
 
@@ -536,9 +542,11 @@ def check_generated_counts(counts: Mapping[str, int], quotas: Quotas = Quotas())
 
     PDG is still generating, so the refusal says the generation was stopped.
     """
+    # The wires and the snapshot judge the step count, so only the tasks are judged here.
     found: Verdict = _quota_refusals(
         sorted(counts),
         quotas,
+        count_steps=False,
         tasks=counts,
         note=" PDG was still generating, so the generation was stopped.",
     )
