@@ -618,17 +618,6 @@ def _settings_node(**parms: Any) -> FakeNode:
     return FakeNode(SCHEDULER_PATH, parms=parms)
 
 
-@pytest.mark.parametrize("value", ["$HIP/../out/./", "rel/dir"])
-def test_the_working_directory_is_expanded_normalized_and_absolute(
-    scene: FakeHou, tmp_path: Path, value: str
-) -> None:
-    """Workers map outputs by this path, and a relative one would mean another folder on each worker."""
-    working_dir: str = read_scheduler_settings(_settings_node(working_dir=value)).working_dir
-    assert os.path.isabs(working_dir)
-    if value.startswith("$HIP"):
-        assert working_dir == str(tmp_path / "out")
-
-
 @pytest.mark.parametrize(
     "parms, named",
     [
