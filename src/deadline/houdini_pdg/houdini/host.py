@@ -1255,8 +1255,8 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
 def _find_cook_set(context: Any, display: Any) -> Optional[FrozenSet[str]]:
     """The PDG names of the display node and every node wired above it, or None when unknown.
 
-    The wires are read as the cook reads them. A display node with no PDG node keeps
-    its own name, so the cook set check stands down for it.
+    The wires are read as the cook reads them. A display node with no PDG node of its
+    own, such as a subnet, gives None, so no step is left out of the checks.
     """
     # PDG's name for each TOP node by path, and the wires as the readers find them.
     graph_nodes: List[Any] = _graph_nodes(context)
@@ -1265,9 +1265,11 @@ def _find_cook_set(context: Any, display: Any) -> Optional[FrozenSet[str]]:
     }
     infos: Tuple[NodeInfo, ...] = readers.node_infos(graph_nodes, None)
     # The display node, named as PDG names it, and everything wired above it.
-    name: str = by_path.get(_path_of(display)) or str(_call(display, "name") or "")
-    above: Set[str] = find_ancestors_among(infos, {info.name for info in infos}).get(name, set())
-    return frozenset({name} | above if name else above) or None
+    name: Optional[str] = by_path.get(_path_of(display))
+    above: Set[str] = find_ancestors_among(infos, {info.name for info in infos}).get(
+        name or "", set()
+    )
+    return frozenset({name} | above) if name else None
 
 
 def _default_scheduler_problem(node: Any, network: Any) -> str:

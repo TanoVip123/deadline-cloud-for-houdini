@@ -288,7 +288,7 @@ def test_a_cook_started_in_a_session_with_a_ui_never_opens_the_save_prompt(scene
 
 
 def test_the_scheduler_uses_the_client_library_by_default() -> None:
-    """Every cook's farm calls come from these calls, so without it no cook could connect."""
+    """Every cook's farm calls go through this class, so without it no cook could connect."""
     scheduler: Any = REGISTRATION.DeadlineCloudPDGScheduler(None, "deadlinecloudscheduler1")
     assert isinstance(scheduler._clients(), REGISTRATION._DeadlineCloudCalls)
 

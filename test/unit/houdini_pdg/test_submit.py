@@ -16,6 +16,7 @@ from .houdini_fakes import (
     COOKING_EXAMPLE,
     FakeHou,
     FakeNetwork,
+    FakeNode,
     build_network,
     install_hou,
 )
@@ -502,3 +503,21 @@ def test_each_submit_judges_the_graph_as_it_is_now(scene: FakeHou) -> None:
     text: str = scene.messages.calls[-1][0]
     assert "The cook can't start." in text and "render:" in text
     assert _cooks(network) == [{"block": False}]
+
+
+def test_a_displayed_node_with_no_pdg_node_leaves_no_step_out_of_the_checks(
+    scene: FakeHou,
+) -> None:
+    """A subnet has no PDG node, and naming it as the cook set would mark every step outside the cook.
+
+    Then render, which generated nothing, would not be refused, and the cook would wait for it.
+    """
+    # Display a subnet wired below montage, and generate no items for render.
+    network: FakeNetwork = _network()
+    subnet: FakeNode = network.topnet.add(
+        FakeNode("/obj/topnet1/subnet1"), network.node("montage").hom
+    )
+    network.topnet.display = subnet
+    _generated(network, {"sim": 1, "montage": 1})
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert "render:" in scene.messages.calls[0][0]

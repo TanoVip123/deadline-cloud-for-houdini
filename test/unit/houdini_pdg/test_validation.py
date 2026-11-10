@@ -2579,3 +2579,12 @@ def test_a_scene_in_an_extra_output_directory_is_not_advised() -> None:
         )
     )
     assert _advised(unlisted, RefusalScenario.OUTPUT_OUTSIDE_COOK) == {EXTRA}
+
+
+def test_a_set_hip_is_kept_over_the_saved_scenes_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session's own $HIP decides where $HIP paths resolve, so the saved file must not replace it."""
+    monkeypatch.setenv("HIP", "/session/hip")
+    assert validation.environment_with_hip("/saved/scene.hip")["HIP"] == "/session/hip"
+    monkeypatch.delenv("HIP")
+    assert validation.environment_with_hip("/saved/scene.hip")["HIP"] == "/saved"
+    assert "HIP" not in validation.environment_with_hip("")

@@ -853,6 +853,19 @@ def test_the_debug_level_environment_variable_wins_when_valid(
     assert "DEADLINE_PDG_DEBUG_LEVEL" in caplog.text
 
 
+def test_only_an_invalid_debug_level_variable_is_reported(
+    scene: FakeHou, monkeypatch: pytest.MonkeyPatch, caplog: Any
+) -> None:
+    """A warning on a valid value would cry wolf, and none on a typo would hide why it's ignored."""
+    node: FakeNode = _settings_node(working_dir="/proj", debug_level=0)
+    for value, warned in (("1", False), ("0", False), ("debug", True), ("2", True)):
+        caplog.clear()
+        monkeypatch.setenv("DEADLINE_PDG_DEBUG_LEVEL", value)
+        with caplog.at_level(logging.WARNING):
+            read_scheduler_settings(node)
+        assert ("Ignoring DEADLINE_PDG_DEBUG_LEVEL" in caplog.text) is warned, value
+
+
 def test_the_host_reads_the_settings_from_its_scheduler_node(scene: FakeHou) -> None:
     """The cook reads its settings through the host, from the node PDG links to the scheduler."""
     network: FakeNetwork = build_network(
