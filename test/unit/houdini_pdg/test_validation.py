@@ -2245,6 +2245,46 @@ def test_a_file_cache_path_with_an_unexported_attribute_variable_is_refused() ->
     assert _pyro_refusals(write) == {"/obj/pyro/pyro_cache parm 'file'"}
 
 
+def test_an_unexported_attribute_refusal_says_the_variable_is_empty_on_the_worker_too() -> None:
+    """An attribute that isn't exported is empty on the worker as well, so every item writes one path.
+
+    The detail must not claim the variable resolves on the worker, and it keeps the `@name` remedy.
+    """
+    nodes: List[NodeInfo] = [_node("a", attribute_names=("wedgeindex",))]
+    snapshot: GraphSnapshot = synthesize(nodes)
+    read: SceneRead = _pyro_write(
+        "a", "/obj/a/rop", "sopoutput", "$HIP/w$WEDGEINDEX.bgeo.sc", ("WEDGEINDEX",), is_output=True
+    )
+    report: ReadReport = match_reads(snapshot, [read], WORKING_DIR)
+    verdict: Verdict = validate(
+        _ctx(nodes, snapshot=snapshot, reads=report, working_dir=WORKING_DIR)
+    )
+    (refusal,) = [
+        r for r in verdict.refusals if r.scenario is RefusalScenario.ATTRIBUTE_AS_VARIABLE
+    ]
+    assert "isn't exported to the environment" in refusal.detail
+    assert "$WEDGEINDEX is empty here and on the worker" in refusal.detail
+    assert "every work item writes the same path" in refusal.detail
+    assert "resolves on the worker" not in refusal.detail
+    assert "`@wedgeindex`" in refusal.remedy
+
+
+def test_an_exported_attribute_refusal_still_says_it_resolves_on_the_worker() -> None:
+    """An exported attribute is set on the worker, so its detail keeps that case's wording."""
+    nodes: List[NodeInfo] = [_node("a", exported_attribute_names=("wedgeindex",))]
+    snapshot: GraphSnapshot = synthesize(nodes)
+    read: SceneRead = _read("a", "$HIP/render/v$WEDGEINDEX/a.exr")
+    report: ReadReport = match_reads(snapshot, [read], WORKING_DIR)
+    verdict: Verdict = validate(
+        _ctx(nodes, snapshot=snapshot, reads=report, working_dir=WORKING_DIR)
+    )
+    (refusal,) = [
+        r for r in verdict.refusals if r.scenario is RefusalScenario.ATTRIBUTE_AS_VARIABLE
+    ]
+    assert "exports to the environment" in refusal.detail
+    assert "isn't exported" not in refusal.detail
+
+
 def test_a_render_path_with_an_unexported_attribute_variable_is_refused() -> None:
     """Karma's ``picture`` with ``$WEDGEINDEX`` is refused, though its directory uses `` `@wedgeindex` `` correctly."""
     write: SceneRead = _pyro_write(

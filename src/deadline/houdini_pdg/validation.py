@@ -1326,11 +1326,16 @@ def _check_attribute_variables(ctx: ValidationContext) -> Verdict:
 
     An exported attribute is an environment variable on the worker only, so ``$NAME``
     resolves there and to nothing here, where PDG records the declared output path.
+    An attribute that isn't exported is empty on both, so every item writes one path.
     """
     # Without the scene walk there are no parms to read, so say so rather than
     # passing silently.
     if ctx.reads is None:
         return _skipped()
+    # Each step's exported attributes, so the detail says which case applies.
+    exported: Dict[str, Set[str]] = {
+        step.name: set(step.exported_attribute_names) for step in ctx.snapshot.steps
+    }
 
     # One refusal per parm and variable, so a parm that spells the same variable
     # twice is refused once.
@@ -1343,10 +1348,19 @@ def _check_attribute_variables(ctx: ValidationContext) -> Verdict:
                 scenario=RefusalScenario.ATTRIBUTE_AS_VARIABLE,
                 subject=subject,
                 detail=(
-                    f"The parm is '{use.raw}'. '${use.variable}' is the work item attribute "
-                    f"'{use.attribute}', which this step exports to the environment, not a "
-                    "Houdini variable: it resolves on the worker and to nothing here, where "
-                    "PDG records the path it will report."
+                    (
+                        f"The parm is '{use.raw}'. '${use.variable}' is the work item attribute "
+                        f"'{use.attribute}', which this step exports to the environment, not a "
+                        "Houdini variable: it resolves on the worker and to nothing here, where "
+                        "PDG records the path it will report."
+                    )
+                    if use.attribute in exported.get(use.step, set())
+                    else (
+                        f"The parm is '{use.raw}'. '${use.variable}' is the work item attribute "
+                        f"'{use.attribute}', which isn't exported to the environment, so "
+                        f"${use.variable} is empty here and on the worker, and every work item "
+                        "writes the same path."
+                    )
                 ),
                 remedy=(
                     f"Use `@{use.attribute}` instead of ${use.variable}, so the value is "
