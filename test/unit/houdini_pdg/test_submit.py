@@ -709,3 +709,33 @@ def test_a_network_with_no_pdg_graph_is_told_so_and_nothing_is_generated(scene: 
     ]
     display: Any = network.topnet.displayNode()
     assert display.generate_calls == [] and _cooks(network) == []
+
+
+def test_submit_dirties_the_items_keeping_files_before_it_generates(scene: FakeHou) -> None:
+    """PDG keeps old items after a SOP parm outside the network changes, so Submit judged stale outputs.
+
+    The fake regenerates sim's declared output from the SOP's parm only after a dirty, as
+    PDG does, and the dirty must keep files on disk, or the artist's results are deleted.
+    """
+    # sim's items were generated with an output inside the job, before the artist's change.
+    network: FakeNetwork = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    graph: Any = network.context.schedulers["deadlinecloudscheduler1"].dependency_graph[0]
+    (sim_item,) = [item for item in graph if item.node.name == "sim"]
+    sim_item.expectedOutputFiles = [(os.environ["HIP"] + "/geo/sim.bgeo.sc", "file/geo")]
+    sop_file: Any = FakeNode("/obj/pyro/pyro_cache", parms={"file": "/elsewhere/sim.bgeo.sc"}).parm(
+        "file"
+    )
+    display: Any = network.topnet.displayNode()
+
+    # A generate reads the SOP's parm again only for items dirtied since the last generate.
+    def generate() -> None:
+        if display.work_item_calls and display.work_item_calls[-1][0] == "dirty":
+            sim_item.expectedOutputFiles = [(sop_file.eval(), "file/geo")]
+
+    display.on_generate = generate
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert display.work_item_calls == [("dirty", False), ("generate", True)]
+    text: str = scene.messages.calls[0][0]
+    assert "sim:" in text and "outside the working directory" in text
+    assert _cooks(network) == []

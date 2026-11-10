@@ -210,6 +210,8 @@ class FakeNode:
         self.generate_marks_unsaved: bool = False
         #: Run during a static generate, as PDG sends its events while it generates.
         self.on_generate: Optional[Callable[[], None]] = None
+        #: Each dirty and generate on the node's work items, in order, with its argument.
+        self.work_item_calls: List[Tuple[str, bool]] = []
 
     def path(self) -> str:
         return self._path
@@ -336,6 +338,10 @@ class FakeNode:
         if self.on_generate is not None:
             self.on_generate()
         self.generate_calls.append({"block": block})
+        self.work_item_calls.append(("generate", block))
+
+    def dirtyAllWorkItems(self, remove_outputs: bool) -> None:
+        self.work_item_calls.append(("dirty", remove_outputs))
 
     def cookWorkItems(self, **kwargs: Any) -> None:
         self.cook_calls.append(kwargs)

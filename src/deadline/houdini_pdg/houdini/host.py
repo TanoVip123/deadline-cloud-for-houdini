@@ -1283,6 +1283,9 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
                 over_quota.append(verdict)
             return settings.validate_graph
 
+        # PDG keeps old items after a parm change on a SOP outside the network, so dirty them
+        # first. False keeps the artist's files on disk.
+        display.dirtyAllWorkItems(False)
         handler: Any = watch_task_counts(context, stop)
         try:
             display.generateStaticWorkItems(block=True)
