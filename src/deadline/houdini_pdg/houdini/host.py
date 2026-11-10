@@ -320,40 +320,29 @@ class HoudiniPdgHost:
         return frozenset(name for name in names if name)
 
 
-class PreCookChecks:
-    """The checks that run before a cook starts, from the TOP Cook button or the node's Submit.
+def run_pre_cook_checks(
+    node: Any, *, interactive: bool, cook_set: Optional[AbstractSet[str]] = None
+) -> Verdict:
+    """The checks before a cook on the scheduler ``node`` starts, from the TOP Cook button or Submit.
 
-    The unsaved ``.hip`` prompt first, then the refusals the topology alone can
-    show. With no UI, the prompt becomes a refusal.
+    The unsaved ``.hip`` prompt first, then the refusals the topology alone can show.
+    A refusal or a cancel starts nothing. With ``interactive``, unsaved changes are
+    saved first, or the artist cancels, which raises ``UserInitiatedCancel``. With no
+    UI, the prompt becomes a refusal. ``cook_set`` names the nodes the cook runs.
     """
 
-    def run(
-        self, node: Any, *, interactive: bool, cook_set: Optional[AbstractSet[str]] = None
-    ) -> Verdict:
-        """The verdict for starting a cook on the scheduler ``node``. A refusal or a cancel starts nothing.
+    # One trip to the main thread for the prompt and both checks, since each waits on the UI.
+    def check() -> Verdict:
+        if interactive:
+            prompt_to_save(node)
+        # A settings problem is reported by the cook when it starts, so the topology
+        # is still judged without it.
+        found: Verdict = _check_network(
+            node, _get_or_create_graph_context(node), _read_settings_or_none(node), cook_set, None
+        )[0]
+        return Verdict(refusals=found.refusals + _check_saved_scene(), advisories=found.advisories)
 
-        With ``interactive``, unsaved changes are saved first, or the artist cancels,
-        which raises ``UserInitiatedCancel``. ``cook_set`` names the nodes the cook runs.
-        """
-
-        # One trip to the main thread for the prompt and both checks, since each waits on the UI.
-        def check() -> Verdict:
-            if interactive:
-                prompt_to_save(node)
-            # A settings problem is reported by the cook when it starts, so the topology
-            # is still judged without it.
-            found: Verdict = _check_network(
-                node,
-                _get_or_create_graph_context(node),
-                _read_settings_or_none(node),
-                cook_set,
-                None,
-            )[0]
-            return Verdict(
-                refusals=found.refusals + _check_saved_scene(), advisories=found.advisories
-            )
-
-        return on_main_thread(check)
+    return on_main_thread(check)
 
 
 def on_main_thread(read: Callable[[], T]) -> T:

@@ -40,10 +40,10 @@ from deadline.houdini_pdg.graph import NodeInfo
 from deadline.houdini_pdg.houdini import host as host_module
 from deadline.houdini_pdg.houdini.host import (
     HoudiniPdgHost,
-    PreCookChecks,
     cook_set_names,
     read_host_requirements,
     read_scheduler_settings,
+    run_pre_cook_checks,
 )
 from deadline.houdini_pdg.houdini.settings import SchedulerSettings
 from deadline.houdini_pdg.ports import (
@@ -945,7 +945,7 @@ def test_without_a_ui_scene_reads_run_on_the_calling_thread(
 
 def _verdict(network: FakeNetwork, interactive: bool = False) -> Verdict:
     """The pre-cook verdict for the network's scheduler node."""
-    return PreCookChecks().run(network.scheduler_node, interactive=interactive)
+    return run_pre_cook_checks(network.scheduler_node, interactive=interactive)
 
 
 def _refused(verdict: Verdict) -> List[Tuple[RefusalScenario, str]]:

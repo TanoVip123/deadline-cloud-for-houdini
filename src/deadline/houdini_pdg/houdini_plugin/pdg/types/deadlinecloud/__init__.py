@@ -35,8 +35,8 @@ from deadline.houdini_pdg.errors import CookSetupError, GraphRefusedError, artis
 from deadline.houdini_pdg.farm_job import DeadlineFarmJob
 from deadline.houdini_pdg.houdini.host import (
     HoudiniPdgHost,
-    PreCookChecks,
     cook_set_names,
+    run_pre_cook_checks,
     show_error_popup,
 )
 from deadline.houdini_pdg.houdini.readers import declared_files
@@ -145,7 +145,7 @@ class DeadlineCloudPDGScheduler(PyScheduler):
             if not generate:
                 # A generate submits nothing, so only a cook is checked.
                 _refuse(
-                    PreCookChecks().run(host.scheduler_node(), interactive=False, cook_set=names)
+                    run_pre_cook_checks(host.scheduler_node(), interactive=False, cook_set=names)
                 )
             clock: SystemClock = SystemClock()
             clients: _DeadlineCloudCalls = self._clients()
