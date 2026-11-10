@@ -557,25 +557,55 @@ def test_a_displayed_subnet_leaves_a_branch_it_does_not_cook_out_of_the_checks(
     assert "Steps: 3, tasks: 3" in scene.messages.calls[0][0]
 
 
-def test_a_displayed_subnet_cooks_the_steps_inside_it_and_above_them(scene: FakeHou) -> None:
-    """A step inside the subnet, and the steps wired above it, are in the cook and are checked.
-
-    Without the inner step, render, which generated nothing, would go unreported.
-    """
-    # A subnet with no inputs holds one step wired to montage, and render generates nothing.
-    network: FakeNetwork = _with_side_branch()
-    subnet: FakeNode = network.topnet.add(FakeNode("/obj/topnet1/subnet1"))
-    inner: FakeNode = subnet.add(
-        FakeNode("/obj/topnet1/subnet1/inner"), network.node("montage").hom
+def _with_inner_step(
+    network: FakeNetwork, subnet: FakeNode, name: str, *inputs: FakeNode
+) -> FakeNode:
+    """Add a step called ``name`` inside ``subnet``, wired to ``inputs``, with its own PDG node."""
+    # PDG names a node inside a subnet by the subnet's name and its own.
+    inner: FakeNode = subnet.add(FakeNode(f"{subnet.path()}/{name}"), *inputs)
+    pdg_inner: FakePdgNode = FakePdgNode(
+        name=f"{subnet.name()}_{name}", command=f"hython {name}.py", hom=inner
     )
-    pdg_inner: FakePdgNode = FakePdgNode(name="subnet1_inner", command="hython inner.py", hom=inner)
     inner.pdg_node = pdg_inner
     network.context.nodes.append(pdg_inner)
+    return inner
+
+
+def test_a_displayed_subnet_cooks_the_steps_inside_it_and_above_them(scene: FakeHou) -> None:
+    """The subnet's output step, and the steps wired above it, are in the cook and are checked.
+
+    Without the output step, render, which generated nothing, would go unreported.
+    """
+    # A subnet with no inputs outputs one step wired to montage, and render generates nothing.
+    network: FakeNetwork = _with_side_branch()
+    subnet: FakeNode = network.topnet.add(FakeNode("/obj/topnet1/subnet1"))
+    subnet.display = _with_inner_step(network, subnet, "inner", network.node("montage").hom)
     network.topnet.display = subnet
     _generated(network, {"sim": 1, "montage": 1, "subnet1_inner": 1})
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     text: str = scene.messages.calls[0][0]
     assert "render:" in text and "side:" not in text
+
+
+def test_a_displayed_subnet_leaves_a_step_inside_it_that_it_does_not_cook_out_of_the_checks(
+    scene: FakeHou,
+) -> None:
+    """A step inside the subnet that nothing wires to its output is not cooked, so it isn't refused.
+
+    Counting every node inside the subnet refused it for having no items, which only
+    turning validation off could get past.
+    """
+    # The subnet outputs inner, wired to montage, and also holds stray, wired to nothing.
+    network: FakeNetwork = _network()
+    subnet: FakeNode = network.topnet.add(
+        FakeNode("/obj/topnet1/subnet1"), network.node("montage").hom
+    )
+    subnet.display = _with_inner_step(network, subnet, "inner", network.node("montage").hom)
+    _with_inner_step(network, subnet, "stray")
+    network.topnet.display = subnet
+    _generated(network, {"sim": 1, "render": 1, "montage": 1, "subnet1_inner": 1})
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    assert "Steps: 4, tasks: 4" in scene.messages.calls[0][0]
 
 
 def test_a_bad_host_requirement_is_shown_before_anything_is_generated(scene: FakeHou) -> None:
