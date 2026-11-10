@@ -30,7 +30,7 @@ from typing import (
 from .errors import PayloadTransferError
 from .graph import DeclaredFile, GraphSnapshot, NodeInfo, TaskKey
 from .scene_reads import SceneReads
-from .validation import RefusalScenario
+from .validation import RefusalScenario, Verdict
 
 #: What a read run through :meth:`PdgHost.on_main_thread` returns.
 T = TypeVar("T")
@@ -250,8 +250,15 @@ class PdgHost(Protocol):
         """Make ``path`` PDG's local and remote working directory."""
         ...
 
-    def watch_generation(self, cook_set: Optional[AbstractSet[str]]) -> None:
-        """Start following PDG's generation of the steps in ``cook_set``, or of every step."""
+    def watch_generation(
+        self,
+        cook_set: Optional[AbstractSet[str]],
+        on_quota_exceeded: Optional[Callable[[Verdict], bool]] = None,
+    ) -> None:
+        """Start following PDG's generation of the steps in ``cook_set``, or of every step.
+
+        A task count over a quota goes to ``on_quota_exceeded``, and True cancels the cook.
+        """
         ...
 
     def pending_generation(self) -> Sequence[str]:

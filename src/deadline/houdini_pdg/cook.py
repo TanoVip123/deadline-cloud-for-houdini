@@ -670,8 +670,28 @@ class Cook:
             if self._package_logger.level != self._package_logger_previous_level:
                 self._package_logger.setLevel(self._package_logger_previous_level)
 
+    def refuse_while_generating(self, verdict: Verdict) -> bool:
+        """Refuse the cook for a quota PDG passed while generating. Return whether to stop it.
+
+        PDG's stop that follows is a cancel, so the refusal is reported then. With
+        validation off, or once the snapshot is taken, it is only logged.
+        """
+        found: Verdict = verdict if self._settings.validate_graph else waived(verdict)
+        self._log_validation_verdict(found)
+        if not found.refusals:
+            return False
+        scenarios: Tuple[RefusalScenario, ...] = tuple(
+            dict.fromkeys(refusal.scenario for refusal in found.refusals)
+        )
+        if self._state.move(CookPhase.CONNECTED, CookPhase.SNAPSHOTTING) and self._state.refuse(
+            scenarios, from_phase=CookPhase.SNAPSHOTTING
+        ):
+            self._refused_at_end = found
+            return True
+        return False
+
     def refused_at_end(self) -> Optional[Verdict]:
-        """The refusal of a cook PDG ended before offering anything, because its items came from cache."""
+        """The refusal of a cook PDG ended before offering anything, for its cache or a quota."""
         return self._refused_at_end
 
     def _judge_cache_at_end(self) -> None:
@@ -1335,7 +1355,7 @@ class PdgScheduler:
                 cook.close(cancel=False)
             raise
         try:
-            self._host.watch_generation(cook_set)
+            self._host.watch_generation(cook_set, cook.refuse_while_generating)
         except Exception:
             # Without it the first work item reads the graph at once.
             _logger.warning("Could not follow PDG's generation of the graph.", exc_info=True)
@@ -1384,7 +1404,7 @@ class PdgScheduler:
 
         A start still running learns of the stop, and ends the cook it is starting.
         Raises ``GraphRefusedError`` when PDG ended the cook with nothing offered
-        because it took a step's items from cache.
+        because it took a step's items from cache, or generation passed a quota.
         """
         # Drop the cook first, so the next start builds a fresh one.
         with self._lock:

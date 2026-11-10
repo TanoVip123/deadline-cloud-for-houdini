@@ -79,7 +79,7 @@ from deadline.houdini_pdg.ports import (
     WorkItemHandle,
 )
 from deadline.houdini_pdg.scene_reads import ReadReport, SceneRead, SceneReads
-from deadline.houdini_pdg.validation import RefusalScenario
+from deadline.houdini_pdg.validation import Refusal, RefusalScenario, Verdict
 
 _T0: datetime = datetime(2026, 1, 1, tzinfo=timezone.utc)
 WORKING_DIR: str = "/proj/cook"
@@ -260,6 +260,8 @@ class FakeHost:
         self.reasons: Dict[int, Tuple[str, str]] = {}
         #: Whether generation is being watched.
         self.watching: bool = False
+        #: What the cook asked to hear when generation passes a quota.
+        self.on_quota_exceeded: Optional[Callable[[Verdict], bool]] = None
 
     def read_graph(self) -> Sequence[NodeInfo]:
         self.events("read_graph")
@@ -283,10 +285,15 @@ class FakeHost:
     def set_working_dir(self, path: str) -> None:
         self.events("set_working_dir", path)
 
-    def watch_generation(self, cook_set: Optional[AbstractSet[str]]) -> None:
+    def watch_generation(
+        self,
+        cook_set: Optional[AbstractSet[str]],
+        on_quota_exceeded: Optional[Callable[[Verdict], bool]] = None,
+    ) -> None:
         # A watch takes effect after the call's hook, as a real one would once registered.
         self.events("watch_generation", cook_set)
         self.watching = True
+        self.on_quota_exceeded = on_quota_exceeded
 
     def pending_generation(self) -> Sequence[str]:
         # Each queued answer is used once: names, or an error to raise.
@@ -2119,6 +2126,51 @@ def test_a_cook_pdg_ends_with_every_item_from_cache_is_refused_naming_each_step(
     summary: CookSummary = h.summary()
     assert summary.final_phase is CookPhase.REFUSED and not summary.stopped_by_user
     assert summary.refusals == (RefusalScenario.CACHED_OUTPUTS,)
+
+
+def _over_quota() -> Verdict:
+    """What the host finds when one step generates more tasks than a step may have."""
+    return Verdict(
+        refusals=(
+            Refusal(
+                scenario=RefusalScenario.QUOTA_EXCEEDED,
+                subject="b",
+                detail="10,001 tasks per step, more than the limit of 10,000.",
+                remedy="Reduce the cook's scope.",
+            ),
+        )
+    )
+
+
+def test_a_quota_crossed_while_pdg_generates_refuses_the_cook_it_stops() -> None:
+    """The stop that follows is a cancel, so without the refusal the artist sees only a stopped cook."""
+    # Generation reports the quota, then PDG stops the cook as canceled.
+    h: Harness = Harness()
+    h.start()
+    assert h.host.on_quota_exceeded is not None and h.host.on_quota_exceeded(_over_quota())
+    with pytest.raises(GraphRefusedError) as raised:
+        h.scheduler.on_stop_cook(True)
+    assert [r.subject for r in raised.value.verdict.refusals] == ["b"]
+    assert h.summary().final_phase is CookPhase.REFUSED
+    assert h.summary().refusals == (RefusalScenario.QUOTA_EXCEEDED,)
+    assert h.events.count("submit") == 0
+
+
+def test_with_validation_off_a_quota_crossed_while_generating_does_not_stop_the_cook() -> None:
+    """Validation off keeps every refusal as a warning, so generation is not stopped for one."""
+    h: Harness = Harness(validate_graph=False)
+    h.start()
+    assert h.host.on_quota_exceeded is not None
+    assert h.host.on_quota_exceeded(_over_quota()) is False
+    assert h.phase() is CookPhase.CONNECTED
+
+
+def test_a_quota_crossed_after_the_snapshot_changes_nothing() -> None:
+    """Once the job exists, the snapshot already judged its quotas, so a late report is ignored."""
+    h: Harness = Harness().cooking()
+    assert h.host.on_quota_exceeded is not None
+    assert h.host.on_quota_exceeded(_over_quota()) is False
+    assert h.phase() is CookPhase.COOKING
 
 
 def test_an_artists_stop_before_any_offer_reads_nothing_and_refuses_nothing() -> None:

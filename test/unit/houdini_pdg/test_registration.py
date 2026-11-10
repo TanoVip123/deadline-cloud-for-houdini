@@ -772,6 +772,22 @@ def test_a_cook_that_offered_nothing_and_had_no_step_says_so_at_its_end(scene: F
     assert "wedge1" in error and "No node in this cook runs a command on a worker" in error
 
 
+def test_a_step_over_the_task_quota_while_generating_is_shown_on_the_node(
+    scene: FakeHou,
+) -> None:
+    """The cancel that stops generation would otherwise end the cook with no word on why."""
+    network: Network = build_network(PYRO_BONFIRE)
+    scheduler: Any = _scheduler(network)
+    assert scheduler.onStartCook(False, None) is True
+    # sim generates one task more than a step may have, then PDG stops the cook.
+    network.node("sim").workItems = [None] * 10_001
+    network.context.emit("NodeGenerated", "sim")
+    assert network.context.canceled.wait(5)
+    assert scheduler.onStopCook(True) is True
+    (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
+    assert "sim: 10,001 tasks per step, more than the limit of 10,000." in error
+
+
 class _Deferred:
     """``hdefereval``: records what is queued for the main thread, and runs it only when asked."""
 

@@ -673,6 +673,34 @@ def test_a_shape_quota_counts_through_nodes_that_are_not_steps() -> None:
     assert refusal.subject == "montage" and "3 dependencies per step" in refusal.detail
 
 
+@given(
+    counts=st.dictionaries(st.sampled_from(["a", "b", "c", "d"]), st.integers(0, 8)),
+    quota=quotas,
+)
+def test_the_counts_during_generation_are_refused_once_a_step_or_the_job_is_over(
+    counts: Dict[str, int], quota: Quotas
+) -> None:
+    """Generation stops at the first node that makes the job too big, before the rest generate."""
+    # The model: each step over its limit, and the job when the sum is over its limit.
+    expected: Set[Tuple[str, str]] = {
+        (name, validation._TASKS_PER_STEP)
+        for name, count in counts.items()
+        if count > quota.max_tasks_per_step
+    }
+    if sum(counts.values()) > quota.max_tasks_per_job:
+        expected.add((validation._WHOLE_COOK, validation._TASKS_PER_JOB))
+    verdict: Verdict = validation.check_generated_counts(counts, quota)
+    assert _quota_refusals(verdict) == expected
+    assert all("stopped" in refusal.detail for refusal in verdict.refusals)
+
+
+def test_a_count_during_generation_names_the_node_and_its_count() -> None:
+    """The artist needs the node and the number to know what to make smaller."""
+    step, job = validation.check_generated_counts({"ropfetch_karma": 10_001}).refusals
+    assert step.subject == "ropfetch_karma" and job.subject == "this cook"
+    assert step.detail.startswith("10,001 tasks per step, more than the limit of 10,000.")
+
+
 def test_a_dependency_quota_refusal_says_how_many_edges_carry_data() -> None:
     """A dependency refusal reports how many of its edges carry data, since a data edge cannot be pruned."""
     nodes: List[NodeInfo] = [_node("a"), _node("b"), _node("c", ["a", "b"])]

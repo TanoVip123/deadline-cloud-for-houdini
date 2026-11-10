@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import types
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -202,6 +203,8 @@ class FakeNode:
         #: The hip file a generate could mark as changed, and whether it does.
         self.hip_file: Any = None
         self.generate_marks_unsaved: bool = False
+        #: Run during a static generate, as PDG sends its events while it generates.
+        self.on_generate: Optional[Callable[[], None]] = None
 
     def path(self) -> str:
         return self._path
@@ -311,6 +314,8 @@ class FakeNode:
         # Houdini might mark the scene changed on a generate, so a test can make it do so.
         if self.generate_marks_unsaved and self.hip_file is not None:
             self.hip_file.unsaved = True
+        if self.on_generate is not None:
+            self.on_generate()
         self.generate_calls.append({"block": block})
 
     def cookWorkItems(self, **kwargs: Any) -> None:
@@ -482,6 +487,8 @@ class FakeContext:
     cookOptions: Any = field(
         default_factory=lambda: types.SimpleNamespace(cookType="cookType.Node")
     )
+    #: Set once anything cancels the cook, from any thread.
+    canceled: threading.Event = field(default_factory=threading.Event)
 
     @property
     def graph(self) -> Any:
@@ -502,6 +509,9 @@ class FakeContext:
     def removeEventHandler(self, handler: Any) -> None:
         if handler in self.handlers:
             self.handlers.remove(handler)
+
+    def cancelCook(self) -> None:
+        self.canceled.set()
 
     def emit(self, event_type: Any, node_name: str) -> None:
         """Send ``event_type`` for the named node to every handler registered for it."""

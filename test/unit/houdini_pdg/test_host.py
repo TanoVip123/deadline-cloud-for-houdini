@@ -287,6 +287,73 @@ def test_generation_is_pending_until_each_step_announces_it(scene: FakeHou) -> N
     assert host.pending_generation() == ()
 
 
+def _counting() -> Tuple[HoudiniPdgHost, Network, List[Verdict]]:
+    """A host watching generation, recording each quota report and agreeing to stop."""
+    network: Network = build_network(PYRO_BONFIRE)
+    host: HoudiniPdgHost = HoudiniPdgHost(network.scheduler())
+    reports: List[Verdict] = []
+
+    def stop(verdict: Verdict) -> bool:
+        reports.append(verdict)
+        return True
+
+    host.watch_generation(None, stop)
+    return host, network, reports
+
+
+def test_a_step_over_the_task_quota_stops_generation_and_names_its_count(scene: FakeHou) -> None:
+    """Without the stop, PDG generated every item of a huge wedge before anything was refused."""
+    host, network, reports = _counting()
+    # sim generates one task more than a step may have.
+    network.node("sim").workItems = [None] * 10_001
+    network.context.emit("NodeGenerated", "sim")
+    (verdict,) = reports
+    by_subject: Dict[str, str] = {r.subject: r.detail for r in verdict.refusals}
+    assert "10,001 tasks per step" in by_subject["sim"]
+    assert network.context.canceled.wait(5)
+    # A node that generates after the stop is not reported again.
+    network.node("render").workItems = [None] * 10_001
+    network.context.emit("NodeGenerated", "render")
+    assert len(reports) == 1
+
+
+def test_the_job_total_across_steps_stops_generation(scene: FakeHou) -> None:
+    """Two steps can each fit the per-step limit and still pass the per-job limit together."""
+    host, network, reports = _counting()
+    network.node("sim").workItems = [None] * 6_000
+    network.node("render").workItems = [None] * 6_000
+    network.context.emit("NodeGenerated", "sim")
+    assert reports == []
+    network.context.emit("NodeGenerated", "render")
+    ((refusal,),) = [verdict.refusals for verdict in reports]
+    assert refusal.subject == "this cook" and "12,000 tasks per job" in refusal.detail
+
+
+def test_items_of_a_node_that_is_not_a_step_are_not_counted(scene: FakeHou) -> None:
+    """A wedge's items cook here and are never tasks, so they can't pass a task quota."""
+    host, network, reports = _counting()
+    network.node("wedge1").workItems = [None] * 20_000
+    network.context.emit("NodeGenerated", "wedge1")
+    assert reports == [] and not network.context.canceled.is_set()
+
+
+def test_a_stop_the_cook_declines_leaves_generation_running(scene: FakeHou) -> None:
+    """With validation off the cook keeps the report as a warning, so nothing is canceled."""
+    network: Network = build_network(PYRO_BONFIRE)
+    host: HoudiniPdgHost = HoudiniPdgHost(network.scheduler())
+    host.watch_generation(None, lambda verdict: False)
+    network.node("sim").workItems = [None] * 10_001
+    network.context.emit("NodeGenerated", "sim")
+    assert not network.context.canceled.wait(0.2)
+
+
+def test_stopping_the_watch_removes_the_quota_count_too(scene: FakeHou) -> None:
+    """A handler left behind would count the next cook's items against this one."""
+    host, network, reports = _counting()
+    host.stop_watching_generation()
+    assert network.context.handlers == []
+
+
 def test_only_the_steps_pdg_asked_for_are_awaited(scene: FakeHou) -> None:
     """A step outside the cook set never generates, so waiting for it would stall the cook."""
     host, network = _watching(frozenset({"wedge1", "sim"}))

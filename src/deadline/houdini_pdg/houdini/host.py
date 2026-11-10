@@ -43,6 +43,7 @@ from ..validation import (
     ValidationContext,
     Verdict,
     check_cook_set_has_steps,
+    check_generated_counts,
     check_shape_quotas,
     validate,
     waived,
@@ -104,7 +105,7 @@ class HoudiniPdgHost:
         # The steps a cook waits for, and those PDG has finished generating.
         self._waiting_for: Set[str] = set()
         self._generated: Set[str] = set()
-        self._generation_handler: Any = None
+        self._generation_handlers: Tuple[Any, ...] = ()
         # The cook set PDG gave at the start, for a read after PDG stops reporting one.
         self._cook_set: Optional[FrozenSet[str]] = None
         # Separate from ``_lock``, which is held across a main-thread call.
@@ -165,11 +166,16 @@ class HoudiniPdgHost:
         """Use ``path`` as both the local and the remote working directory."""
         self._scheduler.setWorkingDir(path, path)
 
-    def watch_generation(self, cook_set: Optional[AbstractSet[str]]) -> None:
-        """Follow ``NodeGenerated`` for the steps PDG asked for.
+    def watch_generation(
+        self,
+        cook_set: Optional[AbstractSet[str]],
+        on_quota_exceeded: Optional[Callable[[Verdict], bool]] = None,
+    ) -> None:
+        """Follow ``NodeGenerated`` for the steps PDG asked for, and count their tasks.
 
         PDG offers a step's first item while it is still generating the steps
-        below it, so a graph read at that moment is missing most of the job.
+        below it, so a graph read at that moment is missing most of the job. When
+        ``on_quota_exceeded`` returns True for a quota refusal, the cook is canceled.
         """
         # Wait for every step, or only those in the cook set, and listen for each to finish.
         context: Any = self._scheduler.context
@@ -178,11 +184,13 @@ class HoudiniPdgHost:
             self._waiting_for = steps & set(cook_set) if cook_set else steps
             self._generated = set()
             self._cook_set = frozenset(cook_set) if cook_set else None
-        handler: Any = context.addEventHandler(
-            self._on_node_generated, pdg.EventType.NodeGenerated, True
+        handlers: Tuple[Any, ...] = (
+            context.addEventHandler(self._on_node_generated, pdg.EventType.NodeGenerated, True),
         )
+        if on_quota_exceeded is not None:
+            handlers += (watch_task_counts(context, on_quota_exceeded),)
         with self._generation_lock:
-            self._generation_handler = handler
+            self._generation_handlers = handlers
 
     def pending_generation(self) -> Sequence[str]:
         """The watched steps that have neither generated nor queued an item."""
@@ -208,11 +216,11 @@ class HoudiniPdgHost:
             return tuple(sorted(self._waiting_for - self._generated))
 
     def stop_watching_generation(self) -> None:
-        """Remove the event handler, if there is one."""
+        """Remove the event handlers, if there are any."""
         with self._generation_lock:
-            handler: Any = self._generation_handler
-            self._generation_handler = None
-        if handler is not None:
+            handlers: Tuple[Any, ...] = self._generation_handlers
+            self._generation_handlers = ()
+        for handler in handlers:
             try:
                 self._scheduler.context.removeEventHandler(handler)
             except Exception:
@@ -329,6 +337,35 @@ def on_main_thread(read: Callable[[], T]) -> T:
 
     result: T = hdefereval.executeInMainThreadWithResult(read)
     return result
+
+
+def watch_task_counts(context: Any, stop: Callable[[Verdict], bool]) -> Any:
+    """Count each step's tasks as PDG generates it, and cancel once ``stop`` accepts a quota refusal.
+
+    Returns PDG's handler. The counts live only in this handler, and it reports once.
+    """
+    counts: Dict[str, int] = {}
+    stopped: List[bool] = [False]
+    lock: threading.Lock = threading.Lock()
+
+    def on_generated(_handler: Any, event: Any) -> None:
+        # Only a step's items are tasks. PDG may send events from several threads.
+        node: Any = _attr(event, "node")
+        name: str = _name(node)
+        if not name or not _is_step(node):
+            return
+        with lock:
+            if stopped[0]:
+                return
+            counts[name] = len(_attr(node, "workItems") or ())
+            verdict: Verdict = check_generated_counts(counts)
+            stopped[0] = bool(verdict.refusals) and stop(verdict)
+            canceling: bool = stopped[0]
+        # PDG is inside its own generation here, so another thread cancels it.
+        if canceling:
+            threading.Thread(target=lambda: _call(context, "cancelCook"), daemon=True).start()
+
+    return _call(context, "addEventHandler", on_generated, pdg.EventType.NodeGenerated, True)
 
 
 def cook_set_names(cook_set: Any) -> Optional[FrozenSet[str]]:
@@ -975,18 +1012,33 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     cook_set: Optional[FrozenSet[str]] = _find_cook_set(node, display)
     # A job shape over a quota is known from the wires, so nothing is generated for
     # it, unless the artist turned validation off.
-    shape: Verdict = check_shape_quotas(
-        readers.node_infos(_graph_nodes(_graph_context(node)), None, cook_set)
-    )
     early: Optional[SchedulerSettings] = _settings_or_none(node)
-    if shape.refusals and (early is None or early.validate_graph):
+    validating: bool = early is None or early.validate_graph
+    context: Any = _graph_context(node)
+    shape: Verdict = check_shape_quotas(readers.node_infos(_graph_nodes(context), None, cook_set))
+    if shape.refusals and validating:
         _show("The cook can't start.\n\n" + format_refusals(shape.refusals), error=True)
         return False
     # Generate the display node's items, so every check sees the job the cook would
-    # submit, then read them from this scheduler as the cook does.
-    display.generateStaticWorkItems(block=True)
+    # submit, and stop at the first step that passes a task quota.
+    over_quota: List[Verdict] = []
+
+    def stop(verdict: Verdict) -> bool:
+        if validating:
+            over_quota.append(verdict)
+        return validating
+
+    handler: Any = watch_task_counts(context, stop)
+    try:
+        display.generateStaticWorkItems(block=True)
+    finally:
+        _call(context, "removeEventHandler", handler)
+    if over_quota:
+        _show("The cook can't start.\n\n" + format_refusals(over_quota[0].refusals), error=True)
+        return False
+    # Read the items from this scheduler, as the cook does.
     scheduler: Any = _call(
-        _graph_context(node), "schedulerForName", _call(node, "getPDGNodeName") or node.name()
+        context, "schedulerForName", _call(node, "getPDGNodeName") or node.name()
     )
     dependency_graph: Any = _call(scheduler, "dependencyGraph", True)
     checked: Verdict

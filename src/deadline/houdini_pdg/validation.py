@@ -526,6 +526,25 @@ def check_shape_quotas(nodes: Sequence[NodeInfo], quotas: Quotas = Quotas()) -> 
     return Verdict(refusals=tuple(refusals))
 
 
+def check_generated_counts(counts: Mapping[str, int], quotas: Quotas = Quotas()) -> Verdict:
+    """Refuse the task counts of the steps generated so far, once a step or the job is over.
+
+    PDG is still generating, so the refusal says the generation was stopped.
+    """
+    stopped: str = " PDG was still generating, so the generation was stopped."
+    refusals: List[Refusal] = [
+        _quota_refusal(name, count, quotas.max_tasks_per_step, _TASKS_PER_STEP, stopped)
+        for name, count in sorted(counts.items())
+        if count > quotas.max_tasks_per_step
+    ]
+    total: int = sum(counts.values())
+    if total > quotas.max_tasks_per_job:
+        refusals.append(
+            _quota_refusal(_WHOLE_COOK, total, quotas.max_tasks_per_job, _TASKS_PER_JOB, stopped)
+        )
+    return Verdict(refusals=tuple(refusals))
+
+
 def check_no_farm_work(ctx: ValidationContext) -> Verdict:
     """Refuse a cook that generated items but no step for a worker to run.
 

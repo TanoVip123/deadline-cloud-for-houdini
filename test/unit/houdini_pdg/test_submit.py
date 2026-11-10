@@ -307,3 +307,22 @@ def test_a_network_over_a_shape_quota_is_refused_before_it_is_generated(scene: F
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     assert display.generate_calls == [] and _cooks(network) == []
     assert "201 steps per job" in scene.messages.calls[0][0]
+
+
+def test_a_step_over_the_task_quota_stops_submits_generate_and_is_shown(scene: FakeHou) -> None:
+    """The generate stops at the first step that's too big, so no confirmation follows it."""
+    # sim generates one task more than a step may have, while Submit generates.
+    network: Network = _network()
+    display: Any = network.topnet.displayNode()
+
+    def generate() -> None:
+        network.node("sim").workItems = [None] * 10_001
+        network.context.emit("NodeGenerated", "sim")
+
+    display.on_generate = generate
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    ((text, buttons),) = scene.messages.calls
+    assert "sim: 10,001 tasks per step" in text and buttons == ()
+    assert network.context.canceled.wait(5) and _cooks(network) == []
+    # The count stops with the generate, so a later cook isn't counted by it.
+    assert network.context.handlers == []

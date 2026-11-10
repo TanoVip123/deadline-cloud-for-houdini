@@ -58,6 +58,7 @@ from deadline.houdini_pdg.graph import (
 from deadline.houdini_pdg.ports import ItemOutcome, SceneFiles, WorkItemHandle
 from deadline.houdini_pdg.scene_reads import SceneReads
 from deadline.houdini_pdg.submitter import PdgSubmitter, PdgSubmitterSettings
+from deadline.houdini_pdg.validation import Verdict
 
 WORKING_DIR: str = "/proj/pdgtemp"
 # Made-up resource IDs in the service's shape: a prefix and 32 hex digits.
@@ -173,7 +174,11 @@ class FakeHost:
     def set_working_dir(self, path: str) -> None:
         raise AssertionError("The submitter does not set the working directory.")
 
-    def watch_generation(self, cook_set: Optional[AbstractSet[str]]) -> None:
+    def watch_generation(
+        self,
+        cook_set: Optional[AbstractSet[str]],
+        on_quota_exceeded: Optional[Callable[[Verdict], bool]] = None,
+    ) -> None:
         raise AssertionError("The submitter does not watch generation.")
 
     def pending_generation(self) -> Sequence[str]:
