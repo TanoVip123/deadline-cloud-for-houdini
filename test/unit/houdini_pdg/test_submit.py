@@ -176,6 +176,7 @@ def test_a_bad_tab_value_is_named_before_anything_is_generated(
     network: FakeNetwork = _network()
     named: str = break_tab(network, tmp_path)
     display: Any = network.topnet.displayNode()
+    # One error popup names the parm, and nothing is generated or cooked.
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     ((text, buttons),) = scene.messages.calls
     assert named in text and buttons == ()
@@ -403,6 +404,7 @@ def test_a_displayed_subnet_without_a_display_node_cooks_what_is_wired_into_it(
     )
     network.topnet.display = subnet
     _generated(network, counts)
+    # Submit refuses render when it has no items, and never names the side branch.
     assert submit(network.scheduler_node, get_setting=_workstation) is not refused
     text: str = scene.messages.calls[0][0]
     assert "side:" not in text
@@ -446,6 +448,7 @@ def test_a_displayed_subnet_cooks_its_display_node_and_the_steps_above_it(
     _with_inner_step(network, subnet, "stray")
     network.topnet.display = subnet
     _generated(network, counts)
+    # Submit refuses render when it has no items, and never names side or stray.
     assert submit(network.scheduler_node, get_setting=_workstation) is not refused
     text: str = scene.messages.calls[0][0]
     assert "side:" not in text and "stray" not in text

@@ -951,6 +951,7 @@ def test_the_save_prompt_asks_only_when_an_artist_can_save_the_scene(
     scene.hip_file.new, scene.hip_file.unsaved, scene.ui = new, unsaved, ui
     network: FakeNetwork = _auto_save_network(auto_save)
     verdict: Verdict = _verdict(network, prompt=True)
+    # The dialogs shown, the saves made, the refusal, and no write to the auto-save toggle.
     assert [buttons for _, buttons in scene.messages.calls] == (
         [("Save", "Always Save", "Cancel")] if prompted else []
     )
