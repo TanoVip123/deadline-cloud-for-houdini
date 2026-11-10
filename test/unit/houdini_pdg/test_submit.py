@@ -745,13 +745,15 @@ class _ErrorTab:
     """The scheduler node's error tab, as Houdini 21.0's hython showed it.
 
     A ``cookError`` shows at the next blocking generate on the scheduler node, and
-    Submit's dirty of the display node's items clears what shows.
+    Submit's dirty of the display node's items clears what shows. In Houdini 21.0.559's UI
+    that generate hung unless the display node's own generate had finished since the dirty.
     """
 
     def __init__(self, network: FakeNetwork) -> None:
         self.shown: List[str] = []
         self.scheduler: Any = network.context.schedulers["deadlinecloudscheduler1"]
         self._read: int = 0
+        self.hung: bool = False
         # Clear the tab on the display node's dirty, and show new errors on the node's generate.
         display: Any = network.topnet.displayNode()
         dirty: Any = display.dirtyAllWorkItems
@@ -763,7 +765,12 @@ class _ErrorTab:
             self.shown.clear()
 
         def generate_and_show(block: bool = False) -> None:
+            # A hang leaves nothing shown, so the model records it and stops.
+            finished: bool = display.work_item_calls[-1:] == [("generate", True)]
             generate(block)
+            if not finished or network.context.canceled.is_set():
+                self.hung = True
+                return
             # A generate that doesn't block returns before the node updates.
             if block:
                 calls: List[Tuple[Any, ...]] = self.scheduler.calls
@@ -798,7 +805,7 @@ def test_a_refusal_stays_on_the_error_tab_until_the_fixed_scenes_next_submit(
     tab: _ErrorTab
     text: str
     network, tab, text = _refused_on_the_tab(scene)
-    assert "The cook can't start." in text and tab.shown == [text]
+    assert "The cook can't start." in text and tab.shown == [text] and tab.hung is False
     # The display node's items are only Submit's own dirty and generate.
     display: Any = network.topnet.displayNode()
     assert display.work_item_calls == [("dirty", False), ("generate", True)]
@@ -822,29 +829,66 @@ def test_a_cancel_at_the_save_prompt_leaves_the_error_tab_as_it_was(scene: FakeH
     assert [call for call in tab.scheduler.calls if call[0] == "cookError"] == [("cookError", text)]
 
 
-def test_a_bad_tab_value_goes_on_the_error_tab_too(scene: FakeHou) -> None:
-    """A CookSetupError's popup closes like a refusal's, so its text must stay on the node too."""
+def test_a_stop_before_the_dirty_leaves_the_scheduler_node_alone(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A bad tab value stops Submit before it dirties or generates the display node's items.
+
+    The scheduler node's generate hangs Houdini's UI unless the display node's generate
+    finished first, so only the popup shows, with a log line, even though PDG has the scheduler.
+    """
     # PDG has the scheduler from an earlier generate, and the GPU minimum is above its maximum.
     network: FakeNetwork = _network()
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
     tab: _ErrorTab = _ErrorTab(network)
     _with_requirements(network, hr_gpu_min=4, hr_gpu_max=2)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
-    ((text, _buttons),) = scene.messages.calls
-    assert "hr_gpu_min" in text and tab.shown == [text]
+    assert "hr_gpu_min" in scene.messages.calls[0][0]
+    assert network.scheduler_node.generate_calls == [] and tab.scheduler.calls == []
+    assert tab.hung is False and "error tab" in caplog.text
 
 
-def test_with_no_scheduler_yet_the_popup_shows_and_the_tab_is_left_with_a_log_line(
+def test_a_quota_stop_during_the_display_generate_leaves_the_scheduler_node_alone(
     scene: FakeHou, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Before any generate PDG may have no scheduler for the node, so only the popup can show.
+    """A task quota cancels the display node's generate after Submit's dirty.
+
+    That is the order in which the scheduler node's generate hung Houdini's UI, so Submit
+    must show only the popup and log why the tab is empty.
+    """
+    # PDG has the scheduler, and sim generates one task more than a step may have.
+    network: FakeNetwork = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    tab: _ErrorTab = _ErrorTab(network)
+    display: Any = network.topnet.displayNode()
+
+    def generate() -> None:
+        network.node("sim").workItems = [None] * 10_001
+        network.context.emit("NodeGenerated", "sim")
+        # PDG's generate ends when the cancel lands.
+        network.context.canceled.wait(5)
+
+    display.on_generate = generate
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert "sim: 10,001 tasks per step" in scene.messages.calls[0][0]
+    assert display.work_item_calls[0] == ("dirty", False)
+    assert network.scheduler_node.generate_calls == [] and tab.scheduler.calls == []
+    assert tab.hung is False and "error tab" in caplog.text
+
+
+def test_with_no_scheduler_after_the_generate_only_the_popup_shows(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """PDG may name no scheduler for the node even after a generate, so only the popup can show.
 
     The log must say why the tab is empty, and nothing is generated on the scheduler node.
     """
-    # Nothing has generated, so PDG names no scheduler, and the GPU minimum is above its maximum.
+    # PDG names no scheduler, and render is a Service step, which is refused after the generate.
     network: FakeNetwork = _network()
-    _with_requirements(network, hr_gpu_min=4, hr_gpu_max=2)
+    network.node("render").hom.set_parm("pdg_cooktype", 3)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
-    assert "hr_gpu_min" in scene.messages.calls[0][0]
+    assert "The cook can't start." in scene.messages.calls[0][0]
+    display: Any = network.topnet.displayNode()
+    assert display.work_item_calls == [("dirty", False), ("generate", True)]
     assert network.scheduler_node.generate_calls == []
     assert "error tab" in caplog.text

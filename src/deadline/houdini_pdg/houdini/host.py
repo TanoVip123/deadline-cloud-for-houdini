@@ -1242,6 +1242,9 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     from deadline.client.exceptions import UserInitiatedCancel
 
     read: Callable[[str], str] = get_setting or get_workstation_setting
+    # Set only once the display node's generate finishes. The scheduler node's generate hangs
+    # Houdini's UI after a dirty with no finished generate, so the error tab needs this.
+    scheduler: Any = None
     try:
         # The save prompt comes first, so the artist answers it before anything else.
         prompt_to_save(node)
@@ -1295,9 +1298,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         if over_quota:
             raise GraphRefusedError(over_quota[0])
         # Read the items from this scheduler, as the cook does, and check them all.
-        scheduler: Any = _call(
-            context, "schedulerForName", _call(node, "getPDGNodeName") or node.name()
-        )
+        scheduler = _call(context, "schedulerForName", _call(node, "getPDGNodeName") or node.name())
         dependency_graph: Any = _call(scheduler, "dependencyGraph", True)
         verdict: Verdict
         snapshot: GraphSnapshot
@@ -1317,19 +1318,14 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         _show(text)
         # The error tab keeps the text after the popup closes. PDG shows a cookError only
         # once the node updates, and a generate on the scheduler node does that at once.
-        found: Any = _call(
-            _call(node, "getPDGGraphContext"),
-            "schedulerForName",
-            _call(node, "getPDGNodeName") or node.name(),
-        )
-        if found is None:
+        if scheduler is None:
             _logger.warning(
-                "Could not put the error on %s's error tab, because PDG has no scheduler "
-                "for the node until the network generates.",
+                "Could not put the error on %s's error tab, because Submit stopped before "
+                "the display node's generate finished, or PDG has no scheduler for the node.",
                 node.path(),
             )
         else:
-            _call(found, "cookError", text)
+            _call(scheduler, "cookError", text)
             _call(node, "generateStaticWorkItems", True)
         return False
     counts: str = (
