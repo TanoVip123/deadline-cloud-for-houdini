@@ -31,7 +31,9 @@ check that fails starts nothing and creates no job.
 
 * Cook the TOP network as usual, for example with the Cook Output Node button.
   The scheduler refuses the cook if the scene has never been saved or has
-  unsaved changes.
+  unsaved changes. The cook uses the work items PDG already has, so after you
+  change a parm on a SOP outside the TOP network, dirty the network or click
+  __Generate__ before you cook, or use __Submit__, which does that itself.
 
 * Click __Submit__ on this node. If the scene has unsaved changes, it first
   saves them, or asks you to. Then it checks that the TOP network cooks on this
