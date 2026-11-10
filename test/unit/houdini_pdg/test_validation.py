@@ -1480,6 +1480,33 @@ def test_is_below_ignores_case_only_where_the_platform_does() -> None:
     assert validation._is_below("/Work/shot/a.exr", "/work/shot", posixpath) is False
 
 
+@pytest.mark.parametrize(
+    ("path", "rooted"),
+    [
+        ("/elsewhere/tree.bgeo.sc", True),
+        ("\\elsewhere\\tree.bgeo.sc", True),
+        ("C:/proj/tree.bgeo.sc", True),
+        ("//server/share/tree.bgeo.sc", True),
+        ("//server/share", True),
+        ("C:proj/tree.bgeo.sc", False),
+        ("proj/tree.bgeo.sc", False),
+        ("", False),
+    ],
+)
+def test_a_path_has_a_root_on_windows_whatever_the_python_version(path: str, rooted: bool) -> None:
+    """On Windows ``/a`` lands on the current drive, so it has a root, as Houdini 21's Python says.
+
+    Python 3.13's ``ntpath.isabs`` says no, so a check built on it skips such a path.
+    """
+    assert validation._has_root(path, ntpath) is rooted
+
+
+@pytest.mark.parametrize(("path", "rooted"), [("/a/b", True), ("a/b", False), ("\\a\\b", False)])
+def test_a_path_has_a_root_on_posix_only_after_a_slash(path: str, rooted: bool) -> None:
+    """On POSIX a backslash is part of a name, so ``\\a`` is relative and must not be judged."""
+    assert validation._has_root(path, posixpath) is rooted
+
+
 # -- outputs already on disk ----------------------------------------------------
 
 
@@ -2413,6 +2440,16 @@ def test_a_read_whose_location_is_unknown_here_is_not_judged(raw: str) -> None:
     The token case starts with a literal directory, so it fails if only the start is checked.
     """
     assert not _unreachable_subjects(raw, raw)
+
+
+def test_a_missing_read_with_no_drive_is_refused_on_every_os() -> None:
+    """A read spelled ``/elsewhere/...`` is refused when it is missing, on Windows too.
+
+    Windows opens it on the current drive. A check that took it for relative would
+    skip it, and the task would open a missing file.
+    """
+    path: str = "/elsewhere/tree.bgeo.sc"
+    assert _unreachable_subjects(path, path) == {"/obj/topnet1/a/file1 parm 'file'"}
 
 
 def test_a_write_is_not_judged_as_an_unreachable_read() -> None:

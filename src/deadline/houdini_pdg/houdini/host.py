@@ -41,6 +41,7 @@ from ..scene_reads import (
     ReadReport,
     SceneReads,
     _depends_on_work_item,
+    _has_root,
     _is_below,
     _path_key,
     match_reads,
@@ -927,11 +928,11 @@ def _scan_scene_assets(node: Any) -> Dict[str, Set[str]]:
                 ref,
             )
             continue
-        # Expand the variables, and keep only an absolute path with none left. A
+        # Expand the variables, and keep only a path with a root and none left. A
         # relative path would resolve against Houdini's current directory.
         pattern: str = _houdini_time_vars_to_glob(ref)
         evaluated: str = os.path.expanduser(hou.text.expandString(pattern).strip())
-        if not os.path.isabs(evaluated) or "$" in evaluated:
+        if not _has_root(evaluated) or "$" in evaluated:
             continue
         expanded: str = _absolute(evaluated)
         matched: List[str] = (

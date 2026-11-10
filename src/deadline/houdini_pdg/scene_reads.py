@@ -399,6 +399,17 @@ def _is_below(path: str, ancestor: str, paths: ModuleType = os.path) -> bool:
     return child.startswith(parent.rstrip(paths.sep) + paths.sep)
 
 
+def _has_root(path: str, paths: ModuleType = os.path) -> bool:
+    """Whether ``path`` starts at a root, so the current directory can't change where it points.
+
+    On Windows a root is a leading ``/`` or ``\\``, which lands on the current drive, or
+    one after a drive, as in ``C:/a``. ``paths`` is ``os.path``, or ``ntpath`` in a test.
+    """
+    # Python 3.13's isabs no longer counts a leading separator with no drive, so
+    # that case is checked here, and the answer is the same on every Python.
+    return path[:1] in (paths.sep, paths.altsep) or paths.isabs(path)
+
+
 def _output_roots(
     snapshot: GraphSnapshot, working_dir: str, folders: Sequence[str]
 ) -> Tuple[_Producer, ...]:
