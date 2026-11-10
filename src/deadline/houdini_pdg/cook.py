@@ -834,6 +834,7 @@ class Cook:
                 snapshot=snapshot,
                 reads=report,
                 working_dir=self._settings.working_dir,
+                output_directories=self._settings.output_directories,
                 env=self._environment(),
             )
         )
@@ -899,7 +900,9 @@ class Cook:
             # Validation is told the walk did not run, so it says which checks it skipped.
             _logger.warning("The scene walk did not finish, so no data edges are added.")
             return provisional, None
-        report: ReadReport = match_reads(provisional, scene.reads, self._settings.working_dir)
+        report: ReadReport = match_reads(
+            provisional, scene.reads, self._settings.working_dir, self._settings.output_directories
+        )
         return synthesize(nodes, data_edges=report.data_edges), report
 
     def _environment(self) -> Dict[str, str]:

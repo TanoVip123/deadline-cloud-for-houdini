@@ -815,8 +815,8 @@ def test_absent_parms_take_their_defaults_and_are_logged_once(
         second: SchedulerSettings = read_scheduler_settings(node)
     assert first == second == SchedulerSettings(working_dir=str(tmp_path / "scene"))
     missing: List[str] = [r.getMessage() for r in caplog.records if "has no" in r.getMessage()]
-    assert len(missing) == 3
-    for parm in ("'working_dir'", "'debug_level'", "'validate_graph'"):
+    assert len(missing) == 4
+    for parm in ("'working_dir'", "'debug_level'", "'validate_graph'", "'output_directories'"):
         assert any(parm in m for m in missing), parm
 
 
@@ -1377,3 +1377,109 @@ def test_a_value_the_library_refuses_names_the_parm(
     """The service would refuse the job after the upload, without naming what to fix."""
     with pytest.raises(CookSetupError, match=named):
         read_host_requirements(_requirements_node(hr_mode="custom", **parms))
+
+
+# -- the node's Job Attachments tab -------------------------------------------
+
+
+def _listed(node: FakeNode, list_parm: str, entry: str, values: Sequence[str]) -> None:
+    """Fill one of the tab's lists, as Houdini numbers a multiparm's entries from 1."""
+    node.set_parm(list_parm, len(values))
+    for index, value in enumerate(values, start=1):
+        node.set_parm(f"{entry}{index}", value, kind="FileReference")
+
+
+def test_listed_files_and_folders_join_the_scenes_own(scene: FakeHou, tmp_path: Path) -> None:
+    """They join the scan and never replace it, so the scene's own textures still travel."""
+    folder: str = str(tmp_path / "scene")
+    tex: str = _touch(folder, "tex.exr")
+    extra: str = _touch(str(tmp_path), "extra", "lut.cube")
+    frames: List[str] = [_touch(folder, f"plate.000{i}.exr") for i in (1, 2)]
+    os.makedirs(str(tmp_path / "library"))
+    network: Network = build_network(PYRO_BONFIRE)
+    sop: FakeNode = network.topnet.add(FakeNode("/obj/geo1/file1", category="Sop"))
+    _reference(sop, "tex", "$HIP/tex.exr", scene)
+    _listed(
+        network.scheduler_node, "input_filenames", "input_filenames", [extra, "$HIP/plate.$F4.exr"]
+    )
+    _listed(network.scheduler_node, "input_directories", "input_dir", [str(tmp_path / "library")])
+    files: SceneFiles = HoudiniPdgHost(network.scheduler()).scene_files()
+    assert files.assets == tuple(sorted([tex, extra, *frames]))
+    assert files.directories == (str(tmp_path / "library"),)
+
+
+@pytest.mark.parametrize(
+    "list_parm, entry", [("input_filenames", "input_filenames"), ("input_directories", "input_dir")]
+)
+def test_a_listed_path_that_does_not_exist_names_its_parm(
+    scene: FakeHou, tmp_path: Path, list_parm: str, entry: str
+) -> None:
+    """The artist typed the path, so a quiet skip would hide a typo until the worker failed."""
+    network: Network = build_network(PYRO_BONFIRE)
+    _listed(network.scheduler_node, list_parm, entry, [str(tmp_path / "nowhere")])
+    with pytest.raises(CookSetupError, match=f"{entry}1"):
+        HoudiniPdgHost(network.scheduler()).scene_files()
+
+
+def test_a_listed_home_folder_is_refused_naming_its_parm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Listing home by hand would hash all of it, the same as a scene parm that expands to it."""
+    host, home = _home_scene(monkeypatch, tmp_path, "$HIP/caches")
+    os.makedirs(os.path.join(home, "caches"))
+    node: Any = host.scheduler_node()
+    _listed(node, "input_directories", "input_dir", ["$HOME"])
+    with pytest.raises(CookSetupError, match="input_dir1"):
+        host.scene_files()
+
+
+def test_an_output_folder_is_never_attached_as_an_input(scene: FakeHou, tmp_path: Path) -> None:
+    """Attaching it would upload an earlier cook's renders before every job."""
+    os.makedirs(str(tmp_path / "renders"))
+    network: Network = build_network(PYRO_BONFIRE)
+    _listed(network.scheduler_node, "output_directories", "output_dir", [str(tmp_path / "renders")])
+    scene.file_references.append(
+        (network.scheduler_node.parm("output_dir1"), str(tmp_path / "renders"))
+    )
+    files: SceneFiles = HoudiniPdgHost(network.scheduler()).scene_files()
+    assert files.directories == () and files.assets == ()
+
+
+def test_the_output_folders_are_read_into_the_cooks_settings(
+    scene: FakeHou, tmp_path: Path
+) -> None:
+    """Every check that asks whether a file reaches the next step needs the whole list."""
+    node: FakeNode = _settings_node(working_dir="$HIP")
+    _listed(node, "output_directories", "output_dir", [str(tmp_path / "renders") + "/./", ""])
+    assert read_scheduler_settings(node).output_directories == (str(tmp_path / "renders"),)
+
+
+@pytest.mark.parametrize("relative", ["", "sub", ".."])
+def test_an_output_folder_that_overlaps_the_working_directory_is_refused(
+    scene: FakeHou, relative: str
+) -> None:
+    """The working directory is already uploaded, so an overlap would upload one file twice."""
+    node: FakeNode = _settings_node(working_dir="$HIP")
+    _listed(node, "output_directories", "output_dir", [os.path.join("$HIP", relative)])
+    with pytest.raises(CookSetupError, match="output_dir1.*working directory"):
+        read_scheduler_settings(node)
+
+
+def test_an_output_folder_beside_the_working_directory_is_accepted(
+    scene: FakeHou, tmp_path: Path
+) -> None:
+    """A sibling whose name starts like the working directory doesn't overlap it."""
+    node: FakeNode = _settings_node(working_dir="$HIP")
+    _listed(node, "output_directories", "output_dir", [str(tmp_path / "scene") + "_renders"])
+    assert read_scheduler_settings(node).output_directories == (str(tmp_path / "scene_renders"),)
+
+
+def test_an_output_folder_at_home_is_refused_naming_its_parm(
+    scene: FakeHou, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Each task would upload everything it finds there, which is the whole home directory."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    node: FakeNode = _settings_node(working_dir="$HIP")
+    _listed(node, "output_directories", "output_dir", [str(tmp_path / "home")])
+    with pytest.raises(CookSetupError, match="output_dir1"):
+        read_scheduler_settings(node)

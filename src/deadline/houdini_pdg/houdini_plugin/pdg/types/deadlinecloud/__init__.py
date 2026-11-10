@@ -293,6 +293,7 @@ def _connect(
             node=host.scheduler_node(),
             host=host,
             working_dir=settings.working_dir,
+            output_directories=settings.output_directories,
             log=logging.getLogger("deadline.houdini_pdg.submitter").info,
             # The queue was read once, here, so the submitter does not read it again.
             job_attachments=lambda _farm, _queue: (bucket, root_prefix),

@@ -13,7 +13,7 @@ import dataclasses
 import os
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, cast
 
 import yaml
 
@@ -111,12 +111,15 @@ class PdgSubmitter(BaseSubmitter):
         job_attachments: Optional[Callable[[str, str], Tuple[str, str]]] = None,
         cook_id: str = "",
         get_setting: Callable[[str], str] = _workstation_setting,
+        output_directories: Sequence[str] = (),
     ) -> None:
         # The host owns the scene: every read of ``node`` goes through its
         # ``on_main_thread``, and it supplies the scene files and Houdini's version.
         self._host: PdgHost = host
         self._node: Any = node
         self._working_dir: str = working_dir
+        # The node's extra output folders. Each task uploads what it writes there too.
+        self._output_directories: Tuple[str, ...] = tuple(output_directories)
         self._snapshot: Optional[GraphSnapshot] = snapshot
         self._create_job: Callable[..., Optional[str]] = create_job
         self._log: Callable[[str], None] = log
@@ -151,7 +154,7 @@ class PdgSubmitter(BaseSubmitter):
         settings.job_name = (
             settings.job_name or os.path.basename(scene.hip_file) or f"PDG cook {self._cook_id[:8]}"
         )
-        settings.output_directories = [self._working_dir]
+        settings.output_directories = [self._working_dir, *self._output_directories]
         return settings
 
     def get_job_template(
@@ -170,6 +173,7 @@ class PdgSubmitter(BaseSubmitter):
                 lambda: read_queue_parameter_definitions(self._node)
             ),
             host_requirements=host_requirements,
+            output_directories=self._output_directories,
         )
         if settings.description:
             template["description"] = settings.description
@@ -226,7 +230,7 @@ class PdgSubmitter(BaseSubmitter):
         return AssetReferences(
             input_filenames=files,
             input_directories=set(settings.input_directories),
-            output_directories={self._working_dir},
+            output_directories={self._working_dir, *self._output_directories},
         )
 
     def submit(self, snapshot: GraphSnapshot, bundle_dir: str) -> str:
@@ -330,7 +334,7 @@ class PdgSubmitter(BaseSubmitter):
     ) -> List[str]:
         # Every path here was chosen by the scheduler. An unknown one would make
         # the library ask for confirmation.
-        known: Set[str] = {self._working_dir}
+        known: Set[str] = {self._working_dir, *self._output_directories}
         known.update(os.path.dirname(path) for path in refs.input_filenames)
         known.update(refs.input_directories)
         if _wheels_enabled(settings):
@@ -357,6 +361,7 @@ def _job_template(
     houdini_version: str,
     queue_parameter_definitions: List[Dict[str, Any]],
     host_requirements: Optional[Dict[str, Any]] = None,
+    output_directories: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """The template for a snapshot. Pure, so it can be validated without a farm or a scene."""
     # A dependency outside the job would make CreateJob refuse it, so refuse it here.
@@ -379,22 +384,29 @@ def _job_template(
         "specificationVersion": "jobtemplate-2023-09",
         "name": "{{Param.CookName}}",
         "parameterDefinitions": definitions,
-        "jobEnvironments": [_session_environment(houdini_version)],
+        "jobEnvironments": [_session_environment(houdini_version, output_directories)],
         "steps": steps,
     }
 
 
-def _session_environment(houdini_version: str) -> Dict[str, Any]:
+def _session_environment(
+    houdini_version: str, output_directories: Sequence[str] = ()
+) -> Dict[str, Any]:
     """Starts the adaptor's daemon once per session, so one warm Houdini serves every task."""
     # The init data names the scene and where the work item payloads are stored.
+    pdg: Dict[str, Any] = {
+        "pdg_dir": "{{Param.PdgDir}}",
+        "bucket": "{{Param.JaBucket}}",
+        "root_prefix": "{{Param.JaRootPrefix}}",
+    }
+    # The workstation's spelling of each extra output folder. The worker maps it with
+    # the session's rules, and scans it for what a task wrote.
+    if output_directories:
+        pdg["output_directories"] = list(output_directories)
     init_data: Dict[str, Any] = {
         "scene_file": "{{Param.HipFile}}",
         "version": houdini_version,
-        "pdg": {
-            "pdg_dir": "{{Param.PdgDir}}",
-            "bucket": "{{Param.JaBucket}}",
-            "root_prefix": "{{Param.JaRootPrefix}}",
-        },
+        "pdg": pdg,
     }
     # Reuse the ROP's daemon environment, renamed for PDG.
     (environment,) = get_houdini_environments(

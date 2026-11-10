@@ -473,9 +473,11 @@ class Harness:
         scene: SceneReads = SceneReads(),
         validate_graph: bool = True,
         journal: Optional[CookJournal] = None,
+        output_directories: Tuple[str, ...] = (),
     ) -> None:
         # The fakes share one event log, so a test can check the order of calls.
         self.validate_graph: bool = validate_graph
+        self.output_directories: Tuple[str, ...] = output_directories
         self.events: Events = Events()
         self.clock: FakeClock = FakeClock()
         self.host: FakeHost = FakeHost(
@@ -499,7 +501,9 @@ class Harness:
     def _read_settings(self) -> SchedulerSettings:
         self.events("read_settings")
         # The default settings, so a test that keeps validation on relies on the default.
-        settings: SchedulerSettings = SchedulerSettings(working_dir=WORKING_DIR)
+        settings: SchedulerSettings = SchedulerSettings(
+            working_dir=WORKING_DIR, output_directories=self.output_directories
+        )
         return (
             settings if self.validate_graph else dataclasses.replace(settings, validate_graph=False)
         )
@@ -2129,6 +2133,20 @@ def test_a_cook_pdg_ends_with_every_item_from_cache_is_refused_naming_each_step(
     summary: CookSummary = h.summary()
     assert summary.final_phase is CookPhase.REFUSED and not summary.stopped_by_user
     assert summary.refusals == (RefusalScenario.CACHED_OUTPUTS,)
+
+
+@pytest.mark.parametrize("listed, refused_", [((), True), (("/renders",), False)])
+def test_a_step_writing_to_a_listed_output_folder_feeds_the_step_below(
+    listed: Tuple[str, ...], refused_: bool
+) -> None:
+    """The cook judges outputs against the node's folders, or a listed folder would still be refused."""
+    h: Harness = Harness(outputs={"a": "/renders/a.{i}.exr"}, output_directories=listed)
+    h.start()
+    if refused_:
+        with pytest.raises(GraphRefusedError):
+            h.scheduler.on_schedule(handle("a_0"))
+    else:
+        assert h.scheduler.on_schedule(handle("a_0")) is ScheduleResult.SUCCEEDED
 
 
 def _over_quota() -> Verdict:

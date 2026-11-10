@@ -363,3 +363,44 @@ def test_an_invalid_host_requirement_is_shown_and_nothing_cooks(scene: FakeHou) 
     ((text, buttons),) = scene.messages.calls
     assert "hr_gpu_min" in text and buttons == ()
     assert _cooks(network) == []
+
+
+def test_the_confirmation_counts_the_extra_attachments(scene: FakeHou, tmp_path: Path) -> None:
+    """The artist sees that the listed files and folders go with the job before choosing Submit."""
+    network: Network = _network()
+    node: Any = network.scheduler_node
+    lut: Path = tmp_path / "lut.cube"
+    lut.write_text("")
+    (tmp_path / "library").mkdir()
+    for list_parm, entry, values in (
+        ("input_filenames", "input_filenames", [str(lut)]),
+        ("input_directories", "input_dir", [str(tmp_path / "library")]),
+        ("output_directories", "output_dir", [str(tmp_path / "a"), str(tmp_path / "b")]),
+    ):
+        node.set_parm(list_parm, len(values))
+        for index, value in enumerate(values, start=1):
+            node.set_parm(f"{entry}{index}", value, kind="FileReference")
+    assert submit(node, get_setting=_workstation) is True
+    text: str = scene.messages.calls[0][0]
+    assert "Extra attachments: 1 input file(s), 1 input folder(s), 2 output folder(s)" in text
+
+
+def test_the_confirmation_says_when_there_are_no_extra_attachments(scene: FakeHou) -> None:
+    """A line that appears only sometimes is easy to miss, so it is always shown."""
+    network: Network = _network()
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    assert "Extra attachments: none" in scene.messages.calls[0][0]
+
+
+def test_a_missing_listed_file_is_shown_before_the_confirmation(
+    scene: FakeHou, tmp_path: Path
+) -> None:
+    """Before, the typo surfaced only once the cook had started, on the node's error flag."""
+    network: Network = _network()
+    node: Any = network.scheduler_node
+    node.set_parm("input_filenames", 1)
+    node.set_parm("input_filenames1", str(tmp_path / "nowhere.cube"), kind="FileReference")
+    assert submit(node, get_setting=_workstation) is False
+    ((text, buttons),) = scene.messages.calls
+    assert "input_filenames1" in text and buttons == ()
+    assert _cooks(network) == []

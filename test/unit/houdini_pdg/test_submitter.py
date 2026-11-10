@@ -283,6 +283,7 @@ def make_submitter(
     get_setting: Optional[Callable[[str], str]] = None,
     queue_values: Optional[List[Dict[str, Any]]] = None,
     job_attachments: Optional[Callable[[str, str], Tuple[str, str]]] = None,
+    output_directories: Sequence[str] = (),
 ) -> PdgSubmitter:
     """A submitter whose workstation, scene, file system, queue, and Houdini reads are all fakes."""
     # By default nothing is on disk and the node has no queue parameter values. The file system
@@ -300,6 +301,7 @@ def make_submitter(
         job_attachments=job_attachments or (lambda farm, queue: ("bucket-a", "DeadlineCloud")),
         cook_id=COOK_ID,
         get_setting=get_setting or workstation(),
+        output_directories=output_directories,
     )
 
 
@@ -1405,3 +1407,29 @@ def test_a_queue_without_job_attachments_cannot_cook(
     """Every payload is stored in the bucket, so the cook must refuse a queue without one, naming it."""
     with pytest.raises(CookSetupError, match=QUEUE):
         submitter_module._queue_job_attachments(FARM, QUEUE, client=FakeDeadline(attachments))
+
+
+def test_the_nodes_output_folders_join_the_working_directory_in_the_bundle(tmp_path: Path) -> None:
+    """Each task uploads what it writes there only if the job lists the folder as an output."""
+    create: FakeCreateJob = FakeCreateJob()
+    sub: PdgSubmitter = make_submitter(create_job=create, output_directories=("/renders/shot",))
+    sub.submit(GraphSnapshot(steps=(step("a", 1),)), str(tmp_path / "bundle"))
+    bundle: Dict[str, Any] = read_bundle(tmp_path / "bundle")
+    outputs: List[str] = bundle["asset_references"]["assetReferences"]["outputs"]["directories"]
+    assert sorted(outputs) == sorted([WORKING_DIR, "/renders/shot"])
+    # The library asks before attaching a path it doesn't know, and no artist sees a PDG thread.
+    assert "/renders/shot" in create.calls[0][1]["known_asset_paths"]
+    # The worker learns the folders from the session's init data, so it can scan them.
+    (environment,) = bundle["template"]["jobEnvironments"]
+    init: Dict[str, Any] = yaml.safe_load(environment["script"]["embeddedFiles"][0]["data"])
+    assert init["pdg"]["output_directories"] == ["/renders/shot"]
+    decode_job_template(template=bundle["template"])
+
+
+def test_without_output_folders_the_init_data_is_as_before(tmp_path: Path) -> None:
+    """A job from a node with an empty tab must read the same on an adaptor that doesn't know the field."""
+    sub: PdgSubmitter = make_submitter()
+    sub.submit(GraphSnapshot(steps=(step("a", 1),)), str(tmp_path / "bundle"))
+    (environment,) = read_bundle(tmp_path / "bundle")["template"]["jobEnvironments"]
+    init: Dict[str, Any] = yaml.safe_load(environment["script"]["embeddedFiles"][0]["data"])
+    assert set(init["pdg"]) == {"pdg_dir", "bucket", "root_prefix"}

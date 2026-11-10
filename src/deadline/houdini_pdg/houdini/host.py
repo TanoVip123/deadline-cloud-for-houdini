@@ -422,7 +422,59 @@ def read_scheduler_settings(node: Any) -> SchedulerSettings:
         working_dir=working_dir,
         debug_level=_debug_level(node),
         validate_graph=bool(_parm(node, _VALIDATE_GRAPH_PARM, 1, as_text=False)),
+        output_directories=_output_directories(node, working_dir),
     )
+
+
+def _output_directories(node: Any, working_dir: str) -> Tuple[str, ...]:
+    """The Job Attachments tab's output folders, absolute, each checked against the working directory.
+
+    Raises ``CookSetupError`` naming the parm of a folder that overlaps the working
+    directory, or that is a drive or home directory.
+    """
+    folders: Dict[str, Set[str]] = {}
+    for parm, value in _listed_values(node, "output_directories", "output_dir"):
+        folders.setdefault(_absolute(value), set()).add(parm)
+    # The working directory is already uploaded, so a folder in it or above it uploads twice.
+    overlapping: List[str] = sorted(
+        parm
+        for folder, parms in folders.items()
+        if _is_below(folder, working_dir) or _is_below(working_dir, folder)
+        for parm in parms
+    )
+    if overlapping:
+        raise CookSetupError(
+            f"The output folder in {', '.join(overlapping)} overlaps the working directory "
+            f"'{working_dir}', which every task already uploads. Remove it, or point it at a "
+            "folder outside the working directory."
+        )
+    _refuse_unbounded(folders, folders, os.environ)
+    return tuple(sorted(folders))
+
+
+def _listed_values(node: Any, list_parm: str, entry: str) -> List[Tuple[str, str]]:
+    """Each filled entry of one of the Job Attachments lists, as (parm path, expanded value).
+
+    A node from before the tab has no list, so it gives none. Raises ``CookSetupError``
+    for a value with a variable Houdini doesn't define.
+    """
+    listed: List[Tuple[str, str]] = []
+    for index in range(1, int(_parm(node, list_parm, 0, as_text=False)) + 1):
+        name: str = f"{entry}{index}"
+        value: str = str(_parm(node, name, "", as_text=True)).strip()
+        if not value:
+            continue
+        if "$" in value:
+            raise CookSetupError(f"The '{name}' parm names a variable that is not set: '{value}'.")
+        listed.append((_path_of(node.parm(name)) or name, value))
+    return listed
+
+
+def _is_below(path: str, folder: str) -> bool:
+    """Whether ``path`` is ``folder`` or inside it, compared as ``_absolute_key`` spells them."""
+    child: str = _absolute_key(path)
+    parent: str = _absolute_key(folder)
+    return child == parent or child.startswith(parent.rstrip(os.sep) + os.sep)
 
 
 #: Each hardware field of the tab: its parm stem, the library's field stem, and the
@@ -765,10 +817,16 @@ def _top_nodes(graph_nodes: Iterable[Any]) -> Dict[str, Any]:
 
 
 def _scene_files(node: Any) -> SceneFiles:
-    """The saved ``.hip`` and the scene's assets. Raises ``CookSetupError`` for an unbounded path."""
+    """The saved ``.hip``, the scene's assets, and the node's listed inputs.
+
+    Raises ``CookSetupError`` for an unbounded path, or a listed one that doesn't exist.
+    """
     hip: str = str(hou.hipFile.path() or "")
     hip_file: str = _absolute(hip) if hip else ""
     found: Dict[str, Set[str]] = _scene_assets(node)
+    # The artist's own files and folders join the scan, each owned by its parm.
+    for path, parm in read_listed_inputs(node):
+        found.setdefault(path, set()).add(parm)
     paths: Set[str] = _without(found, {hip_file} | _integration_libraries())
     _refuse_unbounded(paths, found, os.environ)
     # Job attachments rejects a directory listed as a file. An asset library can
@@ -779,6 +837,48 @@ def _scene_files(node: Any) -> SceneFiles:
         assets=tuple(sorted(paths - directories)),
         directories=tuple(sorted(directories)),
     )
+
+
+def read_listed_inputs(node: Any) -> List[Tuple[str, str]]:
+    """The Job Attachments tab's input files and folders, as (absolute path, parm path).
+
+    A time variable such as ``$F4`` matches every frame, as on the ROP. Raises
+    ``CookSetupError`` naming the parm of a path that doesn't exist, or that is a
+    drive or home directory. Call it on the main thread.
+    """
+    from deadline.houdini_submitter.python.deadline_cloud_for_houdini._assets import (
+        _houdini_time_vars_to_glob,
+    )
+
+    found: List[Tuple[str, str]] = []
+    for list_parm, entry, kind in (
+        ("input_filenames", "input_filenames", os.path.isfile),
+        ("input_directories", "input_dir", os.path.isdir),
+    ):
+        for index in range(1, int(_parm(node, list_parm, 0, as_text=False)) + 1):
+            # The text as typed, with each time variable made a glob, then expanded.
+            parm: Any = node.parm(f"{entry}{index}")
+            raw: str = str(_call(parm, "unexpandedString") or "").strip()
+            if not raw:
+                continue
+            pattern: str = _houdini_time_vars_to_glob(raw)
+            expanded: str = _absolute(str(hou.text.expandString(pattern)))
+            matched: List[str] = sorted(glob.glob(expanded)) if pattern != raw else [expanded]
+            owner: str = _path_of(parm) or f"{entry}{index}"
+            existing: List[str] = [path for path in matched if kind(path)]
+            if not existing:
+                raise CookSetupError(
+                    f"The '{entry}{index}' parm names '{raw}', which is not on disk as a "
+                    f"{'file' if kind is os.path.isfile else 'folder'}. Fix the path, or "
+                    "remove the entry."
+                )
+            found.extend((_absolute(path), owner) for path in existing)
+    # A listed home folder would hash all of it, the same as a scene parm naming it.
+    owners: Dict[str, Set[str]] = {}
+    for path, owner in found:
+        owners.setdefault(path, set()).add(owner)
+    _refuse_unbounded(owners, owners, os.environ)
+    return found
 
 
 # The node types of this integration. A worker never cooks them, and their
@@ -985,13 +1085,14 @@ def _check_network(
     # is still judged without it.
     settings: Optional[SchedulerSettings] = _settings_or_none(node)
     working_dir: str = settings.working_dir if settings is not None else ""
+    folders: Tuple[str, ...] = settings.output_directories if settings is not None else ()
     scene: SceneReads = readers.collect_scene_reads(
         _top_nodes(graph_nodes), expand=_expand_variables
     )
     # The reads are matched as the cook matches them. Before generation there are
     # no declared outputs, so every read would look external and the matches are dropped.
     reads: Optional[ReadReport] = (
-        match_reads(snapshot, scene.reads, working_dir) if scene.available else None
+        match_reads(snapshot, scene.reads, working_dir, folders) if scene.available else None
     )
     if reads is not None and dependency_graph is not None:
         snapshot = synthesize(infos, data_edges=reads.data_edges)
@@ -1003,6 +1104,7 @@ def _check_network(
             snapshot=snapshot,
             reads=reads,
             working_dir=working_dir,
+            output_directories=folders,
             env=_environment(),
         )
     )
@@ -1160,6 +1262,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     try:
         settings: SchedulerSettings = read_scheduler_settings(node)
         requirements: Optional[Dict[str, Any]] = read_host_requirements(node)
+        inputs: List[Tuple[str, str]] = read_listed_inputs(node)
     except CookSetupError as e:
         _show(str(e), error=True)
         return False
@@ -1168,7 +1271,15 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         if dependency_graph is not None
         else "Steps and tasks: counted when the cook starts"
     )
-    if not _confirmed(node, settings, verdict, read, [counts, _describe(requirements)]):
+    # The listed inputs by kind, from the folders' own test, and the extra output folders.
+    folders: int = sum(1 for path, _parm_path in inputs if os.path.isdir(path))
+    attached: str = (
+        f"Extra attachments: {len(inputs) - folders} input file(s), {folders} input folder(s), "
+        f"{len(settings.output_directories)} output folder(s)"
+        if inputs or settings.output_directories
+        else "Extra attachments: none"
+    )
+    if not _confirmed(node, settings, verdict, read, [counts, _describe(requirements), attached]):
         return False
     # The display node is what the network's own Cook button cooks.
     display.cookWorkItems(block=False)

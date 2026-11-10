@@ -912,3 +912,55 @@ def test_reads_opening_ignores_separators_and_case_on_windows_only() -> None:
         posix_reads[0],
         posix_reads[2],
     )
+
+
+# -- the node's extra output folders -------------------------------------------
+
+#: An output folder outside the working directory, as the node's Job Attachments tab lists it.
+EXTRA: str = "/renders/shot"
+
+
+def _extra_writers() -> GraphSnapshot:
+    """Two steps writing into different folders of the extra output folder, and a reader."""
+    return GraphSnapshot(
+        steps=(
+            _step("beauty", [f"{EXTRA}/beauty/b.1.exr", f"{EXTRA}/beauty/b.2.exr"]),
+            _step("depth", [f"{EXTRA}/depth/d.1.exr", f"{EXTRA}/x/d.1.exr"]),
+            _step("comp"),
+        )
+    )
+
+
+def test_a_root_that_holds_an_extra_output_folder_matches_only_exact_directories() -> None:
+    """The extra folder holds every step's output, so a root at it would claim every read there."""
+    # depth's outputs share only the extra folder itself as their root.
+    read: SceneRead = _read("comp", f"{EXTRA}/beauty/b.3.exr")
+    report: ReadReport = match_reads(
+        _extra_writers(), [read, _read("comp", f"{EXTRA}/other/z.exr")], WORK, (EXTRA,)
+    )
+    assert [(m.read.path, m.producer) for m in report.matches] == [
+        (f"{EXTRA}/beauty/b.3.exr", "beauty"),
+        (f"{EXTRA}/other/z.exr", ""),
+    ]
+    # Without the folder listed, depth's root is the folder, and it claims the second read.
+    unlisted: ReadReport = match_reads(
+        _extra_writers(), [_read("comp", f"{EXTRA}/other/z.exr")], WORK
+    )
+    assert [m.producer for m in unlisted.matches] == ["depth"]
+
+
+@pytest.mark.parametrize("prefix", [f"{EXTRA}/", "/renders/", EXTRA])
+def test_a_prefix_that_holds_an_extra_output_folder_matches_nothing(prefix: str) -> None:
+    """Such a prefix covers every step writing there, so it would add an edge to each of them."""
+    report: ReadReport = match_reads(_extra_writers(), [_wedged("comp", prefix)], WORK, (EXTRA,))
+    assert report.matches == () and report.data_edges == {}
+
+
+def test_reads_opening_ignores_a_prefix_that_holds_an_extra_output_folder() -> None:
+    """The check for in-process nodes asks which reads open a file, with the same guard as matching."""
+    files: Set[str] = {f"{EXTRA}/beauty/b.1.exr"}
+    assert reads_opening(files, [_wedged("comp", f"{EXTRA}/")], WORK) != ()
+    assert (
+        reads_opening(files, [_wedged("comp", f"{EXTRA}/")], WORK, output_directories=(EXTRA,))
+        == ()
+    )

@@ -113,6 +113,9 @@ class ValidationContext:
     #: itself unavailable is passed as None for the same reason.
     reads: Optional[ReadReport] = None
     working_dir: str = ""
+    #: The node's extra output folders. A task uploads what it writes in them, as in
+    #: ``working_dir``, so each check treats them as part of the cook.
+    output_directories: Tuple[str, ...] = ()
     env: Optional[Mapping[str, str]] = None
     quotas: Quotas = Quotas()
     exists: Callable[[str], bool] = os.path.exists
@@ -302,12 +305,15 @@ def _is_below(path: str, ancestor: str, paths: ModuleType = os.path) -> bool:
 
 
 def _undeliverable_reason(
-    path: str, working_dir: str, env: Optional[Mapping[str, str]] = None
+    path: str,
+    working_dir: str,
+    env: Optional[Mapping[str, str]] = None,
+    output_directories: Sequence[str] = (),
 ) -> str:
     """Why this declared output cannot reach a dependent step, or ``""``."""
-    # A PDG token makes the path session-relative, and an absolute path inside the
-    # working directory is in the attachment tree, so both are deliverable. A
-    # surviving ``$`` or a path outside the working directory is not.
+    # A PDG token makes the path session-relative, and an absolute path inside one of
+    # the job's folders is uploaded, so both are deliverable. A surviving ``$`` or a
+    # path outside every folder is not.
     if PDG_TOKEN_PREFIX in path:
         return ""
     resolved: str = os.path.normpath(_expand(path, env))
@@ -316,9 +322,18 @@ def _undeliverable_reason(
     if not working_dir:
         # Nothing to compare against, so refusing on a guess is worse than skipping.
         return ""
-    if _is_below(resolved, os.path.normpath(working_dir)):
+    if _is_inside_job(resolved, working_dir, output_directories):
         return ""
     return _OUTSIDE_WORKING_DIR
+
+
+def _is_inside_job(path: str, working_dir: str, output_directories: Sequence[str]) -> bool:
+    """Whether ``path`` is in the working directory or one of the extra output folders."""
+    return any(
+        _is_below(path, os.path.normpath(folder))
+        for folder in (working_dir, *output_directories)
+        if folder
+    )
 
 
 # -- the graph's shape --------------------------------------------------------
@@ -847,7 +862,9 @@ def _scene_walk_file_uses(ctx: ValidationContext) -> Dict[str, List[str]]:
             for item in node.items
             for declared in item.declared_outputs
         }
-        opened: Tuple[SceneRead, ...] = reads_opening(files, report.step_reads, ctx.working_dir)
+        opened: Tuple[SceneRead, ...] = reads_opening(
+            files, report.step_reads, ctx.working_dir, output_directories=ctx.output_directories
+        )
         uses.setdefault(node.name, []).extend(
             f"it writes a file that the step '{read.step}' reads through its '{read.parm}' parm"
             for read in opened
@@ -1173,7 +1190,11 @@ def _check_undeliverable_outputs(ctx: ValidationContext) -> Verdict:
             (declared.path, reason)
             for item in step.items
             for declared in item.declared_outputs
-            if (reason := _undeliverable_reason(declared.path, ctx.working_dir, ctx.env))
+            if (
+                reason := _undeliverable_reason(
+                    declared.path, ctx.working_dir, ctx.env, ctx.output_directories
+                )
+            )
         ]
         if not offenders:
             continue
@@ -1182,12 +1203,15 @@ def _check_undeliverable_outputs(ctx: ValidationContext) -> Verdict:
         reasons: List[str] = list(dict.fromkeys(reason for _path, reason in offenders))
         example: str = offenders[0][0]
         resolved: str = _resolve(example, ctx.working_dir, ctx.env)
-        root: str = ctx.working_dir or "the working directory, which is not set"
+        # The job's folders, as one quoted list. With no extra folder it is the working directory.
+        root: str = "', '".join(
+            (ctx.working_dir or "the working directory, which is not set",) + ctx.output_directories
+        )
         detail: str = (
             f"{len(offenders)} of this step's declared output path(s) are "
             f"{' or '.join(_UNDELIVERABLE_PHRASES[reason] for reason in reasons)}, for "
-            f"example '{example}', which resolves to '{resolved}'. The job's root is "
-            f"'{root}'."
+            f"example '{example}', which resolves to '{resolved}'. The job's "
+            f"{'root is' if not ctx.output_directories else 'folders are'} '{root}'."
         )
         # A leaf's missing files break nothing downstream, so it is only advised.
         if step.name in leaves:
@@ -1281,8 +1305,8 @@ def _check_scene_directory(ctx: ValidationContext) -> Verdict:
         return Verdict()
     scene: str = os.path.normpath(scene_dir)
     root: str = os.path.normpath(ctx.working_dir)
-    # When the scene sits under the working directory, $HIP paths are delivered.
-    if _is_below(scene, root):
+    # When the scene sits under one of the job's folders, $HIP paths are delivered.
+    if _is_inside_job(scene, ctx.working_dir, ctx.output_directories):
         return Verdict()
     return Verdict(
         advisories=(
@@ -1409,7 +1433,6 @@ def _check_unreachable_local_files(ctx: ValidationContext) -> Verdict:
     if ctx.reads is None:
         return _skipped()
 
-    root: str = os.path.normpath(ctx.working_dir) if ctx.working_dir else ""
     missing: List[SceneRead] = []
     # Per step, the reachable assets outside the working directory, so a step that
     # carries several large files is advised once.
@@ -1425,9 +1448,13 @@ def _check_unreachable_local_files(ctx: ValidationContext) -> Verdict:
         if _REACHABLE_PREFIX.match((read.raw or "").strip()) or PDG_TOKEN_PREFIX in read.path:
             continue
         resolved: str = os.path.normpath(_expand(read.path, ctx.env))
-        # A surviving variable, a relative path, or a path inside the working
-        # directory is unanswerable or already carried, so it is skipped.
-        if "$" in resolved or not os.path.isabs(resolved) or _is_below(resolved, root):
+        # A surviving variable, a relative path, or a path inside one of the job's
+        # folders is unanswerable or already carried, so it is skipped.
+        if (
+            "$" in resolved
+            or not os.path.isabs(resolved)
+            or _is_inside_job(resolved, ctx.working_dir, ctx.output_directories)
+        ):
             continue
         try:
             reachable: bool = ctx.exists(resolved)

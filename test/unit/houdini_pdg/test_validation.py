@@ -2490,3 +2490,85 @@ def test_an_existing_output_outside_the_cook_is_two_faults_with_two_remedies() -
     assert by_scenario[RefusalScenario.OUTPUT_OUTSIDE_COOK].remedy != (
         by_scenario[RefusalScenario.CACHED_OUTPUTS].remedy
     )
+
+
+# -- the node's extra output folders -------------------------------------------
+
+#: An output folder outside the working directory, as the node's Job Attachments tab lists it.
+EXTRA: str = os.path.normpath("/renders/shot")
+
+
+@given(
+    under=st.sampled_from([WORKING_DIR, EXTRA, os.path.normpath("/elsewhere")]),
+    listed=st.booleans(),
+)
+def test_an_output_in_an_extra_output_folder_reaches_the_steps_below(
+    under: str, listed: bool
+) -> None:
+    """Each task uploads what it writes in a listed folder, so only an unlisted folder starves the next step."""
+    path: str = os.path.join(under, "geo", "a.bgeo.sc")
+    nodes: List[NodeInfo] = [
+        _node("a", items=(_item("a_0", 0, declared_outputs=(DeclaredFile(path, ""),)),)),
+        _node("b", ["a"]),
+    ]
+    extra: Tuple[str, ...] = (EXTRA,) if listed else ()
+    verdict: Verdict = validate(_ctx(nodes, working_dir=WORKING_DIR, output_directories=extra))
+    delivered: bool = under == WORKING_DIR or (under == EXTRA and listed)
+    assert _subjects(verdict, RefusalScenario.OUTPUT_OUTSIDE_COOK) == (
+        set() if delivered else {"a"}
+    )
+
+
+def test_an_undeliverable_refusal_names_every_job_folder() -> None:
+    """The artist must see every folder a step may write to, not only the working directory."""
+    outside: str = os.path.normpath("/elsewhere/a.exr")
+    nodes: List[NodeInfo] = [
+        _node("a", items=(_item("a_0", 0, declared_outputs=(DeclaredFile(outside, ""),)),)),
+        _node("b", ["a"]),
+    ]
+    verdict: Verdict = validate(_ctx(nodes, working_dir=WORKING_DIR, output_directories=(EXTRA,)))
+    (refusal,) = [r for r in verdict.refusals if r.scenario is RefusalScenario.OUTPUT_OUTSIDE_COOK]
+    assert f"'{WORKING_DIR}', '{EXTRA}'" in refusal.detail
+
+
+def test_a_missing_read_in_an_extra_output_folder_is_left_to_the_job() -> None:
+    """A read there is judged as one in the working directory, so it isn't called unreachable."""
+    nodes: List[NodeInfo] = [_node("a")]
+    snapshot: GraphSnapshot = synthesize(nodes)
+    read: SceneRead = _read("a", os.path.join(EXTRA, "t.png"), parm="file", is_output=False)
+    report: ReadReport = match_reads(snapshot, [read], WORKING_DIR, (EXTRA,))
+    verdict: Verdict = validate(
+        _ctx(
+            nodes,
+            snapshot=snapshot,
+            reads=report,
+            working_dir=WORKING_DIR,
+            output_directories=(EXTRA,),
+            exists=lambda path: False,
+        )
+    )
+    assert not _subjects(verdict, RefusalScenario.LOCAL_FILE_UNREACHABLE)
+
+
+def test_a_scene_in_an_extra_output_folder_is_not_advised() -> None:
+    """$HIP writes there are uploaded, so the advice to move the working directory would be wrong."""
+    verdict: Verdict = validate(
+        _ctx(
+            [],
+            reads=match_reads(synthesize([]), [], WORKING_DIR),
+            working_dir=WORKING_DIR,
+            output_directories=(EXTRA,),
+            env={"HIP": EXTRA},
+        )
+    )
+    assert not _advised(verdict, RefusalScenario.OUTPUT_OUTSIDE_COOK)
+    # Without the folder listed, the scene is outside the job, and the artist is told.
+    unlisted: Verdict = validate(
+        _ctx(
+            [],
+            reads=match_reads(synthesize([]), [], WORKING_DIR),
+            working_dir=WORKING_DIR,
+            env={"HIP": EXTRA},
+        )
+    )
+    assert _advised(unlisted, RefusalScenario.OUTPUT_OUTSIDE_COOK) == {EXTRA}

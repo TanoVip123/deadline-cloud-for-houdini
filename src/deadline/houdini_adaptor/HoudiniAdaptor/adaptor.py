@@ -606,6 +606,12 @@ class HoudiniAdaptor(Adaptor[AdaptorConfiguration]):
                 **pdg_run,
                 "pdg_dir": self.init_data["pdg"]["pdg_dir"],
                 "scene_file": self.init_data["scene_file"],
+                # Only a job with extra output folders names them, so older jobs send nothing new.
+                **(
+                    {"output_directories": self.init_data["pdg"]["output_directories"]}
+                    if "output_directories" in self.init_data["pdg"]
+                    else {}
+                ),
             },
             self.path_mapping_rules,
         )

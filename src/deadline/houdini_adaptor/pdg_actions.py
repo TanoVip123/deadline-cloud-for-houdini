@@ -279,8 +279,9 @@ def download_pdg_work_item(
 ) -> Tuple[Dict[str, Any], str]:
     """Fetch the payload, map its paths, and write it where PDG's loader looks. Runs in the adaptor's process.
 
-    ``run_data`` is the task's ``pdg`` run data plus the session's ``pdg_dir`` and ``scene_file``, and
-    ``rules`` are the session's path mapping rules. Returns the client's arguments and its outputs file.
+    ``run_data`` is the task's ``pdg`` run data plus the session's ``pdg_dir``, ``scene_file`` and any
+    ``output_directories``, and ``rules`` are the session's path mapping rules. Returns the client's
+    arguments and its outputs file.
     """
     # The item's name becomes its payload's file name, so it's checked before anything is written.
     payload: WorkItemPayload = WorkItemPayload(storage.get_payload(address)).map_paths(rules)
@@ -306,6 +307,12 @@ def download_pdg_work_item(
         "scene_file": str(run_data.get("scene_file") or ""),
         "record_outputs": bool(run_data.get("record_outputs")),
     }
+    # Each extra output folder as this worker sees it, mapped like the payload, next to
+    # the workstation's spelling, which the scheduler knows it by.
+    listed: List[str] = [str(folder) for folder in run_data.get("output_directories") or ()]
+    if listed:
+        mapped: List[str] = WorkItemPayload({"folders": listed}).map_paths(rules).data["folders"]
+        client_args["output_directories"] = [list(pair) for pair in zip(mapped, listed)]
     return client_args, outputs_file
 
 
@@ -338,6 +345,8 @@ class _DownloadedItem:
     pdg_temp: str
     scene_file: str
     record_outputs: bool
+    #: Each extra output folder, as (this worker's path, the workstation's path).
+    output_directories: Tuple[Tuple[str, str], ...] = ()
 
 
 class PdgWorkItemRunner:
@@ -474,6 +483,9 @@ def _read_work_item(args: Mapping[str, Any]) -> _DownloadedItem:
         pdg_temp=pdg_temp,
         scene_file=str(args.get("scene_file") or ""),
         record_outputs=bool(args.get("record_outputs")),
+        output_directories=tuple(
+            (str(worker), str(local)) for worker, local in args.get("output_directories") or ()
+        ),
     )
 
 
@@ -482,18 +494,27 @@ def _record_outputs(
 ) -> None:
     """Write the outputs for the adaptor to publish, with paths tokenized under ``__PDG_DIR__``.
 
-    A command that reported none gets a scan for the files it wrote since ``started``.
+    A command that reported none gets a scan for the files it wrote since ``started``,
+    in ``$PDG_DIR`` and in each extra output folder, which is recorded by the
+    workstation's path.
     """
     # The scan leaves out the payloads and the linked scene, which the command didn't write.
     hip_link: str = os.path.join(item.pdg_dir, os.path.basename(item.scene_file))
-    recorded: Sequence[OutputFile] = outputs or _scan_outputs(
-        item.pdg_dir,
-        exclude=(item.pdg_temp, hip_link if item.scene_file else ""),
-        since=started,
-    )
-    record: List[Dict[str, str]] = [
-        {"path": _tokenize(o.path, item.pdg_dir), "tag": o.tag} for o in recorded
-    ]
+    record: List[Dict[str, str]]
+    if outputs:
+        record = [{"path": _tokenize(o.path, item.pdg_dir), "tag": o.tag} for o in outputs]
+    else:
+        scanned: List[OutputFile] = _scan_outputs(
+            item.pdg_dir,
+            exclude=(item.pdg_temp, hip_link if item.scene_file else ""),
+            since=started,
+        )
+        record = [{"path": _tokenize(o.path, item.pdg_dir), "tag": o.tag} for o in scanned]
+        for worker, local in item.output_directories:
+            record += [
+                {"path": _relocate(o.path, worker, local), "tag": o.tag}
+                for o in _scan_outputs(worker, since=started)
+            ]
     # An error fails the item, since a success with no record gives the next step wrong inputs.
     with open(_outputs_file(item.pdg_temp, item.payload.item_name), "w", encoding="utf-8") as f:
         json.dump({"outputs": record}, f)
@@ -777,6 +798,15 @@ def _scan_outputs(
             continue
         outputs.append(OutputFile(str(path)))
     return outputs
+
+
+def _relocate(path: str, worker: str, local: str) -> str:
+    """``path`` under the worker's ``worker`` folder, spelled under the workstation's ``local`` folder.
+
+    The rest of the path uses ``/``, as ``_tokenize`` writes it.
+    """
+    relative: str = Path(path).relative_to(Path(os.path.abspath(worker))).as_posix()
+    return local.rstrip("/\\") + "/" + relative
 
 
 def _tokenize(path: str, pdg_dir: str) -> str:
