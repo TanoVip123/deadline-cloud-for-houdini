@@ -26,6 +26,7 @@ from .graph import (
     RawItem,
     WorkItemSpec,
     find_ancestors_among,
+    project_steps,
 )
 from .scene_reads import (
     AttributeVariableUse,
@@ -480,6 +481,43 @@ def _check_quotas(ctx: ValidationContext) -> Verdict:
     # The consumer ceiling counts, for each step, how many other steps depend on
     # it, by inverting the dependency edges each step lists upstream.
     consumers: Counter = Counter(dependency for step in steps for dependency in step.dependencies)
+    for name, count in sorted(consumers.items()):
+        if count > quotas.max_step_consumers:
+            refusals.append(
+                _quota_refusal(name, count, quotas.max_step_consumers, _CONSUMERS_PER_STEP)
+            )
+    return Verdict(refusals=tuple(refusals))
+
+
+def check_shape_quotas(nodes: Sequence[NodeInfo], quotas: Quotas = Quotas()) -> Verdict:
+    """Refuse the steps, dependencies and consumers the wires already show over a quota.
+
+    It runs before generation, on the nodes that are steps and in the cook. A data
+    edge found later can only add a dependency, so each refusal here stands.
+    """
+    by_name: Dict[str, NodeInfo] = {node.name: node for node in nodes}
+    schedulable: Set[str] = {name for name, node in by_name.items() if node.is_schedulable}
+    steps: Set[str] = {name for name in schedulable if by_name[name].in_cook_set is not False}
+    # A step outside the cook has no items, so the job keeps no edge to it.
+    projected: Dict[str, Set[str]] = project_steps(by_name, schedulable)
+    dependencies: Dict[str, Set[str]] = {name: projected[name] & steps for name in steps}
+    refusals: List[Refusal] = []
+    if len(steps) > quotas.max_steps_per_job:
+        refusals.append(
+            _quota_refusal(_WHOLE_COOK, len(steps), quotas.max_steps_per_job, _STEPS_PER_JOB)
+        )
+    # Each step's dependency count, then how many steps depend on each step.
+    for name in sorted(steps):
+        if len(dependencies[name]) > quotas.max_step_dependencies:
+            refusals.append(
+                _quota_refusal(
+                    name,
+                    len(dependencies[name]),
+                    quotas.max_step_dependencies,
+                    _DEPENDENCIES_PER_STEP,
+                )
+            )
+    consumers: Counter = Counter(dep for deps in dependencies.values() for dep in deps)
     for name, count in sorted(consumers.items()):
         if count > quotas.max_step_consumers:
             refusals.append(

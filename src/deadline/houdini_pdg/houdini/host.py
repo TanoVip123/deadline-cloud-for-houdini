@@ -43,6 +43,7 @@ from ..validation import (
     ValidationContext,
     Verdict,
     check_cook_set_has_steps,
+    check_shape_quotas,
     validate,
     waived,
 )
@@ -862,10 +863,14 @@ def _check_network(
         )
     )
     # Before generation, the checks that need items would report every step, so
-    # they wait. A cook set with no step is known now, so it is refused now.
+    # they wait. A cook set with no step, and the job's shape, are known now.
     waiting: FrozenSet[RefusalScenario] = _NEEDS_ITEMS if dependency_graph is None else frozenset()
+    topology: Tuple[Refusal, ...] = (
+        check_shape_quotas(infos).refusals if dependency_graph is None else ()
+    )
     verdict: Verdict = Verdict(
         refusals=tuple(r for r in full.refusals if r.scenario not in waiting)
+        + topology
         + check_cook_set_has_steps(infos, set(cook_set) if cook_set else None).refusals,
         advisories=tuple(a for a in full.advisories if a.scenario not in waiting),
     )
@@ -968,6 +973,15 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         return False
     display: Any = network.displayNode()
     cook_set: Optional[FrozenSet[str]] = _find_cook_set(node, display)
+    # A job shape over a quota is known from the wires, so nothing is generated for
+    # it, unless the artist turned validation off.
+    shape: Verdict = check_shape_quotas(
+        readers.node_infos(_graph_nodes(_graph_context(node)), None, cook_set)
+    )
+    early: Optional[SchedulerSettings] = _settings_or_none(node)
+    if shape.refusals and (early is None or early.validate_graph):
+        _show("The cook can't start.\n\n" + format_refusals(shape.refusals), error=True)
+        return False
     # Generate the display node's items, so every check sees the job the cook would
     # submit, then read them from this scheduler as the cook does.
     display.generateStaticWorkItems(block=True)

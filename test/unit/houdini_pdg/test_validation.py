@@ -625,6 +625,54 @@ def test_quotas_set_to_the_exact_counts_refuse_nothing(nodes: List[NodeInfo]) ->
     assert not _quota_refusals(verdict)
 
 
+#: The quotas the topology answers before anything is generated.
+_SHAPE_LIMITS: Tuple[str, ...] = (
+    validation._STEPS_PER_JOB,
+    validation._DEPENDENCIES_PER_STEP,
+    validation._CONSUMERS_PER_STEP,
+)
+
+
+@given(nodes=node_dags(), quota=quotas)
+def test_the_shape_quotas_before_generation_match_the_generated_job(
+    nodes: List[NodeInfo], quota: Quotas
+) -> None:
+    """Before generation, steps, dependencies and consumers are refused as the generated job would be.
+
+    Without it a 300-step graph was only refused after PDG generated every item.
+    """
+    # Before: no items. After: one item on every node that is a step and in the cook.
+    before: List[NodeInfo] = [replace(node, items=()) for node in nodes]
+    after: List[NodeInfo] = [
+        (
+            replace(
+                node, items=(_item(f"{node.name}_0", 0),) if node.in_cook_set is not False else ()
+            )
+            if node.is_schedulable
+            else node
+        )
+        for node in before
+    ]
+    expected: Set[Tuple[str, str]] = {
+        pair for pair in _quota_model(synthesize(after), quota) if pair[1] in _SHAPE_LIMITS
+    }
+    assert _quota_refusals(validation.check_shape_quotas(before, quota)) == expected
+
+
+def test_a_shape_quota_counts_through_nodes_that_are_not_steps() -> None:
+    """A partitioner between steps is collapsed, so the step below still depends on all three."""
+    nodes: List[NodeInfo] = [
+        _node("a", count=0),
+        _node("b", count=0),
+        _node("c", count=0),
+        _node("partition", ["a", "b", "c"], count=0, schedulable=False),
+        _node("montage", ["partition"], count=0),
+    ]
+    verdict: Verdict = validation.check_shape_quotas(nodes, Quotas(max_step_dependencies=2))
+    (refusal,) = verdict.refusals
+    assert refusal.subject == "montage" and "3 dependencies per step" in refusal.detail
+
+
 def test_a_dependency_quota_refusal_says_how_many_edges_carry_data() -> None:
     """A dependency refusal reports how many of its edges carry data, since a data edge cannot be pruned."""
     nodes: List[NodeInfo] = [_node("a"), _node("b"), _node("c", ["a", "b"])]

@@ -262,7 +262,7 @@ def synthesize(
     by_name: Dict[str, NodeInfo] = {node.name: node for node in sorted(nodes, key=lambda n: n.name)}
     schedulable: Set[str] = {name for name, node in by_name.items() if node.is_schedulable}
 
-    projected: Dict[str, Set[str]] = _project(by_name, schedulable)
+    projected: Dict[str, Set[str]] = project_steps(by_name, schedulable)
     merged, accepted, refused = _merge_data_edges(projected, data_edges or {}, schedulable)
     # No edge is pruned, even one a longer path implies: a worker syncs outputs only
     # from its step's direct dependencies, so removing an edge removes files.
@@ -308,7 +308,9 @@ def synthesize(
     )
 
 
-def _project(by_name: Mapping[str, NodeInfo], schedulable: AbstractSet[str]) -> Dict[str, Set[str]]:
+def project_steps(
+    by_name: Mapping[str, NodeInfo], schedulable: AbstractSet[str]
+) -> Dict[str, Set[str]]:
     """Each step's nearest schedulable upstream nodes, walking through the nodes that map to nothing.
 
     Iterative with a visited set, so a cyclic or dangling ``upstream`` terminates.

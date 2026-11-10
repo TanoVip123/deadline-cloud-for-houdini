@@ -910,6 +910,21 @@ def test_with_validation_off_an_unsaved_scene_is_still_refused(scene: FakeHou) -
     assert [r.scenario for r in _verdict(network).refusals] == [RefusalScenario.UNSAVED_SCENE]
 
 
+def test_a_network_over_the_steps_per_job_quota_is_refused_before_generation(
+    scene: FakeHou,
+) -> None:
+    """The step count is known from the wires, so the cook stops before PDG generates anything."""
+    # 201 steps in a row, one more than the service's 200 steps per job.
+    spec: List[Tuple[Any, ...]] = [
+        (f"step{i}", "hython run.py", "Processor", [f"step{i - 1}"] if i else [])
+        for i in range(201)
+    ]
+    verdict: Verdict = _verdict(build_network(spec))
+    (refusal,) = verdict.refusals
+    assert refusal.scenario is RefusalScenario.QUOTA_EXCEEDED
+    assert "201 steps per job, more than the limit of 200." in refusal.detail
+
+
 def test_a_network_routed_through_a_merge_is_accepted_before_generation(scene: FakeHou) -> None:
     """A Merge between two steps cooks nothing, so it is not refused."""
     assert _verdict(build_network(ROUTED_EXAMPLE)).accepted()

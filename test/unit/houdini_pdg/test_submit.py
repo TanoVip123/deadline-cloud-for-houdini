@@ -293,3 +293,17 @@ def test_the_generate_runs_after_the_save_and_leaves_the_saved_scene_saved(scene
     assert scene.hip_file.saves == 1 and display.generate_calls == [{"block": True}]
     assert scene.hip_file.hasUnsavedChanges() is False
     assert _parm_writes(network) == []
+
+
+def test_a_network_over_a_shape_quota_is_refused_before_it_is_generated(scene: FakeHou) -> None:
+    """Generating a graph the farm can't take costs time and memory for nothing."""
+    # 201 steps in a row, one more than the service's 200 steps per job.
+    spec: List[Tuple[Any, ...]] = [
+        (f"step{i}", "hython run.py", "Processor", [f"step{i - 1}"] if i else [])
+        for i in range(201)
+    ]
+    network: Network = build_network(spec, scheduler_parms={"working_dir": "$HIP"})
+    display: Any = network.topnet.displayNode()
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert display.generate_calls == [] and _cooks(network) == []
+    assert "201 steps per job" in scene.messages.calls[0][0]
