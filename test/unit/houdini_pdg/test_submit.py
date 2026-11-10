@@ -683,6 +683,7 @@ def test_submit_checks_the_generated_items_through_the_cook_buttons_checks(scene
         if event == "call" and frame.f_code is code:
             graphs.append(frame.f_locals["dependency_graph"])
 
+    # Submit a generated network with the recorder on, then put back any earlier profiler.
     network: FakeNetwork = _network()
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
     scheduler: Any = network.context.schedulers["deadlinecloudscheduler1"]
