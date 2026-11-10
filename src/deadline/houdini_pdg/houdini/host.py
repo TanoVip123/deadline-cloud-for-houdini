@@ -584,20 +584,19 @@ def _build_requirement(build: Callable[[], T], parms: str) -> T:
 def _debug_level(node: Any) -> int:
     """The debug level: the environment variable when it is valid, else the parm."""
     override: str = os.environ.get(_DEBUG_LEVEL_ENV, "").strip()
-    level: int = int(override) if re.fullmatch(_WHOLE_NUMBER, override) else -1
-    if override and level not in _DEBUG_LEVELS:
+    valid: bool = bool(re.fullmatch(_WHOLE_NUMBER, override)) and int(override) in _DEBUG_LEVELS
+    if override and not valid:
         _logger.warning(
             "Ignoring %s=%r: it must be 0 or 1.",
             _DEBUG_LEVEL_ENV,
             override,
         )
+    # The parm holds a menu index, so anything else is a damaged scene.
+    value: Any = override if valid else _parm(node, _DEBUG_LEVEL_PARM, 0, as_text=False)
+    text: str = str(value).strip()
+    level: int = int(text) if re.fullmatch(_WHOLE_NUMBER, text) else -1
     if level not in _DEBUG_LEVELS:
-        # The parm holds a menu index, so anything else is a damaged scene.
-        value: Any = _parm(node, _DEBUG_LEVEL_PARM, 0, as_text=False)
-        text: str = str(value).strip()
-        level = int(text) if re.fullmatch(_WHOLE_NUMBER, text) else -1
-        if level not in _DEBUG_LEVELS:
-            raise CookSetupError(f"The '{_DEBUG_LEVEL_PARM}' parm must be 0 or 1, not {value!r}.")
+        raise CookSetupError(f"The '{_DEBUG_LEVEL_PARM}' parm must be 0 or 1, not {value!r}.")
     return level
 
 
@@ -650,26 +649,26 @@ def _without(found: Iterable[str], drop: Iterable[str], paths: ModuleType = os.p
 
 def _scheduler_node(scheduler: Any) -> Any:
     """The scheduler's TOP node: PDG's own link first, then the only node of this type by name."""
-    node: Any = _call(scheduler, "topNode")
-    if node is None:
-        # PDG gave no link, so match the node by the scheduler's name among this type's nodes.
-        name: str = _name(scheduler)
-        try:
-            instances: List[Any] = list(
-                hou.nodeType(hou.topNodeTypeCategory(), _NODE_TYPE).instances()
-            )
-        except Exception:
-            instances = []
-        named: List[Any] = [n for n in instances if _call(n, "name") == name]
-        # The only node of the type is used even when its name differs.
-        matches: List[Any] = named or (instances if len(instances) == 1 else [])
-        if len(matches) != 1:
-            raise CookSetupError(
-                f"Cannot find the node of scheduler '{name}' in the scene, so its settings "
-                "cannot be read. Recreate the scheduler node."
-            )
-        node = matches[0]
-    return node
+    linked: Any = _call(scheduler, "topNode")
+    # With no link, the node is matched by the scheduler's name among this type's nodes.
+    name: str = _name(scheduler)
+    node_type: Any = (
+        None
+        if linked is not None
+        else _call(hou, "nodeType", _call(hou, "topNodeTypeCategory"), _NODE_TYPE)
+    )
+    instances: List[Any] = list(_call(node_type, "instances") or ())
+    named: List[Any] = [n for n in instances if _call(n, "name") == name]
+    # The only node of the type is used even when its name differs.
+    matches: List[Any] = (
+        [linked] if linked is not None else named or (instances if len(instances) == 1 else [])
+    )
+    if len(matches) != 1:
+        raise CookSetupError(
+            f"Cannot find the node of scheduler '{name}' in the scene, so its settings "
+            "cannot be read. Recreate the scheduler node."
+        )
+    return matches[0]
 
 
 # A PDG log line's leading "[HH:MM:SS.fff] " stamp.
@@ -1067,12 +1066,16 @@ def _check_network(
         else None
     )
     generated: bool = dependency_graph is not None
-    shape: GraphSnapshot = snapshot
-    judged: Optional[ReadReport] = reads
-    if reads is not None and generated:
-        shape = synthesize(infos, data_edges=reads.data_edges)
-    elif reads is not None:
-        judged = dataclasses.replace(reads, matches=(), data_edges={}, attribute_variables=())
+    shape: GraphSnapshot = (
+        synthesize(infos, data_edges=reads.data_edges)
+        if reads is not None and generated
+        else snapshot
+    )
+    judged: Optional[ReadReport] = (
+        dataclasses.replace(reads, matches=(), data_edges={}, attribute_variables=())
+        if reads is not None and not generated
+        else reads
+    )
     full: Verdict = validate(
         ValidationContext(
             nodes=infos,
@@ -1255,11 +1258,13 @@ def _find_cook_set(context: Any, display: Any) -> Optional[FrozenSet[str]]:
     The wires are read as the cook reads them. A display node with no PDG node keeps
     its own name, so the cook set check stands down for it.
     """
+    # PDG's name for each TOP node by path, and the wires as the readers find them.
     graph_nodes: List[Any] = _graph_nodes(context)
     by_path: Dict[str, str] = {
         _path_of(hom): name for name, hom in _top_nodes(graph_nodes).items() if hom
     }
     infos: Tuple[NodeInfo, ...] = readers.node_infos(graph_nodes, None)
+    # The display node, named as PDG names it, and everything wired above it.
     name: str = by_path.get(_path_of(display)) or str(_call(display, "name") or "")
     above: Set[str] = find_ancestors_among(infos, {info.name for info in infos}).get(name, set())
     return frozenset({name} | above if name else above) or None

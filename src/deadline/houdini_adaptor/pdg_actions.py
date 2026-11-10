@@ -500,16 +500,18 @@ def _record_outputs(
     workstation's path.
     """
     # The scan leaves out the payloads and the linked scene, which the command didn't write.
-    recorded: List[OutputFile] = list(outputs)
-    folders: List[Tuple[str, str]] = []
-    if not outputs:
-        hip_link: str = os.path.join(item.pdg_dir, os.path.basename(item.scene_file))
-        recorded = _scan_outputs(
+    scanned: bool = not outputs
+    hip_link: str = os.path.join(item.pdg_dir, os.path.basename(item.scene_file))
+    recorded: List[OutputFile] = (
+        _scan_outputs(
             item.pdg_dir,
             exclude=(item.pdg_temp, hip_link if item.scene_file else ""),
             since=started,
         )
-        folders = list(item.mapped_output_directories)
+        if scanned
+        else list(outputs)
+    )
+    folders: Tuple[Tuple[str, str], ...] = item.mapped_output_directories if scanned else ()
     record: List[Dict[str, str]] = [
         {"path": _tokenize(o.path, item.pdg_dir), "tag": o.tag} for o in recorded
     ]
