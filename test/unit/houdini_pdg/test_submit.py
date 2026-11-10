@@ -264,6 +264,7 @@ def _generated(network: Network, counts: Dict[str, int]) -> None:
 
 def test_submit_generates_first_and_confirms_the_step_and_task_counts(scene: FakeHou) -> None:
     """The artist sees the job's real size before choosing Submit, and the generate blocks."""
+    # The generate makes five tasks over three steps.
     network: Network = _network()
     _generated(network, {"sim": 2, "render": 2, "montage": 1})
     display: Any = network.topnet.displayNode()
@@ -274,6 +275,7 @@ def test_submit_generates_first_and_confirms_the_step_and_task_counts(scene: Fak
 
 def test_a_refusal_that_needs_items_is_shown_before_the_confirmation(scene: FakeHou) -> None:
     """Before, a step missing its items was only found in the cook, on the node's error flag."""
+    # The generate leaves render with no items, and render is in the cook.
     network: Network = _network()
     _generated(network, {"sim": 2, "montage": 1})
     assert submit(network.scheduler_node, get_setting=_workstation) is False
@@ -284,6 +286,7 @@ def test_a_refusal_that_needs_items_is_shown_before_the_confirmation(scene: Fake
 
 def test_the_generate_runs_after_the_save_and_leaves_the_saved_scene_saved(scene: FakeHou) -> None:
     """A generate that marked the scene changed would make Submit refuse the scene it just saved."""
+    # An unsaved scene, saved by Submit, then generated.
     scene.hip_file.unsaved = True
     network: Network = _network()
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
@@ -307,6 +310,7 @@ def test_a_network_over_a_shape_quota_is_refused_before_it_is_generated(scene: F
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     assert display.generate_calls == [] and _cooks(network) == []
     assert "201 steps per job" in scene.messages.calls[0][0]
+    assert scene.messages.options[0]["severity"] == "Error"
 
 
 def test_a_step_over_the_task_quota_stops_submits_generate_and_is_shown(scene: FakeHou) -> None:
@@ -323,6 +327,7 @@ def test_a_step_over_the_task_quota_stops_submits_generate_and_is_shown(scene: F
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     ((text, buttons),) = scene.messages.calls
     assert "sim: 10,001 tasks per step" in text and buttons == ()
+    assert scene.messages.options[0]["severity"] == "Error"
     assert network.context.canceled.wait(5) and _cooks(network) == []
     # The count stops with the generate, so a later cook isn't counted by it.
     assert network.context.handlers == []
@@ -330,6 +335,7 @@ def test_a_step_over_the_task_quota_stops_submits_generate_and_is_shown(scene: F
 
 def _with_requirements(network: Network, **parms: Any) -> None:
     """Set the Host Requirements tab to custom with ``parms``, the rest at the HDA's defaults."""
+    # Every number at -1 and both lists empty, as a new node has them.
     values: Dict[str, Any] = {"hr_mode": "custom", "hr_os": "", "hr_cpu_arch": ""}
     for field in ("vcpu", "memory", "gpu", "gpu_memory", "scratch"):
         values[f"hr_{field}_min"] = -1
@@ -341,6 +347,7 @@ def _with_requirements(network: Network, **parms: Any) -> None:
 
 def test_the_confirmation_lists_the_host_requirements(scene: FakeHou) -> None:
     """The artist sees which workers can take the job before choosing Submit."""
+    # Linux workers with at least one GPU.
     network: Network = _network()
     _with_requirements(network, hr_os="linux", hr_gpu_min=1)
     assert submit(network.scheduler_node, get_setting=_workstation) is True
@@ -357,6 +364,7 @@ def test_the_confirmation_says_any_worker_when_there_are_no_requirements(scene: 
 
 def test_an_invalid_host_requirement_is_shown_and_nothing_cooks(scene: FakeHou) -> None:
     """The service would refuse the job only after the scene was uploaded."""
+    # A GPU minimum above its maximum.
     network: Network = _network()
     _with_requirements(network, hr_gpu_min=4, hr_gpu_max=2)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
@@ -367,6 +375,7 @@ def test_an_invalid_host_requirement_is_shown_and_nothing_cooks(scene: FakeHou) 
 
 def test_the_confirmation_counts_the_extra_attachments(scene: FakeHou, tmp_path: Path) -> None:
     """The artist sees that the listed files and folders go with the job before choosing Submit."""
+    # One file, one folder and two output folders on the tab.
     network: Network = _network()
     node: Any = network.scheduler_node
     lut: Path = tmp_path / "lut.cube"
@@ -396,6 +405,7 @@ def test_a_missing_listed_file_is_shown_before_the_confirmation(
     scene: FakeHou, tmp_path: Path
 ) -> None:
     """Before, the typo surfaced only once the cook had started, on the node's error flag."""
+    # One listed file that isn't on disk.
     network: Network = _network()
     node: Any = network.scheduler_node
     node.set_parm("input_filenames", 1)
@@ -404,3 +414,38 @@ def test_a_missing_listed_file_is_shown_before_the_confirmation(
     ((text, buttons),) = scene.messages.calls
     assert "input_filenames1" in text and buttons == ()
     assert _cooks(network) == []
+
+
+def test_one_extra_input_file_alone_is_counted(scene: FakeHou, tmp_path: Path) -> None:
+    """With no output folder listed, the line must still count the input the artist added."""
+    network: Network = _network()
+    node: Any = network.scheduler_node
+    lut: Path = tmp_path / "lut.cube"
+    lut.write_text("")
+    node.set_parm("input_filenames", 1)
+    node.set_parm("input_filenames1", str(lut), kind="FileReference")
+    assert submit(node, get_setting=_workstation) is True
+    text: str = scene.messages.calls[0][0]
+    assert "Extra attachments: 1 input file(s), 0 input folder(s), 0 output folder(s)" in text
+
+
+def test_after_generating_a_read_no_step_writes_and_no_disk_holds_is_refused(
+    scene: FakeHou,
+) -> None:
+    """With the items generated, a missing file outside the job is known, so Submit names it."""
+    network: Network = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    network.node("render").hom.set_parm("file", "/elsewhere/tree.bgeo.sc", kind="FileReference")
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert "/obj/topnet1/render parm 'file'" in scene.messages.calls[0][0]
+    assert _cooks(network) == []
+
+
+def test_an_unconnected_input_slot_does_not_hide_a_cook_with_no_step(scene: FakeHou) -> None:
+    """Houdini lists an empty input slot as None, which has no path and names no node."""
+    network: Network = _network()
+    wedge: Any = network.node("wedge1").hom
+    wedge._inputs = [None]
+    network.topnet.display = wedge
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert "No node in this cook runs a command on a worker" in scene.messages.calls[0][0]

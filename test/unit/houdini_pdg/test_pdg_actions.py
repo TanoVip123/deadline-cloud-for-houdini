@@ -1323,6 +1323,7 @@ def test_a_scene_that_fails_to_load_is_left_to_the_job_script(
 
 def test_downloading_maps_each_output_folder_to_this_worker(pdg_dir: str, tmp_path: Path) -> None:
     """The workstation's folder doesn't exist here, so the client scans the folder the rules map it to."""
+    # Download an item for a session with one output folder and a rule for it.
     worker: str = str(tmp_path / "mnt" / "renders")
     rules: List[RuntimeRule] = [rule("/studio/renders", worker, runtime=True)]
     client_args: Dict[str, Any] = download_pdg_work_item(

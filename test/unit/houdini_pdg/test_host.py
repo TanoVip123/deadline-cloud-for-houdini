@@ -9,6 +9,7 @@ import logging
 import ntpath
 import os
 import posixpath
+import re
 import subprocess
 import sys
 import threading
@@ -320,6 +321,7 @@ def test_a_step_over_the_task_quota_stops_generation_and_names_its_count(scene: 
 
 def test_the_job_total_across_steps_stops_generation(scene: FakeHou) -> None:
     """Two steps can each fit the per-step limit and still pass the per-job limit together."""
+    # Each step alone fits, and the second one takes the total over the job's limit.
     host, network, reports = _counting()
     network.node("sim").workItems = [None] * 6_000
     network.node("render").workItems = [None] * 6_000
@@ -332,6 +334,7 @@ def test_the_job_total_across_steps_stops_generation(scene: FakeHou) -> None:
 
 def test_items_of_a_node_that_is_not_a_step_are_not_counted(scene: FakeHou) -> None:
     """A wedge's items cook here and are never tasks, so they can't pass a task quota."""
+    # A wedge with twice the job's limit, which isn't a step.
     host, network, reports = _counting()
     network.node("wedge1").workItems = [None] * 20_000
     network.context.emit("NodeGenerated", "wedge1")
@@ -340,6 +343,7 @@ def test_items_of_a_node_that_is_not_a_step_are_not_counted(scene: FakeHou) -> N
 
 def test_a_stop_the_cook_declines_leaves_generation_running(scene: FakeHou) -> None:
     """With validation off the cook keeps the report as a warning, so nothing is canceled."""
+    # The cook declines the stop, and a step goes over its limit.
     network: Network = build_network(PYRO_BONFIRE)
     host: HoudiniPdgHost = HoudiniPdgHost(network.scheduler())
     host.watch_generation(None, lambda verdict: False)
@@ -993,6 +997,17 @@ def test_a_network_over_the_steps_per_job_quota_is_refused_before_generation(
     assert "201 steps per job, more than the limit of 200." in refusal.detail
 
 
+def test_before_generation_a_read_of_a_file_a_step_will_write_is_not_refused(
+    scene: FakeHou,
+) -> None:
+    """No step has declared its outputs yet, so every read would look like a missing file."""
+    network: Network = build_network(PYRO_BONFIRE)
+    network.node("render").hom.set_parm("file", "/elsewhere/sim/out.bgeo.sc", kind="FileReference")
+    assert RefusalScenario.LOCAL_FILE_UNREACHABLE not in {
+        r.scenario for r in _verdict(network).refusals
+    }
+
+
 def test_a_network_routed_through_a_merge_is_accepted_before_generation(scene: FakeHou) -> None:
     """A Merge between two steps cooks nothing, so it is not refused."""
     assert _verdict(build_network(ROUTED_EXAMPLE)).accepted()
@@ -1288,7 +1303,12 @@ def _requirements_node(**parms: Any) -> FakeNode:
         defaults[f"hr_{field}_max"] = -1
     defaults.update({"hr_amounts": 0, "hr_attributes": 0})
     defaults.update(parms)
-    return FakeNode(SCHEDULER_PATH, parms=defaults)
+    node: FakeNode = FakeNode(SCHEDULER_PATH, parms=defaults)
+    # The two ordinal menus, so a read of the index instead of the token is caught.
+    node.set_parm("hr_mode", defaults["hr_mode"], menu=("all", "custom"))
+    for name in [name for name in defaults if name.startswith("hr_attr_option")]:
+        node.set_parm(name, defaults[name], menu=("anyOf", "allOf"))
+    return node
 
 
 def test_run_on_all_workers_gives_no_requirements(scene: FakeHou) -> None:
@@ -1334,14 +1354,14 @@ def test_custom_amounts_and_attributes_are_read_from_each_multiparm_entry(scene:
         hr_amounts=1,
         hr_amount_name1="licenses",
         hr_amount_min1=2,
-        hr_amount_max1=-1,
+        hr_amount_max1=5,
         hr_attributes=1,
         hr_attr_name1="studio",
         hr_attr_option1="allOf",
         hr_attr_values1="vfx, fire",
     )
     assert read_host_requirements(node) == {
-        "amounts": [{"name": "amount.worker.licenses", "min": 2}],
+        "amounts": [{"name": "amount.worker.licenses", "min": 2, "max": 5}],
         "attributes": [{"name": "attr.worker.studio", "allOf": ["vfx", "fire"]}],
     }
 
@@ -1391,6 +1411,7 @@ def _listed(node: FakeNode, list_parm: str, entry: str, values: Sequence[str]) -
 
 def test_listed_files_and_folders_join_the_scenes_own(scene: FakeHou, tmp_path: Path) -> None:
     """They join the scan and never replace it, so the scene's own textures still travel."""
+    # A scene texture, a listed file outside the scene, a listed frame sequence and a listed folder.
     folder: str = str(tmp_path / "scene")
     tex: str = _touch(folder, "tex.exr")
     extra: str = _touch(str(tmp_path), "extra", "lut.cube")
@@ -1415,26 +1436,31 @@ def test_a_listed_path_that_does_not_exist_names_its_parm(
     scene: FakeHou, tmp_path: Path, list_parm: str, entry: str
 ) -> None:
     """The artist typed the path, so a quiet skip would hide a typo until the worker failed."""
+    # List a path that isn't on disk, then read the scene files.
     network: Network = build_network(PYRO_BONFIRE)
     _listed(network.scheduler_node, list_parm, entry, [str(tmp_path / "nowhere")])
-    with pytest.raises(CookSetupError, match=f"{entry}1"):
+    with pytest.raises(CookSetupError) as raised:
         HoudiniPdgHost(network.scheduler()).scene_files()
+    kind: str = "file" if entry == "input_filenames" else "folder"
+    assert f"'{entry}1'" in str(raised.value) and f"not on disk as a {kind}" in str(raised.value)
 
 
 def test_a_listed_home_folder_is_refused_naming_its_parm(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Listing home by hand would hash all of it, the same as a scene parm that expands to it."""
+    # A scene that is fine on its own, with $HOME added to the tab's folders.
     host, home = _home_scene(monkeypatch, tmp_path, "$HIP/caches")
     os.makedirs(os.path.join(home, "caches"))
     node: Any = host.scheduler_node()
     _listed(node, "input_directories", "input_dir", ["$HOME"])
-    with pytest.raises(CookSetupError, match="input_dir1"):
+    with pytest.raises(CookSetupError, match=f"{re.escape(node.path())}/input_dir1"):
         host.scene_files()
 
 
 def test_an_output_folder_is_never_attached_as_an_input(scene: FakeHou, tmp_path: Path) -> None:
     """Attaching it would upload an earlier cook's renders before every job."""
+    # An output folder that the file reference scan also reports, as Houdini does for a directory parm.
     os.makedirs(str(tmp_path / "renders"))
     network: Network = build_network(PYRO_BONFIRE)
     _listed(network.scheduler_node, "output_directories", "output_dir", [str(tmp_path / "renders")])
@@ -1461,7 +1487,7 @@ def test_an_output_folder_that_overlaps_the_working_directory_is_refused(
     """The working directory is already uploaded, so an overlap would upload one file twice."""
     node: FakeNode = _settings_node(working_dir="$HIP")
     _listed(node, "output_directories", "output_dir", [os.path.join("$HIP", relative)])
-    with pytest.raises(CookSetupError, match="output_dir1.*working directory"):
+    with pytest.raises(CookSetupError, match=f"{SCHEDULER_PATH}/output_dir1 .*working directory"):
         read_scheduler_settings(node)
 
 
@@ -1483,3 +1509,14 @@ def test_an_output_folder_at_home_is_refused_naming_its_parm(
     _listed(node, "output_directories", "output_dir", [str(tmp_path / "home")])
     with pytest.raises(CookSetupError, match="output_dir1"):
         read_scheduler_settings(node)
+
+
+def test_the_host_reads_the_requirements_from_its_scheduler_node(scene: FakeHou) -> None:
+    """The submitter asks the host, so the host must read the node the cook runs on."""
+    network: Network = build_network(PYRO_BONFIRE)
+    node: FakeNode = _requirements_node(hr_mode="custom", hr_gpu_min=1)
+    for parm in node.parms():
+        network.scheduler_node.set_parm(parm.name(), parm.value, menu=parm.menu)
+    assert HoudiniPdgHost(network.scheduler()).host_requirements() == {
+        "amounts": [{"name": "amount.worker.gpu", "min": 1}]
+    }

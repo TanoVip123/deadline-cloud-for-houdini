@@ -661,6 +661,7 @@ def test_the_shape_quotas_before_generation_match_the_generated_job(
 
 def test_a_shape_quota_counts_through_nodes_that_are_not_steps() -> None:
     """A partitioner between steps is collapsed, so the step below still depends on all three."""
+    # Three steps feed one partitioner, and one step reads its partitions.
     nodes: List[NodeInfo] = [
         _node("a", count=0),
         _node("b", count=0),
@@ -2506,6 +2507,7 @@ def test_an_output_in_an_extra_output_folder_reaches_the_steps_below(
     under: str, listed: bool
 ) -> None:
     """Each task uploads what it writes in a listed folder, so only an unlisted folder starves the next step."""
+    # One step writes under the drawn folder, and a step below reads it.
     path: str = os.path.join(under, "geo", "a.bgeo.sc")
     nodes: List[NodeInfo] = [
         _node("a", items=(_item("a_0", 0, declared_outputs=(DeclaredFile(path, ""),)),)),
@@ -2521,6 +2523,7 @@ def test_an_output_in_an_extra_output_folder_reaches_the_steps_below(
 
 def test_an_undeliverable_refusal_names_every_job_folder() -> None:
     """The artist must see every folder a step may write to, not only the working directory."""
+    # A consumed step writes outside every folder of the job.
     outside: str = os.path.normpath("/elsewhere/a.exr")
     nodes: List[NodeInfo] = [
         _node("a", items=(_item("a_0", 0, declared_outputs=(DeclaredFile(outside, ""),)),)),
@@ -2533,6 +2536,7 @@ def test_an_undeliverable_refusal_names_every_job_folder() -> None:
 
 def test_a_missing_read_in_an_extra_output_folder_is_left_to_the_job() -> None:
     """A read there is judged as one in the working directory, so it isn't called unreachable."""
+    # A step reads a missing file in the listed folder.
     nodes: List[NodeInfo] = [_node("a")]
     snapshot: GraphSnapshot = synthesize(nodes)
     read: SceneRead = _read("a", os.path.join(EXTRA, "t.png"), parm="file", is_output=False)

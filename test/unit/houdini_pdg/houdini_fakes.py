@@ -126,6 +126,7 @@ class FakeParm:
         value: Any,
         kind: str = "",
         tags: Optional[Dict[str, str]] = None,
+        menu: Sequence[str] = (),
     ) -> None:
         self._node: FakeNode = node
         self._name: str = name
@@ -133,6 +134,8 @@ class FakeParm:
         self.kind: str = kind
         self.tags: Dict[str, str] = dict(tags or {})
         self.sets: List[Any] = []
+        #: A menu parm's tokens. Houdini's eval gives the chosen index, and evalAsString the token.
+        self.menu: Tuple[str, ...] = tuple(menu)
 
     def name(self) -> str:
         return self._name
@@ -150,10 +153,12 @@ class FakeParm:
         # A parm set to an exception stands for one whose expression fails.
         if isinstance(self.value, Exception):
             raise self.value
+        if self.menu:
+            return self.menu.index(self.value)
         return expand(str(self.value)) if self.kind else self.value
 
     def evalAsString(self) -> str:
-        return expand(str(self.eval()))
+        return self.value if self.menu else expand(str(self.eval()))
 
     def unexpandedString(self) -> str:
         return str(self.value)
@@ -241,10 +246,15 @@ class FakeNode:
         return self._parms.get(name)
 
     def set_parm(
-        self, name: str, value: Any, kind: str = "", tags: Optional[Dict[str, str]] = None
+        self,
+        name: str,
+        value: Any,
+        kind: str = "",
+        tags: Optional[Dict[str, str]] = None,
+        menu: Sequence[str] = (),
     ) -> FakeParm:
-        """Add or replace a parm, and return it."""
-        parm: FakeParm = FakeParm(self, name, value, kind, tags)
+        """Add or replace a parm, and return it. A ``menu`` makes it an ordinal menu set to ``value``."""
+        parm: FakeParm = FakeParm(self, name, value, kind, tags, menu)
         self._parms[name] = parm
         return parm
 

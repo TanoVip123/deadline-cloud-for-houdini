@@ -607,6 +607,7 @@ def test_without_host_requirements_no_step_has_any() -> None:
 
 def test_editing_one_steps_requirements_leaves_the_others_alone() -> None:
     """Each step gets its own copy, so a later change to one step can't reach the rest."""
+    # Build a two step template, then change the first step's copy.
     sub: PdgSubmitter = make_submitter(GraphSnapshot(steps=(step("a", 1), step("b", 1))))
     template: Dict[str, Any] = sub.get_job_template(sub.get_settings(), _GPU_LINUX)
     template["steps"][0]["hostRequirements"]["amounts"].clear()
@@ -615,6 +616,7 @@ def test_editing_one_steps_requirements_leaves_the_others_alone() -> None:
 
 def test_the_submitted_bundle_carries_the_nodes_host_requirements(tmp_path: Path) -> None:
     """The submitter takes the block from the host, so what the node sets is what the job gets."""
+    # The host gives a block, and the bundle is written as the cook writes it.
     sub: PdgSubmitter = make_submitter()
     cast(FakeHost, sub._host).requirements = _GPU_LINUX
     sub.submit(GraphSnapshot(steps=(step("a", 1),)), str(tmp_path / "bundle"))
@@ -1428,6 +1430,7 @@ def test_the_nodes_output_folders_join_the_working_directory_in_the_bundle(tmp_p
 
 def test_without_output_folders_the_init_data_is_as_before(tmp_path: Path) -> None:
     """A job from a node with an empty tab must read the same on an adaptor that doesn't know the field."""
+    # Submit with no output folders, then read the session's init data.
     sub: PdgSubmitter = make_submitter()
     sub.submit(GraphSnapshot(steps=(step("a", 1),)), str(tmp_path / "bundle"))
     (environment,) = read_bundle(tmp_path / "bundle")["template"]["jobEnvironments"]
