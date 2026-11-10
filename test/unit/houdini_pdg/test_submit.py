@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import types
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -234,3 +235,61 @@ def test_submitting_a_display_node_with_no_step_above_it_is_refused(scene: FakeH
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     assert _cooks(network) == []
     assert "No node in this cook runs a command on a worker" in scene.messages.calls[0][0]
+
+
+class _Item:
+    """A generated ``pdg.WorkItem`` with a command, so its node becomes a step."""
+
+    def __init__(self, node: str, index: int, command: str) -> None:
+        # The fields the graph read takes from a work item.
+        self.name: str = f"{node}_{index}"
+        self.index: int = index
+        self.id: int = 1000 + index
+        self.node: Any = types.SimpleNamespace(name=node)
+        self.command: str = command
+        self.state: Any = types.SimpleNamespace(name="Uncooked")
+
+
+def _generated(network: Network, counts: Dict[str, int]) -> None:
+    """Give the scheduler the items a static generate makes, ``counts[node]`` for each step."""
+    # PDG keeps the items on the scheduler, which Submit finds by its name.
+    commands: Dict[str, str] = {node.name: node.command for node in network.pdg_nodes}
+    items: Dict[Any, List[Any]] = {
+        _Item(name, i, commands[name]): [] for name, count in counts.items() for i in range(count)
+    }
+    scheduler: Any = network.scheduler()
+    scheduler.dependency_graph = (items, {}, [])
+    network.context.schedulers["deadlinecloudscheduler1"] = scheduler
+
+
+def test_submit_generates_first_and_confirms_the_step_and_task_counts(scene: FakeHou) -> None:
+    """The artist sees the job's real size before choosing Submit, and the generate blocks."""
+    network: Network = _network()
+    _generated(network, {"sim": 2, "render": 2, "montage": 1})
+    display: Any = network.topnet.displayNode()
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    assert display.generate_calls == [{"block": True}]
+    assert "Steps: 3, tasks: 5" in scene.messages.calls[0][0]
+
+
+def test_a_refusal_that_needs_items_is_shown_before_the_confirmation(scene: FakeHou) -> None:
+    """Before, a step missing its items was only found in the cook, on the node's error flag."""
+    network: Network = _network()
+    _generated(network, {"sim": 2, "montage": 1})
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    ((text, buttons),) = scene.messages.calls
+    assert "render:" in text and buttons == ()
+    assert _cooks(network) == []
+
+
+def test_the_generate_runs_after_the_save_and_leaves_the_saved_scene_saved(scene: FakeHou) -> None:
+    """A generate that marked the scene changed would make Submit refuse the scene it just saved."""
+    scene.hip_file.unsaved = True
+    network: Network = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    display: Any = network.topnet.displayNode()
+    display.hip_file = scene.hip_file
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    assert scene.hip_file.saves == 1 and display.generate_calls == [{"block": True}]
+    assert scene.hip_file.hasUnsavedChanges() is False
+    assert _parm_writes(network) == []

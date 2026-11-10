@@ -197,6 +197,11 @@ class FakeNode:
         self.display: Optional[FakeNode] = None
         self.cook_creates: Any = None
         self.pdg_name: Optional[str] = None
+        #: Each static generate, with whether the scene had unsaved changes just after it.
+        self.generate_calls: List[Dict[str, Any]] = []
+        #: The hip file a generate could mark as changed, and whether it does.
+        self.hip_file: Any = None
+        self.generate_marks_unsaved: bool = False
 
     def path(self) -> str:
         return self._path
@@ -301,6 +306,12 @@ class FakeNode:
 
     def getPDGGraphContext(self) -> Any:
         return self.context
+
+    def generateStaticWorkItems(self, block: bool = False) -> None:
+        # Houdini might mark the scene changed on a generate, so a test can make it do so.
+        if self.generate_marks_unsaved and self.hip_file is not None:
+            self.hip_file.unsaved = True
+        self.generate_calls.append({"block": block})
 
     def cookWorkItems(self, **kwargs: Any) -> None:
         self.cook_calls.append(kwargs)
@@ -465,6 +476,8 @@ class FakeContext:
     cookSet: Any = None
     handlers: List[Tuple[Any, Any]] = field(default_factory=list)
     items: Dict[int, Any] = field(default_factory=dict)
+    #: The schedulers ``schedulerForName`` finds, by name.
+    schedulers: Dict[str, Any] = field(default_factory=dict)
     #: PDG's cook options. Houdini prints the cook type as ``cookType.Node`` for a cook.
     cookOptions: Any = field(
         default_factory=lambda: types.SimpleNamespace(cookType="cookType.Node")
@@ -475,6 +488,9 @@ class FakeContext:
         return types.SimpleNamespace(
             nodes=lambda: list(self.nodes), workItemById=lambda item_id: self.items.get(item_id)
         )
+
+    def schedulerForName(self, name: str) -> Any:
+        return self.schedulers.get(name)
 
     def addEventHandler(self, function: Any, event_type: Any, is_python: bool) -> Any:
         # PDG calls only the handlers registered as Python back into Python.

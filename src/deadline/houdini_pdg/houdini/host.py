@@ -312,7 +312,7 @@ class PreCookChecks:
         """
         if interactive:
             on_main_thread(lambda: prompt_to_save(node))
-        verdict: Verdict = on_main_thread(lambda: _topology_verdict(node, cook_set))
+        verdict: Verdict = on_main_thread(lambda: _check_network(node, cook_set, None)[0])
         refusals: Tuple[Refusal, ...] = verdict.refusals + on_main_thread(_save_refusals)
         return Verdict(refusals=refusals, advisories=verdict.advisories)
 
@@ -816,18 +816,24 @@ def _save_refusals() -> Tuple[Refusal, ...]:
     )
 
 
-def _topology_verdict(node: Any, cook_set: Optional[AbstractSet[str]] = None) -> Verdict:
-    """The refusals the TOP network shows before PDG generates any work item."""
+def _check_network(
+    node: Any, cook_set: Optional[AbstractSet[str]], dependency_graph: Any
+) -> Tuple[Verdict, GraphSnapshot]:
+    """The verdict and the job's shape for the TOP network, before a cook.
+
+    With no ``dependency_graph``, nothing is generated yet, so only the checks the
+    topology answers are kept. With one, every check runs on the generated items.
+    """
     context: Any = _graph_context(node)
     if context is None:
         _logger.warning(
             "The TOP network has no PDG graph yet, so the checks that need it run when the "
             "cook starts."
         )
-        return Verdict()
+        return Verdict(), GraphSnapshot(steps=())
     graph_nodes: List[Any] = _graph_nodes(context)
     infos: Tuple[NodeInfo, ...] = _own_overrides_cleared(
-        readers.node_infos(graph_nodes, None), graph_nodes, _names_of(node)
+        readers.node_infos(graph_nodes, dependency_graph, cook_set), graph_nodes, _names_of(node)
     )
     snapshot: GraphSnapshot = synthesize(infos)
     # A settings problem is reported by the cook when it starts, so the topology
@@ -837,18 +843,15 @@ def _topology_verdict(node: Any, cook_set: Optional[AbstractSet[str]] = None) ->
     scene: SceneReads = readers.collect_scene_reads(
         _top_nodes(graph_nodes), expand=_expand_variables
     )
-    # Only how the write parms are authored is known before generation. With no
-    # declared outputs every read would look external, so matches are dropped.
+    # The reads are matched as the cook matches them. Before generation there are
+    # no declared outputs, so every read would look external and the matches are dropped.
     reads: Optional[ReadReport] = (
-        dataclasses.replace(
-            match_reads(snapshot, scene.reads, working_dir),
-            matches=(),
-            data_edges={},
-            attribute_variables=(),
-        )
-        if scene.available
-        else None
+        match_reads(snapshot, scene.reads, working_dir) if scene.available else None
     )
+    if reads is not None and dependency_graph is not None:
+        snapshot = synthesize(infos, data_edges=reads.data_edges)
+    elif reads is not None:
+        reads = dataclasses.replace(reads, matches=(), data_edges={}, attribute_variables=())
     full: Verdict = validate(
         ValidationContext(
             nodes=infos,
@@ -858,14 +861,17 @@ def _topology_verdict(node: Any, cook_set: Optional[AbstractSet[str]] = None) ->
             env=_environment(),
         )
     )
-    # The checks that need generated items would report every step, so they wait.
-    # A cook set with no step is known now, so it is refused now.
+    # Before generation, the checks that need items would report every step, so
+    # they wait. A cook set with no step is known now, so it is refused now.
+    waiting: FrozenSet[RefusalScenario] = _NEEDS_ITEMS if dependency_graph is None else frozenset()
     verdict: Verdict = Verdict(
-        refusals=tuple(r for r in full.refusals if r.scenario not in _NEEDS_ITEMS)
+        refusals=tuple(r for r in full.refusals if r.scenario not in waiting)
         + check_cook_set_has_steps(infos, set(cook_set) if cook_set else None).refusals,
-        advisories=tuple(a for a in full.advisories if a.scenario not in _NEEDS_ITEMS),
+        advisories=tuple(a for a in full.advisories if a.scenario not in waiting),
     )
-    return waived(verdict) if settings is not None and not settings.validate_graph else verdict
+    if settings is not None and not settings.validate_graph:
+        verdict = waived(verdict)
+    return verdict, snapshot
 
 
 def _settings_or_none(node: Any) -> Optional[SchedulerSettings]:
@@ -944,7 +950,8 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     """Run the node's Submit. Return True when the cook started.
 
     First the unsaved-scene check, then the network's default scheduler and the
-    pre-cook checks, then one confirmation, then a cook of the display node.
+    farm, then a generate and every check on its items, then one confirmation,
+    then a cook of the display node.
     """
     from deadline.client.exceptions import UserInitiatedCancel
 
@@ -960,8 +967,19 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         _show(problem, error=True)
         return False
     display: Any = network.displayNode()
-    verdict: Verdict = PreCookChecks().run(
-        node, interactive=False, cook_set=_find_cook_set(node, display)
+    cook_set: Optional[FrozenSet[str]] = _find_cook_set(node, display)
+    # Generate the display node's items, so every check sees the job the cook would
+    # submit, then read them from this scheduler as the cook does.
+    display.generateStaticWorkItems(block=True)
+    scheduler: Any = _call(
+        _graph_context(node), "schedulerForName", _call(node, "getPDGNodeName") or node.name()
+    )
+    dependency_graph: Any = _call(scheduler, "dependencyGraph", True)
+    checked: Verdict
+    snapshot: GraphSnapshot
+    checked, snapshot = _check_network(node, cook_set, dependency_graph)
+    verdict: Verdict = Verdict(
+        refusals=checked.refusals + _save_refusals(), advisories=checked.advisories
     )
     if verdict.refusals:
         _show("The cook can't start.\n\n" + format_refusals(verdict.refusals), error=True)
@@ -971,7 +989,12 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     except CookSetupError as e:
         _show(str(e), error=True)
         return False
-    if not _confirmed(node, settings, verdict, read):
+    counts: str = (
+        f"Steps: {len(snapshot.steps)}, tasks: {snapshot.total_tasks}"
+        if dependency_graph is not None
+        else "Steps and tasks: counted when the cook starts"
+    )
+    if not _confirmed(node, settings, verdict, read, counts):
         return False
     # The display node is what the network's own Cook button cooks.
     display.cookWorkItems(block=False)
@@ -1032,7 +1055,11 @@ def _farm_problem(read: Callable[[str], str]) -> str:
 
 
 def _confirmed(
-    node: Any, settings: SchedulerSettings, verdict: Verdict, read: Callable[[str], str]
+    node: Any,
+    settings: SchedulerSettings,
+    verdict: Verdict,
+    read: Callable[[str], str],
+    counts: str,
 ) -> bool:
     """Show what will be submitted, with any advisory, and return whether the artist chose Submit."""
     # The job as it will be submitted, then any warnings in the details.
@@ -1042,6 +1069,7 @@ def _confirmed(
         f"Job name: {_text_parm(node, 'name') or os.path.basename(str(hou.hipFile.path()))}",
         f"Priority: {_text_parm(node, 'priority') or '50'}",
         f"Working directory: {settings.working_dir}",
+        counts,
     ]
     details: str = "\n\n".join(f"{a.subject}: {a.detail}" for a in verdict.advisories)
     choice: int = hou.ui.displayMessage(
