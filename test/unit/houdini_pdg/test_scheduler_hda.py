@@ -113,3 +113,13 @@ def test_the_python_module_sends_submit_to_the_schedulers_own_flow() -> None:
     module: str = _read(_NODE, "PythonModule")
     assert "deadline.houdini_pdg.houdini.host import submit" in module
     compile(module, "PythonModule", "exec")
+
+
+@pytest.mark.parametrize(
+    "parm", ["priority", "failed_tasks_limit", "task_retry_limit", "max_worker_count"]
+)
+def test_the_job_number_parms_are_plain_integer_fields(parm: str) -> None:
+    """The artist types these counts, and a slider made them hard to set exactly."""
+    block: str = NODE_PARMS[parm]
+    assert re.search(r"type\s+integer", block)
+    assert re.search(r'parmtag\s*\{\s*"sidefx::slider"\s+"none"\s*\}', block), parm

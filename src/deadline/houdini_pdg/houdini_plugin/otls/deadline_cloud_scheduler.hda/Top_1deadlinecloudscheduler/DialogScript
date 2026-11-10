@@ -40,6 +40,7 @@
                 default { "50" }
                 range   { 1 100 }
                 parmtag { "script_callback_language" "python" }
+                parmtag { "sidefx::slider" "none" }
                 help    "The job's scheduling priority. The numerically largest priority is scheduled first. See the AWS Deadline Cloud job scheduling documentation for more details."
             }
             parm {
@@ -49,6 +50,7 @@
                 default { "20" }
                 range   { 0 200 }
                 parmtag { "script_callback_language" "python" }
+                parmtag { "sidefx::slider" "none" }
                 help    "The number of task failures before the job stops running and is marked as FAILED."
             }
             parm {
@@ -58,6 +60,7 @@
                 default { "5" }
                 range   { 0 10 }
                 parmtag { "script_callback_language" "python" }
+                parmtag { "sidefx::slider" "none" }
                 help    "The maximum number of retries for each task."
             }
             parm {
@@ -67,6 +70,7 @@
                 default { "0" }
                 range   { 0! 100 }
                 parmtag { "script_callback_language" "python" }
+                parmtag { "sidefx::slider" "none" }
                 help    "The maximum number of workers that run the job's tasks at the same time. 0 sets no limit."
             }
         }
