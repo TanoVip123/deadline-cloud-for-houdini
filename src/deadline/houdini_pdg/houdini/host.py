@@ -119,8 +119,6 @@ class HoudiniPdgHost:
         self._waiting_for: Set[str] = set()
         self._generated: Set[str] = set()
         self._generation_handlers: Tuple[Any, ...] = ()
-        # The cook set PDG gave at the start, for a read after PDG stops reporting one.
-        self._cook_set: Optional[FrozenSet[str]] = None
         # Separate from ``_lock``, which is held across a main-thread call.
         self._generation_lock: threading.Lock = threading.Lock()
 
@@ -198,7 +196,6 @@ class HoudiniPdgHost:
         with self._generation_lock:
             self._waiting_for = steps & set(cook_set) if cook_set else steps
             self._generated = set()
-            self._cook_set = frozenset(cook_set) if cook_set else None
         handlers: Tuple[Any, ...] = (
             context.addEventHandler(self._on_node_generated, pdg.EventType.NodeGenerated, True),
         )
@@ -300,11 +297,7 @@ class HoudiniPdgHost:
         # Keep only the items in this cook, because the others are an earlier cook's.
         context: Any = self._scheduler.context
         graph_nodes: List[Any] = _graph_nodes(context)
-        # PDG's own cook set wins. The one from the start covers a read once PDG reports none.
-        live: Optional[FrozenSet[str]] = cook_set_names(_attr(context, "cookSet"))
-        with self._generation_lock:
-            started: Optional[FrozenSet[str]] = self._cook_set
-        cook_set: Optional[FrozenSet[str]] = live if live is not None else started
+        cook_set: Optional[FrozenSet[str]] = cook_set_names(_attr(context, "cookSet"))
         infos: Tuple[NodeInfo, ...] = readers.node_infos(
             graph_nodes, dependency_graph, cook_set, only_items_in_cook=True
         )
