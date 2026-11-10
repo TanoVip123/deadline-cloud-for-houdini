@@ -635,6 +635,7 @@ def test_generated_items_are_merged_with_declarations_and_attributes() -> None:
             ],
             inputs=[_File("/src/in.bgeo.sc", tag="")],
             environment={"zeta": "z", "wedgeindex": i},
+            attribNames=lambda: ["wedgeindex", "zeta", "hip"],
         )
         for i in range(2)
     ]
@@ -658,6 +659,8 @@ def test_generated_items_are_merged_with_declarations_and_attributes() -> None:
     assert cache_info.items[1].depends_on == ()
     # Sorted, so the same scene always gives the same NodeInfo.
     assert cache_info.exported_attribute_names == ("wedgeindex", "zeta")
+    # Every attribute counts here, exported or not, including PDG's own ``hip``.
+    assert cache_info.attribute_names == ("hip", "wedgeindex", "zeta")
     # The cook set names the cache only.
     assert cache_info.in_cook_set is True
     assert infos["render"].in_cook_set is False
@@ -1618,6 +1621,52 @@ def test_a_read_driven_by_an_attribute_records_its_evaluated_static_prefix() -> 
     }
     # Without an expander nothing is evaluated.
     assert set(_prefixes(_pyro_karma({"file": "$HIP/w`@i`"}), expand=None).values()) == {""}
+
+
+def test_a_read_records_the_variables_houdini_leaves_undefined() -> None:
+    """Each ``$NAME`` the session's expander refuses is recorded once, and ``$HIP`` is not.
+
+    The attribute check needs this to tell ``$WEDGEINDEX``, which expands to nothing,
+    from ``$HIP``, which every item also carries as an attribute.
+    """
+    top: _Hom = _Hom(
+        "/obj/topnet1/t",
+        category="Top",
+        parms=[_file("picture", "/v", "$HIP/w${WEDGEINDEX}/a.$WEDGEINDEX.exr")],
+    )
+    (read,) = collect_scene_reads({"t": top}, expand=_hip).reads
+    assert read.undefined_variables == ("WEDGEINDEX",)
+    # Without an expander nothing is judged undefined.
+    (unknown,) = collect_scene_reads({"t": top}).reads
+    assert unknown.undefined_variables == ()
+
+
+@pytest.mark.parametrize(
+    "type_name, method, parm, expected",
+    [
+        ("filecache::2.0", 1, "file", True),
+        ("filecache::2.0", 0, "file", False),
+        ("filecache::2.0", 1, "basedir", False),
+        ("file", 1, "file", False),
+    ],
+)
+def test_a_file_cache_file_is_a_write_only_when_its_write_uses_it(
+    type_name: str, method: int, parm: str, expected: bool
+) -> None:
+    """A File Cache writes ``file`` only with ``filemethod`` on, and a File SOP's ``file`` is only a read."""
+    cache: _Hom = _Hom(
+        "/obj/topnet1/t",
+        category="Top",
+        type_name=type_name,
+        parms=[
+            _file(parm, "/proj/geo/a.bgeo.sc"),
+            _Parm("filemethod", method, kind="", template="Toggle"),
+        ],
+    )
+    (read,) = collect_scene_reads({"t": cache}).reads
+    assert read.is_file_cache_write is expected
+    # It stays a read for matching, so a step that loads the cache keeps its edge.
+    assert read.is_output is False
 
 
 def test_os_in_a_copied_parm_names_the_node_that_holds_the_text() -> None:

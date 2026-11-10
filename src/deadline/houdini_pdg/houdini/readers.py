@@ -69,7 +69,7 @@ def node_infos(
 
     # During a cook, drop the items PDG will not schedule. A node left with none
     # is outside the cook.
-    items, item_upstream, attributes = _generated(dependency_graph)
+    items, item_upstream, attributes, carried = _generated(dependency_graph)
     outside: Set[str] = set()
     cached: Dict[str, Tuple[RawItem, ...]] = {}
     requested: Optional[Set[str]] = (
@@ -115,6 +115,7 @@ def node_infos(
                 upstream=tuple(sorted(upstream - {name})),
                 items=tuple(items.get(name, ())),
                 exported_attribute_names=tuple(sorted(attributes.get(name, ()))),
+                attribute_names=tuple(sorted(carried.get(name, ()))),
                 schedulable=job_script,
                 in_cook_set=in_cook(name),
                 cook_type=_cook_type(pdg_node, hom),
@@ -142,6 +143,7 @@ def node_infos(
                 upstream=tuple(sorted(item_upstream.get(name, set()) - {name})),
                 items=tuple(items[name]),
                 exported_attribute_names=tuple(sorted(attributes.get(name, ()))),
+                attribute_names=tuple(sorted(carried.get(name, ()))),
                 schedulable=None,
                 in_cook_set=in_cook(name),
             )
@@ -183,6 +185,11 @@ def collect_scene_reads(
                 node_path: str = _path_of(node)
                 node_name: str = _name_of(node)
                 node_type: str = _node_type_name(node)
+                # A File Cache writes its ``file`` when ``filemethod`` is on, because
+                # its ``sopoutput`` then copies ``file``.
+                file_cache_writes: bool = node_type == _FILE_CACHE and bool(
+                    _call(_call(node, "parm", "filemethod"), "eval")
+                )
                 for parm, raw, value, owner in _file_parms(node, node_name):
                     reads.append(
                         SceneRead(
@@ -193,6 +200,8 @@ def collect_scene_reads(
                             path=value,
                             is_output=is_output_parm(node_type, parm),
                             static_prefix=_static_prefix(raw, owner, expand),
+                            undefined_variables=_undefined_variables(raw, expand),
+                            is_file_cache_write=file_cache_writes and parm == "file",
                         )
                     )
             walked[step] = len(reached)
@@ -294,8 +303,8 @@ def _file_entries(files: Any) -> List[Dict[str, str]]:
 
 def _generated(
     dependency_graph: Any,
-) -> Tuple[Dict[str, List[RawItem]], Dict[str, Set[str]], Dict[str, Set[str]]]:
-    """Items, item-derived upstream nodes, and exported attribute names, by node name.
+) -> Tuple[Dict[str, List[RawItem]], Dict[str, Set[str]], Dict[str, Set[str]], Dict[str, Set[str]]]:
+    """Items, item-derived upstream nodes, exported attribute names, and all attribute names, by node name.
 
     ``dependencyGraph`` returns ``(dependencies, dependents, ready)``. Only the
     first is read: it maps each schedulable item to the items it waits on.
@@ -303,6 +312,7 @@ def _generated(
     items: Dict[str, List[RawItem]] = {}
     upstream: Dict[str, Set[str]] = {}
     attributes: Dict[str, Set[str]] = {}
+    carried: Dict[str, Set[str]] = {}
     # Each readable item joins its node's list, and its dependencies on other
     # nodes' items give that node's item-derived upstream.
     for work_item, depends_on in _dependency_map(dependency_graph):
@@ -313,12 +323,15 @@ def _generated(
         # An item on its own node's dependency adds no edge.
         items.setdefault(node_name, []).append(item)
         attributes.setdefault(node_name, set()).update(_exported_attributes(work_item))
+        carried.setdefault(node_name, set()).update(
+            str(name) for name in _iterate(_call(work_item, "attribNames"))
+        )
         edges: Set[str] = upstream.setdefault(node_name, set())
         for dep in _iterate(depends_on):
             dep_node: str = _str_attr(_attr(dep, "node", None), "name")
             if dep_node and dep_node != node_name:
                 edges.add(dep_node)
-    return items, upstream, attributes
+    return items, upstream, attributes, carried
 
 
 def _dependency_map(dependency_graph: Any) -> List[Tuple[Any, Any]]:
@@ -686,6 +699,27 @@ def _string_parms(node: Any, kind: str) -> List[Any]:
         except Exception:
             continue
     return found
+
+
+# The File Cache node type whose ``file`` parm is its write.
+_FILE_CACHE: str = "filecache::2.0"
+
+# ``$NAME`` or ``${NAME}``: group 1 holds the braced name, group 2 the bare one.
+_VARIABLE: "re.Pattern[str]" = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+
+
+def _undefined_variables(raw: str, expand: Optional[Callable[[str], str]]) -> Tuple[str, ...]:
+    """The ``$NAME`` variables in ``raw`` that ``expand`` raises for, each once. ``()`` without ``expand``."""
+    if expand is None:
+        return ()
+    found: Dict[str, None] = {}
+    for braced, bare in _VARIABLE.findall(raw):
+        name: str = braced or bare
+        try:
+            expand("$" + name)
+        except Exception:
+            found[name] = None
+    return tuple(found)
 
 
 # ``$OS`` and ``${OS}``: the name of the node that holds the parm.

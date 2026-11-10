@@ -2180,6 +2180,131 @@ def test_an_attribute_variable_is_reported_even_without_a_scene_walk_report() ->
     }
 
 
+# Attribute names a ROP Fetch work item carries in the Pyro Bonfire scene, as
+# ``attribNames`` reports them. None is exported, and ``hip`` is among them.
+PYRO_ATTRIBUTES: Tuple[str, ...] = (
+    "densityThreshold",
+    "executeparm",
+    "frame",
+    "hip",
+    "outputparm",
+    "partitionsize",
+    "range",
+    "voxelSize",
+    "wedgeattribs",
+    "wedgecount",
+    "wedgeindex",
+    "wedgenum",
+    "wedgetotal",
+)
+
+
+def _pyro_write(
+    step: str, node_path: str, parm: str, raw: str, undefined: Tuple[str, ...], **kwargs: Any
+) -> SceneRead:
+    """A Pyro Bonfire write parm as the scene walk records it, with the variables Houdini left undefined."""
+    return SceneRead(
+        step=step,
+        node_path=node_path,
+        parm=parm,
+        raw=raw,
+        path=raw.replace("$HIP", WORKING_DIR),
+        undefined_variables=undefined,
+        **kwargs,
+    )
+
+
+def _pyro_refusals(*reads: SceneRead) -> Set[str]:
+    """The attribute-as-variable subjects for ``reads`` over the pyro cache and karma steps."""
+    nodes: List[NodeInfo] = [
+        _node("ropfetch_pyro_cache", count=6, attribute_names=PYRO_ATTRIBUTES),
+        _node("ropfetch_karma", ["ropfetch_pyro_cache"], 6, attribute_names=PYRO_ATTRIBUTES),
+    ]
+    snapshot: GraphSnapshot = synthesize(nodes)
+    report: ReadReport = match_reads(snapshot, list(reads), WORKING_DIR)
+    verdict: Verdict = validate(
+        _ctx(nodes, snapshot=snapshot, reads=report, working_dir=WORKING_DIR)
+    )
+    return _subjects(verdict, RefusalScenario.ATTRIBUTE_AS_VARIABLE)
+
+
+def test_a_file_cache_path_with_an_unexported_attribute_variable_is_refused() -> None:
+    """``$WEDGEINDEX`` in a File Cache's ``file`` expands to nothing, so all 6 wedges write one file.
+
+    The attribute isn't exported, so only its name and the empty expansion show it.
+    The parm spells it twice and is refused once.
+    """
+    write: SceneRead = _pyro_write(
+        "ropfetch_pyro_cache",
+        "/obj/pyro/pyro_cache",
+        "file",
+        "$HIP/geo/$OS/wedge$WEDGEINDEX/$OS.w$WEDGEINDEX.$F4.bgeo.sc",
+        ("WEDGEINDEX",),
+        is_file_cache_write=True,
+    )
+    assert _pyro_refusals(write) == {"/obj/pyro/pyro_cache parm 'file'"}
+
+
+def test_a_render_path_with_an_unexported_attribute_variable_is_refused() -> None:
+    """Karma's ``picture`` with ``$WEDGEINDEX`` is refused, though its directory uses `` `@wedgeindex` `` correctly."""
+    write: SceneRead = _pyro_write(
+        "ropfetch_karma",
+        "/obj/render_bonfire/karma_bonfire",
+        "picture",
+        "$HIP/render/$OS/wedge`@wedgeindex`/$OS.w$WEDGEINDEX.$F4.png",
+        ("WEDGEINDEX",),
+        is_output=True,
+    )
+    assert _pyro_refusals(write) == {"/obj/render_bonfire/karma_bonfire parm 'picture'"}
+
+
+def test_hip_is_not_refused_though_hip_is_an_attribute() -> None:
+    """``$HIP`` is defined in the session, so a write using it is fine even though every item has ``hip``."""
+    write: SceneRead = _pyro_write(
+        "ropfetch_karma",
+        "/obj/render_bonfire/karma_bonfire",
+        "picture",
+        "$HIP/render/out.$F4.png",
+        (),
+        is_output=True,
+    )
+    assert _pyro_refusals(write) == set()
+
+
+def test_the_scenes_own_backtick_paths_are_not_refused() -> None:
+    """The scene as shipped spells the wedge as `` `@wedgeindex` ``, which is right, so neither write is refused."""
+    cache: SceneRead = _pyro_write(
+        "ropfetch_pyro_cache",
+        "/obj/pyro/pyro_cache",
+        "file",
+        "$HIP/geo/$OS/wedge`@wedgeindex`/$OS.w`@wedgeindex`.$F4.bgeo.sc",
+        (),
+        is_file_cache_write=True,
+    )
+    picture: SceneRead = _pyro_write(
+        "ropfetch_karma",
+        "/obj/render_bonfire/karma_bonfire",
+        "picture",
+        "$HIP/render/$OS/wedge`@wedgeindex`/$OS.w`@wedgeindex`.$F4.png",
+        (),
+        is_output=True,
+    )
+    assert _pyro_refusals(cache, picture) == set()
+
+
+def test_a_defined_variable_that_matches_an_unexported_attribute_is_not_refused() -> None:
+    """A carried attribute counts only when Houdini leaves ``$NAME`` undefined, not by its name alone."""
+    write: SceneRead = _pyro_write(
+        "ropfetch_karma",
+        "/obj/render_bonfire/karma_bonfire",
+        "picture",
+        "$HIP/render/w$WEDGEINDEX.png",
+        (),
+        is_output=True,
+    )
+    assert _pyro_refusals(write) == set()
+
+
 # -- runtime files with no producer --------------------------------------------
 
 

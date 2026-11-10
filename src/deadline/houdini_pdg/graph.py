@@ -75,6 +75,9 @@ class NodeInfo:
     #: attributes such as ``hip`` are left out, or ``$HIP`` would look like a
     #: misspelled attribute.
     exported_attribute_names: Tuple[str, ...] = ()
+    #: Every attribute the node's items carry, from ``attribNames``, spelled as PDG
+    #: spells them. It includes PDG's own, such as ``hip``.
+    attribute_names: Tuple[str, ...] = ()
     #: Whether the node runs a command on a worker, known from the node itself
     #: before it generates items. None when unknown.
     schedulable: Optional[bool] = None
@@ -162,6 +165,7 @@ class StepSpec:
     #: pruned, even when another path implies the order.
     data_dependencies: Tuple[str, ...] = ()
     exported_attribute_names: Tuple[str, ...] = ()
+    attribute_names: Tuple[str, ...] = ()
 
     @property
     def task_count(self) -> int:
@@ -295,6 +299,7 @@ def synthesize(
                 items=items,
                 data_dependencies=tuple(sorted(accepted.get(name, set()) & kept)),
                 exported_attribute_names=node.exported_attribute_names,
+                attribute_names=node.attribute_names,
             )
         )
 

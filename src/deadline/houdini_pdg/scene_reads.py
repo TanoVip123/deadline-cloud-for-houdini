@@ -124,6 +124,12 @@ class SceneRead:
     #: When ``raw`` depends on a work item, the authored text before the first
     #: expression, evaluated. ``""`` when it cannot be evaluated.
     static_prefix: str = ""
+    #: The ``$NAME`` variables in ``raw`` this Houdini session doesn't define, as
+    #: spelled. Houdini expands each one to nothing.
+    undefined_variables: Tuple[str, ...] = ()
+    #: Whether the parm is a File Cache's ``file`` while its write uses it. Only the
+    #: attribute check counts it as a write, so steps that load the cache keep their edge.
+    is_file_cache_write: bool = False
 
 
 @dataclass(frozen=True)
@@ -169,9 +175,9 @@ class ReadMatch:
 class AttributeVariableUse:
     """A write parm that spells a work item attribute as a Houdini variable.
 
-    ``$NAME`` resolves only on the worker, where exported attributes become
-    environment variables. PDG records the path on the workstation, where it
-    resolves to nothing, so the recorded and written paths differ. The fix is
+    ``$NAME`` expands to nothing on the workstation, where PDG records the path.
+    It resolves on the worker only when the attribute is exported, so the recorded
+    and written paths differ, or every work item writes one file. The fix is
     `` `@name` ``.
     """
 
@@ -559,25 +565,33 @@ def _unportable(reads: Sequence[SceneRead], working_dir: str) -> Tuple[SceneRead
 def _attribute_variables(
     reads: Sequence[SceneRead], snapshot: GraphSnapshot
 ) -> Tuple[AttributeVariableUse, ...]:
-    """Write parms that spell one of the same step's exported attributes as ``$NAME``.
+    """Write parms that spell one of the same step's attributes as ``$NAME``.
 
-    Scoped per step: a variable is judged only against its own step's attributes.
+    An exported attribute always counts. Any other attribute counts when this
+    session doesn't define ``$NAME``, so ``$HIP`` is never one, though ``hip`` is an
+    attribute. Scoped per step: a variable is judged only against its own step's attributes.
     """
     # Each step's attribute names, keyed case-folded so ``$WEDGEINDEX`` finds
     # ``wedgeindex``, with PDG's own spelling as the value.
-    by_step: Dict[str, Dict[str, str]] = {
+    exported: Dict[str, Dict[str, str]] = {
         step.name: {name.casefold(): name for name in step.exported_attribute_names}
+        for step in snapshot.steps
+    }
+    carried: Dict[str, Dict[str, str]] = {
+        step.name: {name.casefold(): name for name in step.attribute_names}
         for step in snapshot.steps
     }
     found: List[AttributeVariableUse] = []
     for read in reads:
         # Only writes are judged: a read that names a variable is not recorded.
-        index: Optional[Dict[str, str]] = by_step.get(read.step) if read.is_output else None
-        if not index:
+        if not (read.is_output or read.is_file_cache_write) or read.step not in exported:
             continue
         for braced, bare in _VARIABLE.findall(read.raw or ""):
             variable: str = braced or bare
-            attribute: Optional[str] = index.get(variable.casefold())
+            attribute: Optional[str] = exported[read.step].get(variable.casefold())
+            # A carried attribute counts only when the session expands ``$NAME`` to nothing.
+            if attribute is None and variable in read.undefined_variables:
+                attribute = carried[read.step].get(variable.casefold())
             if attribute is not None:
                 found.append(
                     AttributeVariableUse(

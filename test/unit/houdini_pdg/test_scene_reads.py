@@ -15,6 +15,7 @@ from __future__ import annotations
 import ntpath
 import os
 import posixpath
+from dataclasses import replace
 from typing import Dict, FrozenSet, List, Sequence, Set, Tuple
 
 import pytest
@@ -521,6 +522,48 @@ def test_offenders_are_exactly_writes_naming_their_own_attributes(
     assert len(uses) == (1 if is_output else 0)
     if uses:
         assert uses[0].attribute == attribute and uses[0].variable == name
+
+
+def test_a_file_cache_write_is_still_matched_as_a_read() -> None:
+    """A File Cache's ``file`` is judged as a write by the attribute check only.
+
+    A step that loads the cache reads that parm, so matching must still give it
+    the data edge, or its worker never syncs the cache.
+    """
+    cache: StepSpec = _step(
+        "ropfetch_pyro_cache",
+        [f"{WORK}/geo/pyro_cache/wedge{i}/pyro_cache.w{i}.0001.bgeo.sc" for i in range(2)],
+    )
+    karma: StepSpec = _step("ropfetch_karma")
+    load: SceneRead = SceneRead(
+        step="ropfetch_karma",
+        node_path="/obj/pyro/pyro_cache",
+        parm="file",
+        raw="$HIP/geo/$OS/wedge`@wedgeindex`/$OS.w`@wedgeindex`.$F4.bgeo.sc",
+        path=f"{WORK}/geo/pyro_cache/wedge/pyro_cache.w.0001.bgeo.sc",
+        static_prefix=f"{WORK}/geo/pyro_cache/wedge",
+        is_file_cache_write=True,
+    )
+    report: ReadReport = match_reads(GraphSnapshot(steps=(cache, karma)), [load], WORK)
+    assert report.data_edges == {"ropfetch_karma": frozenset({"ropfetch_pyro_cache"})}
+    assert not is_output_parm("filecache::2.0", "file")
+
+
+def test_an_unexported_attribute_counts_only_when_its_variable_is_undefined() -> None:
+    """A carried attribute is an offender only when Houdini expands ``$NAME`` to nothing.
+
+    ``$HIP`` is defined, so a write using it is never refused, though ``hip`` is an attribute.
+    """
+    step: StepSpec = replace(_step("s"), attribute_names=("hip", "wedgeindex"))
+    reads: List[SceneRead] = [
+        replace(
+            _read("s", "", raw="$HIP/w$WEDGEINDEX.exr", parm="picture"),
+            undefined_variables=("WEDGEINDEX",),
+        ),
+        _read("s", "", raw="$HIP/w$WEDGEINDEX.exr", parm="vm_picture"),
+    ]
+    (use,) = _attribute_uses(reads, step)
+    assert (use.parm, use.variable, use.attribute) == ("picture", "WEDGEINDEX", "wedgeindex")
 
 
 # -- reads that depend on a work item -----------------------------------------
