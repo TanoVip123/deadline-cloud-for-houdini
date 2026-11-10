@@ -1190,18 +1190,12 @@ def _path_of(node: Any) -> str:
 _QUEUE_PARAMETERS_TAB: str = "Shared Job Settings"
 
 
-def rebuild_layout_from_definition(node: Any) -> None:
-    """Lay the node's parms out as its current definition does, keeping the queue parameter fields.
-
-    The ROP's queue parameter update stores the node's whole layout on the node, so a node
-    saved before the definition changed keeps its old tabs. Call this before that update.
-    """
+def _find_queue_folders(node: Any) -> List[Any]:
+    """The ROP's queue parameter folders in the tab, which are the ones holding its prefixed fields."""
     from deadline.houdini_submitter.python.deadline_cloud_for_houdini.queue_parameters import (
         _QUEUE_ENVIRONMENT_NAME_PREFIX,
     )
 
-    # The ROP's folders in the tab are the ones holding its prefixed fields. Each field's
-    # value is kept, because the folders come back with their defaults.
     tab: Any = node.parmTemplateGroup().findFolder(_QUEUE_PARAMETERS_TAB)
     folders: List[Any] = [
         template
@@ -1212,16 +1206,45 @@ def rebuild_layout_from_definition(node: Any) -> None:
             for field in template.parmTemplates()
         )
     ]
+    return folders
+
+
+def move_queue_folders_above_submit(node: Any) -> None:
+    """Put the queue parameter folders above Submit, so Submit stays last in its tab.
+
+    The ROP's queue update adds each folder at the end of the tab, so call this after it.
+    """
+    # With no folder, nothing moves, so the node's layout isn't stored on it for nothing.
+    folders: List[Any] = _find_queue_folders(node)
+    if not folders:
+        return
+    # Each folder is taken out and put back just before Submit, keeping their order.
+    group: Any = node.parmTemplateGroup()
+    for folder in folders:
+        group.remove(folder.name())
+        group.insertBefore("submit", folder)
+    node.setParmTemplateGroup(group)
+
+
+def rebuild_layout_from_definition(node: Any) -> None:
+    """Lay the node's parms out as its current definition does, keeping the queue parameter fields.
+
+    The ROP's queue parameter update stores the node's whole layout on the node, so a node
+    saved before the definition changed keeps its old tabs. Call this before that update.
+    """
+    # Each field's value is kept, because the folders come back with their defaults.
+    folders: List[Any] = _find_queue_folders(node)
     values: Dict[str, Any] = {
         field.name(): node.parmTuple(field.name()).eval()
         for folder in folders
         for field in folder.parmTemplates()
     }
     # Removing every spare parm brings back the definition's tabs, and the definition's own
-    # parms keep their values. The folders then go back where the ROP puts them.
+    # parms keep their values. The folders then go back above Submit, as after a queue update.
     node.removeSpareParms()
     for folder in folders:
         node.addSpareParmTuple(folder, (_QUEUE_PARAMETERS_TAB,))
+    move_queue_folders_above_submit(node)
     for name, value in values.items():
         node.parmTuple(name).set(value)
 

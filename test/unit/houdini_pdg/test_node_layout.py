@@ -14,7 +14,10 @@ import pytest
 # The fakes come first, because they install the fake ``hou`` the host module imports.
 from .houdini_fakes import FakeHou, install_hou
 
-from deadline.houdini_pdg.houdini.host import rebuild_layout_from_definition
+from deadline.houdini_pdg.houdini.host import (
+    move_queue_folders_above_submit,
+    rebuild_layout_from_definition,
+)
 
 
 class FakeTemplate:
@@ -57,6 +60,18 @@ def _find_folder(templates: Sequence[FakeTemplate], label: str) -> Optional[Fake
     return None
 
 
+def _siblings(templates: List[FakeTemplate], name: str) -> Optional[List[FakeTemplate]]:
+    """The list holding the first template named ``name``, searched depth first."""
+    for template in templates:
+        if template.name() == name:
+            return templates
+        if template.children is not None:
+            found: Optional[List[FakeTemplate]] = _siblings(template.children, name)
+            if found is not None:
+                return found
+    return None
+
+
 class FakeParmTemplateGroup:
     """A ``hou.ParmTemplateGroup``, a copy of the node's layout."""
 
@@ -65,6 +80,19 @@ class FakeParmTemplateGroup:
 
     def findFolder(self, label: str) -> Optional[FakeTemplate]:
         return _find_folder(self.entries, label)
+
+    def remove(self, name: str) -> None:
+        # Houdini raises when the name isn't in the group.
+        siblings: Optional[List[FakeTemplate]] = _siblings(self.entries, name)
+        assert siblings is not None, name
+        siblings[:] = [template for template in siblings if template.name() != name]
+
+    def insertBefore(self, name: str, template: FakeTemplate) -> None:
+        # The new template goes into the same folder as the one it is put before.
+        siblings: Optional[List[FakeTemplate]] = _siblings(self.entries, name)
+        assert siblings is not None, name
+        index: int = [entry.name() for entry in siblings].index(name)
+        siblings.insert(index, copy.deepcopy(template))
 
 
 class FakeParmTuple:
@@ -85,7 +113,8 @@ class FakeLayoutNode:
     """A node's layout as Houdini keeps it: the definition's, or one stored on the node.
 
     Removing the spare parms brings back the definition's layout and drops the spare
-    values, and an added spare parm starts at its default, as Houdini does.
+    values, and an added spare parm starts at its default, as Houdini does. Setting a
+    layout stores it on the node, so the node no longer follows its definition's layout.
     """
 
     def __init__(
@@ -99,6 +128,7 @@ class FakeLayoutNode:
         self.layout: List[FakeTemplate] = layout
         self.spare: Set[str] = set(spare)
         self.values: Dict[str, Any] = dict(values)
+        self.stores_layout: bool = False
 
     def parmTemplateGroup(self) -> FakeParmTemplateGroup:
         return FakeParmTemplateGroup(copy.deepcopy(self.layout))
@@ -109,9 +139,17 @@ class FakeLayoutNode:
 
     def removeSpareParms(self) -> None:
         self.layout = copy.deepcopy(self.definition)
+        self.stores_layout = False
         for name in self.spare:
             self.values.pop(name, None)
         self.spare = set()
+
+    def setParmTemplateGroup(self, group: FakeParmTemplateGroup) -> None:
+        # The group is stored as the node's layout, and anything the definition lacks is spare.
+        self.layout = copy.deepcopy(group.entries)
+        self.stores_layout = True
+        declared: Set[str] = {name for entry in self.definition for name in entry.names()}
+        self.spare = {name for entry in self.layout for name in entry.names()} - declared
 
     def addSpareParmTuple(self, template: FakeTemplate, in_folder: Tuple[str, ...]) -> None:
         # Houdini refuses a folder path that the layout doesn't have.
@@ -269,8 +307,8 @@ def test_an_old_nodes_submit_below_the_tabs_moves_into_shared_job_settings(
     assert node.folder("Shared Job Settings") == [
         "folder0",
         "folder1",
-        "submit",
         "queue_env_do_not_use_Conda",
+        "submit",
     ]
     # Only the Conda fields are spare, and every value comes back.
     assert node.spare == set(_conda().names())
@@ -283,12 +321,12 @@ def test_the_conda_fields_stay_in_shared_job_settings_with_their_values(scene: F
     # Rebuild the old node, then read where the Conda folder is and what its fields hold.
     node: FakeLayoutNode = _frozen_two_tab_node()
     rebuild_layout_from_definition(node)
-    # The Conda folder is added after the definition's own parms, so it follows Submit.
+    # The Conda folder goes back above Submit, so Submit stays last in the tab.
     assert node.folder("Shared Job Settings") == [
         "folder0",
         "folder1",
-        "submit",
         "queue_env_do_not_use_Conda",
+        "submit",
     ]
     assert node.folder("Conda") == [_PACKAGES, _CHANNELS]
     assert {name: node.values[name] for name in _CONDA_VALUES} == _CONDA_VALUES
@@ -311,3 +349,41 @@ def test_a_new_node_keeps_the_definitions_layout_and_gets_no_spare_parm(scene: F
     assert node.tabs() == ["Shared Job Settings", "PDG", "Job Attachments", "Host Requirements"]
     assert node.folder("Shared Job Settings") == ["folder0", "folder1", "submit"]
     assert node.spare == set() and node.values == _REAL_VALUES
+
+
+def _no_group_folder() -> FakeTemplate:
+    """The ROP's folder for queue parameters with no group, whose own name has no prefix."""
+    return FakeTemplate(
+        "no_group_queue_environment",
+        "Queue Environment",
+        [FakeTemplate("queue_env_do_not_use_RezPackages")],
+    )
+
+
+def test_queue_folders_added_after_submit_move_above_it_in_order(scene: FakeHou) -> None:
+    """The ROP's queue update adds its folders at the end of the tab, which put them below Submit."""
+    # A node laid out as the definition, then given two folders the way the ROP's update adds them.
+    node: FakeLayoutNode = FakeLayoutNode(_definition(), _definition(), set(), dict(_REAL_VALUES))
+    for folder in (_conda(), _no_group_folder()):
+        node.addSpareParmTuple(folder, ("Shared Job Settings",))
+    node.values.update(_CONDA_VALUES)
+    move_queue_folders_above_submit(node)
+    assert node.folder("Shared Job Settings") == [
+        "folder0",
+        "folder1",
+        "queue_env_do_not_use_Conda",
+        "no_group_queue_environment",
+        "submit",
+    ]
+    # Moving the folders changes no value and makes no definition parm spare.
+    assert {name: node.values[name] for name in _CONDA_VALUES} == _CONDA_VALUES
+    assert node.spare == set(_conda().names()) | set(_no_group_folder().names())
+
+
+def test_a_node_with_no_queue_folder_keeps_the_definitions_layout(scene: FakeHou) -> None:
+    """A stored layout stops a node from following its definition, so a node with no folder keeps none."""
+    # A node that was never logged in, so the ROP's update never added a folder.
+    node: FakeLayoutNode = FakeLayoutNode(_definition(), _definition(), set(), dict(_REAL_VALUES))
+    move_queue_folders_above_submit(node)
+    assert not node.stores_layout
+    assert node.folder("Shared Job Settings") == ["folder0", "folder1", "submit"]

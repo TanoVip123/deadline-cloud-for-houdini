@@ -128,6 +128,26 @@ def test_create_and_load_rebuild_the_tabs_before_the_rops_queue_update() -> None
 
 
 @pytest.mark.parametrize(
+    "function, rop_call",
+    [
+        ("def callback", "rop_callback(kwargs)"),
+        ("def update_queue_parameters_callback", "rop(kwargs)"),
+    ],
+)
+def test_each_rop_call_is_followed_by_moving_the_queue_folders_above_submit(
+    function: str, rop_call: str
+) -> None:
+    """The ROP's queue update adds its folders below Submit, so each path that runs it moves them back."""
+    # Read the one function, then check the move comes after the ROP's call.
+    module: str = _read(_NODE, "PythonModule")
+    start: int = module.index(function + "(")
+    end: int = module.find("\ndef ", start + 1)
+    body: str = module[start : end if end >= 0 else len(module)]
+    move: str = 'move_queue_folders_above_submit(kwargs["node"])'
+    assert 0 <= body.index(rop_call) < body.index(move)
+
+
+@pytest.mark.parametrize(
     "parm", ["priority", "failed_tasks_limit", "task_retry_limit", "max_worker_count"]
 )
 def test_the_job_number_parms_are_plain_integer_fields(parm: str) -> None:
