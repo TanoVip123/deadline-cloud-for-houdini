@@ -631,6 +631,7 @@ def test_submit_reads_the_items_with_partitions_expanded(scene: FakeHou) -> None
 
     In Houdini 21.0 the expanded graph gave every step its items with no false refusal.
     """
+    # Generate one item per step, Submit, and read which graph the scheduler was asked for.
     network: FakeNetwork = _network()
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
     scheduler: Any = network.context.schedulers["deadlinecloudscheduler1"]
