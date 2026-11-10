@@ -685,9 +685,8 @@ class Cook:
                 env=self._environment(),
             )
             # Items from cache say why, and a cook with no step at all says why too.
-            found: Verdict = cooked_from_cache(ctx, offered_nothing=True)
-            if not found.refusals:
-                found = no_farm_work(ctx)
+            cached: Verdict = cooked_from_cache(ctx, offered_nothing=True)
+            found: Verdict = cached if cached.refusals else no_farm_work(ctx)
         except Exception:
             _logger.warning("Could not read which work items PDG cooked from cache.", exc_info=True)
             return

@@ -585,6 +585,7 @@ def test_generate_when_is_read_by_its_label_not_its_position(
 
     The menu's tokens are not in label order, so reading by position names the wrong setting.
     """
+    # One step whose TOP node carries the Generate When parm under test.
     node: _PdgNode = _PdgNode("n", command="x")
     _topnet(_wire(node, "/obj/topnet1/n", parms=parms))
     (info,) = node_infos([node], {})

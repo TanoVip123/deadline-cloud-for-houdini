@@ -466,6 +466,7 @@ _GENERATE_WHEN: Dict[str, bool] = {
 
 def _dynamic_by_parm(hom: Any) -> Optional[bool]:
     """Whether the node's own Generate When makes it dynamic, read by label. None for Automatic or unknown."""
+    # The menu's tokens are out of label order, so the label names the setting.
     parm: Any = _call(hom, "parm", "pdg_workitemgeneration")
     if parm is None:
         return None

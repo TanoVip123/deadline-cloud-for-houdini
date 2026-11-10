@@ -317,6 +317,7 @@ def test_a_cook_set_with_no_step_is_refused_before_anything_generates(
     A name PDG gives that matches no node stands down, since an asset's inner
     steps may not exist yet.
     """
+    # Two wedges and a render step, none generated, judged against each cook set.
     nodes: List[NodeInfo] = [
         _node("wedge1", count=0, schedulable=False),
         _node("wedge2", ["wedge1"], count=0, schedulable=False),
@@ -361,6 +362,7 @@ def test_a_requested_empty_step_is_left_to_step_without_items_not_no_farm_work()
 
 def _ancestors_of(nodes: Sequence[NodeInfo], name: str) -> Set[str]:
     """Every node ``name`` reaches by following upstream wires, by brute force."""
+    # A plain walk with a visited set, the model the code is checked against.
     by_name: Dict[str, NodeInfo] = {n.name: n for n in nodes}
     found: Set[str] = set()
     frontier: List[str] = list(by_name[name].upstream) if name in by_name else []
@@ -404,6 +406,7 @@ def test_every_dynamic_cause_is_named_once_and_never_as_a_step_without_items(
 
 def test_one_dynamic_parm_gives_one_refusal_not_one_per_node_below_it() -> None:
     """The measured case: one node set to Each Upstream Item is Cooked, and PDG flags the nodes below too."""
+    # sparks is set to dynamic, and PDG flags everything below it as dynamic too.
     nodes: List[NodeInfo] = [
         _node("pyro"),
         _node("sparks", ["pyro"], count=0, is_dynamic=True, dynamic_by_parm=True),
@@ -646,6 +649,7 @@ def test_a_step_without_items_is_refused_when_it_was_asked_for_or_is_needed(
     A dynamic node, an In-Process step, a Service node and an overridden step
     have their own refusal, and so does every dropped step below one of them.
     """
+    # The causes, and the dropped steps below one, which another refusal explains.
     snapshot: GraphSnapshot = synthesize(nodes)
     verdict: Verdict = validate(_ctx(nodes, snapshot=snapshot))
     by_name: Dict[str, NodeInfo] = {n.name: n for n in nodes}
@@ -688,6 +692,7 @@ def test_a_service_or_overridden_step_with_no_items_gets_one_refusal(
     cause: Dict[str, Any], scenario: RefusalScenario
 ) -> None:
     """The measured case had two extra refusals, for the Service step and the step below it."""
+    # karma has no items for the cause, and overlay and late sit below it.
     nodes: List[NodeInfo] = [
         _node("geo"),
         _node("karma", ["geo"], count=0, in_cook_set=True, **cause),

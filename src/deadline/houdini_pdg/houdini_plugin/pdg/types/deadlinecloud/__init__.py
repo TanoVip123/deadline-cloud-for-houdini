@@ -34,7 +34,12 @@ from deadline.houdini_pdg.diagnostics import CookJournal
 from deadline.houdini_pdg.errors import CookSetupError, GraphRefusedError, artist_message
 from deadline.houdini_pdg.farm_job import DeadlineFarmJob
 from deadline.houdini_pdg.graph import DeclaredFile
-from deadline.houdini_pdg.houdini.host import HoudiniPdgHost, PreCookChecks, cook_set_names
+from deadline.houdini_pdg.houdini.host import (
+    HoudiniPdgHost,
+    PreCookChecks,
+    cook_set_names,
+    show_error_later,
+)
 from deadline.houdini_pdg.houdini.settings import SchedulerSettings
 from deadline.houdini_pdg.ports import Clock, WorkItemHandle
 from deadline.houdini_pdg.submitter import _NO_FARM, _NO_QUEUE, PdgSubmitter
@@ -118,6 +123,8 @@ class DeadlineCloudPDGScheduler(PyScheduler):
         self._core: Optional[PdgScheduler] = None
         self._start_failed: bool = False
         self._scratch_dir: Optional[str] = None
+        # Whether this cook has shown its error popup, so each cook shows one.
+        self._popup_shown: bool = False
 
     def onStartCook(self, static: bool, cook_set: Any) -> bool:
         """Start a cook.
@@ -127,6 +134,7 @@ class DeadlineCloudPDGScheduler(PyScheduler):
         the first tick instead.
         """
         self._start_failed = False
+        self._popup_shown = False
         try:
             # One host per cook, so the scene files are scanned once per cook.
             host: HoudiniPdgHost = HoudiniPdgHost(self)
@@ -213,12 +221,21 @@ class DeadlineCloudPDGScheduler(PyScheduler):
             self._scratch_dir = None
 
     def _fail(self, callback: str, error: Exception) -> None:
-        # Log the traceback, and show the artist the error on the node.
+        # Log the traceback, and show the artist the error on the node, and once
+        # per cook in a popup.
         _logger.error("%s failed", callback, exc_info=error)
+        message: str = artist_message(error)
         try:
-            self.cookError(artist_message(error))
+            self.cookError(message)
         except Exception:
             _logger.exception("Could not show the error on the scheduler node")
+        if self._popup_shown:
+            return
+        self._popup_shown = True
+        try:
+            show_error_later(message)
+        except Exception:
+            _logger.exception("Could not show the error in a popup")
 
 
 #: The ``pdg.cookType`` members for a cook that only generates work items.

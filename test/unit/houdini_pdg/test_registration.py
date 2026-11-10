@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import sys
 import types
 from datetime import datetime, timezone
 from pathlib import Path
@@ -746,6 +747,7 @@ def test_a_cook_of_only_in_process_nodes_is_refused_at_its_start_before_the_farm
 
     PDG still starts the cook with the wedges as its cook set, so the start refuses it.
     """
+    # Start a cook of the wedge alone, then check the error and that no farm call ran.
     network: Network = build_network(PYRO_BONFIRE)
     cloud: FakeCloud = FakeCloud()
     scheduler: Any = _scheduler(network, cloud)
@@ -768,3 +770,71 @@ def test_a_cook_that_offered_nothing_and_had_no_step_says_so_at_its_end(scene: F
     assert scheduler.onStopCook(False) is True
     (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
     assert "wedge1" in error and "No node in this cook runs a command on a worker" in error
+
+
+class _Deferred:
+    """``hdefereval``: records what is queued for the main thread, and runs it only when asked."""
+
+    def __init__(self) -> None:
+        self.queued: List[Callable[[], Any]] = []
+
+    def executeDeferred(self, function: Callable[[], Any]) -> None:
+        self.queued.append(function)
+
+    def executeInMainThreadWithResult(self, function: Callable[..., Any], *args: Any) -> Any:
+        return function(*args)
+
+
+@pytest.fixture
+def ui(scene: FakeHou, monkeypatch: pytest.MonkeyPatch) -> _Deferred:
+    """A Houdini session with a UI, whose main-thread queue the test runs by hand."""
+    scene.ui = True
+    deferred: _Deferred = _Deferred()
+    monkeypatch.setitem(sys.modules, "hdefereval", deferred)
+    return deferred
+
+
+def test_a_refused_cook_shows_a_popup_with_the_node_errors_text(
+    scene: FakeHou, ui: _Deferred
+) -> None:
+    """The TOP Cook button gave only the error flag, so the artist didn't see the refusal.
+
+    The popup is queued, never shown on PDG's thread, so PDG never waits on a dialog.
+    """
+    scheduler: Any = _scheduler(build_network(COOKING_EXAMPLE))
+    scheduler.onStartCook(False, None)
+    (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
+    assert scene.messages.calls == [] and len(ui.queued) == 1
+    ui.queued[0]()
+    ((text, buttons),) = scene.messages.calls
+    assert text == error and buttons == ()
+    assert scene.messages.options[0]["severity"] == "Error"
+
+
+def test_a_cook_shows_one_popup_however_many_errors_it_has(scene: FakeHou, ui: _Deferred) -> None:
+    """A dialog per offered item would bury the artist, so each cook shows its first error only."""
+    network: Network = build_network(PYRO_BONFIRE)
+    scheduler: Any = _scheduler(network)
+    assert scheduler.onStartCook(False, [network.node("sim")]) is True
+    # An offer PDG can't describe fails, twice, in the same cook.
+    scheduler.onSchedule(object())
+    scheduler.onSchedule(object())
+    assert len([call for call in scheduler.calls if call[0] == "cookError"]) == 2
+    assert len(ui.queued) == 1
+    # The next cook is a new cook, so its refusal shows again.
+    scheduler.onStopCook(True)
+    network.node("render").isDynamic = True
+    scheduler.onStartCook(False, None)
+    assert len(ui.queued) == 2
+
+
+def test_without_a_ui_a_refused_cook_shows_no_popup(
+    scene: FakeHou, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hython has no one to read a dialog, so only the node error and the log carry the refusal."""
+    deferred: _Deferred = _Deferred()
+    monkeypatch.setitem(sys.modules, "hdefereval", deferred)
+    scheduler: Any = _scheduler(build_network(COOKING_EXAMPLE))
+    scheduler.onStartCook(False, None)
+    assert [call[0] for call in scheduler.calls].count("cookError") == 1
+    assert deferred.queued == [] and scene.messages.calls == []

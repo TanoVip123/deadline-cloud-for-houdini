@@ -544,6 +544,7 @@ def cook_set_without_steps(nodes: Sequence[NodeInfo], cook_set: Optional[Set[str
     It stands down when the set is unknown or names a node that isn't read, since
     an asset's inner steps may not exist yet.
     """
+    # Only a set whose every node is read and known to run no job script is refused.
     if not cook_set:
         return Verdict()
     by_name: Dict[str, NodeInfo] = {node.name: node for node in nodes}

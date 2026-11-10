@@ -180,13 +180,7 @@ class HoudiniPdgHost:
             self._generated = set()
             self._cook_set = frozenset(cook_set) if cook_set else None
         # The wiring, read once, so the wait can skip what lies below a dynamic node.
-        try:
-            wiring: Tuple[NodeInfo, ...] = self.on_main_thread(
-                lambda: readers.node_infos(_graph_nodes(context), None)
-            )
-        except Exception:
-            _logger.debug("Could not read the wiring for the generation wait", exc_info=True)
-            wiring = ()
+        wiring: Tuple[NodeInfo, ...] = self._read_wiring(context)
         handler: Any = context.addEventHandler(
             self._on_node_generated, pdg.EventType.NodeGenerated, True
         )
@@ -274,6 +268,14 @@ class HoudiniPdgHost:
         """The cook's settings, from the scheduler node's parms."""
         node: Any = self.scheduler_node()
         return self.on_main_thread(lambda: read_scheduler_settings(node))
+
+    def _read_wiring(self, context: Any) -> Tuple[NodeInfo, ...]:
+        """Every node and its upstream wires, or none when they can't be read."""
+        try:
+            return self.on_main_thread(lambda: readers.node_infos(_graph_nodes(context), None))
+        except Exception:
+            _logger.debug("Could not read the wiring for the generation wait", exc_info=True)
+            return ()
 
     def _on_node_generated(self, _handler: Any, event: Any) -> None:
         """Record the node PDG says finished generating."""
@@ -1007,6 +1009,7 @@ def _display_cook_set(node: Any, display: Any) -> Optional[FrozenSet[str]]:
     seen: Set[str] = set()
     stack: List[Any] = [display]
     while stack:
+        # Each node once by path, named as PDG names it.
         current: Any = stack.pop()
         path: str = _path_of(current)
         if not path or path in seen:
@@ -1070,6 +1073,18 @@ def _text_parm(node: Any, name: str) -> str:
     """A parm's value as text, or ``""`` when the node lacks it."""
     parm: Any = node.parm(name)
     return str(parm.evalAsString()) if parm is not None else ""
+
+
+def show_error_later(text: str) -> None:
+    """Queue an error popup on the main thread, when a UI exists, and return at once.
+
+    PDG's thread must never wait on a dialog, and with no UI nobody would read it.
+    """
+    if not hou.isUIAvailable():
+        return
+    import hdefereval  # type: ignore[import-not-found]
+
+    hdefereval.executeDeferred(lambda: _show(text, error=True))
 
 
 def _show(text: str, *, error: bool) -> None:

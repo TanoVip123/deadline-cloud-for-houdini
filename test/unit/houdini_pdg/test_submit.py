@@ -228,6 +228,7 @@ def test_the_refusal_popup_lists_one_refusal_per_line(scene: FakeHou) -> None:
 
 def test_submitting_a_display_node_with_no_step_above_it_is_refused(scene: FakeHou) -> None:
     """With the wedge displayed, the cook would run only in-process nodes and make no job."""
+    # Display the wedge, then Submit, which must refuse before cooking.
     network: Network = _network()
     network.topnet.display = network.node("wedge1").hom
     assert submit(network.scheduler_node, get_setting=_workstation) is False
