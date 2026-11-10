@@ -582,10 +582,11 @@ def test_a_bad_host_requirement_is_shown_before_anything_is_generated(scene: Fak
     """A typo on the Host Requirements tab must not cost the artist a whole generate first."""
     # A GPU minimum above its maximum.
     network: FakeNetwork = _network()
+    display: Any = network.topnet.displayNode()
     _with_requirements(network, hr_gpu_min=4, hr_gpu_max=2)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     assert "hr_gpu_min" in scene.messages.calls[0][0]
-    assert network.topnet.displayNode().generate_calls == []
+    assert display.generate_calls == []
 
 
 def test_a_missing_listed_file_is_shown_before_anything_is_generated(
@@ -597,6 +598,7 @@ def test_a_missing_listed_file_is_shown_before_anything_is_generated(
     node: Any = network.scheduler_node
     node.set_parm("input_filenames", 1)
     node.set_parm("input_filenames1", str(tmp_path / "nowhere.cube"), kind="FileReference")
+    display: Any = network.topnet.displayNode()
     assert submit(node, get_setting=_workstation) is False
     assert "input_filenames1" in scene.messages.calls[0][0]
-    assert network.topnet.displayNode().generate_calls == []
+    assert display.generate_calls == []
