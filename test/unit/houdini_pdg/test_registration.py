@@ -788,6 +788,7 @@ class _Deferred:
 @pytest.fixture
 def ui(scene: FakeHou, monkeypatch: pytest.MonkeyPatch) -> _Deferred:
     """A Houdini session with a UI, whose main-thread queue the test runs by hand."""
+    # Turn the UI on and install the queue in place of Houdini's module.
     scene.ui = True
     deferred: _Deferred = _Deferred()
     monkeypatch.setitem(sys.modules, "hdefereval", deferred)
@@ -801,6 +802,7 @@ def test_a_refused_cook_shows_a_popup_with_the_node_errors_text(
 
     The popup is queued, never shown on PDG's thread, so PDG never waits on a dialog.
     """
+    # Refuse a cook, see nothing shown yet, then run the queue and read the popup.
     scheduler: Any = _scheduler(build_network(COOKING_EXAMPLE))
     scheduler.onStartCook(False, None)
     (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
@@ -832,6 +834,7 @@ def test_without_a_ui_a_refused_cook_shows_no_popup(
     scene: FakeHou, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """hython has no one to read a dialog, so only the node error and the log carry the refusal."""
+    # A refused cook with no UI queues nothing and shows nothing.
     deferred: _Deferred = _Deferred()
     monkeypatch.setitem(sys.modules, "hdefereval", deferred)
     scheduler: Any = _scheduler(build_network(COOKING_EXAMPLE))

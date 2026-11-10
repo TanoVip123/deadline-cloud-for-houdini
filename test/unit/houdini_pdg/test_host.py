@@ -307,17 +307,22 @@ def test_a_step_with_a_queued_item_has_generated_without_announcing_it(scene: Fa
 
 @pytest.mark.parametrize(
     "dynamic, pending",
-    [("sim", ()), ("render", ("sim",)), ("montage", ("render", "sim"))],
+    [
+        (("sim", "render", "montage"), ()),
+        (("render", "montage"), ("sim",)),
+        (("montage",), ("render", "sim")),
+    ],
 )
-def test_a_dynamic_step_and_the_steps_below_it_are_not_awaited(
-    scene: FakeHou, dynamic: str, pending: Tuple[str, ...]
+def test_a_step_pdg_reports_dynamic_is_not_awaited(
+    scene: FakeHou, dynamic: Tuple[str, ...], pending: Tuple[str, ...]
 ) -> None:
     """A dynamic step generates only after its upstream items cook, which the wait holds back.
 
-    So the cook would stall until the timeout, and only then refuse the node.
+    So the cook would stall until the timeout. PDG flags the steps below one as dynamic too.
     """
     host, network = _watching()
-    network.node(dynamic).isDynamic = True
+    for name in dynamic:
+        network.node(name).isDynamic = True
     assert host.pending_generation() == pending
 
 

@@ -32,10 +32,10 @@ class GraphRefusedError(PDGSchedulerError):
 
     def __init__(self, verdict: Verdict) -> None:
         self.verdict = verdict
-        super().__init__(refusal_text(verdict.refusals))
+        super().__init__(format_refusals(verdict.refusals))
 
 
-def refusal_text(refusals: Sequence[Refusal]) -> str:
+def format_refusals(refusals: Sequence[Refusal]) -> str:
     """The refusals as one header line, then one "subject: detail remedy" line each."""
     lines: List[str] = [f"{r.subject}: {r.detail} {r.remedy}" for r in refusals]
     return "\n".join([f"The graph was refused ({len(lines)} refusal(s)):"] + lines)

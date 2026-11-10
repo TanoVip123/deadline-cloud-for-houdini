@@ -338,8 +338,8 @@ def _project(by_name: Mapping[str, NodeInfo], schedulable: AbstractSet[str]) -> 
     return projected
 
 
-def upstream_closure(nodes: Sequence[NodeInfo], start: AbstractSet[str]) -> Dict[str, Set[str]]:
-    """Each node's ancestors, by its upstream wires, that are in ``start``. Terminates on a cycle."""
+def find_ancestors_among(nodes: Sequence[NodeInfo], among: AbstractSet[str]) -> Dict[str, Set[str]]:
+    """Each node's ancestors, by its upstream wires, that are in ``among``. Terminates on a cycle."""
     by_name: Dict[str, NodeInfo] = {node.name: node for node in nodes}
     found: Dict[str, Set[str]] = {}
     for node in nodes:
@@ -352,7 +352,7 @@ def upstream_closure(nodes: Sequence[NodeInfo], start: AbstractSet[str]) -> Dict
                 continue
             seen.add(current)
             stack.extend(by_name[current].upstream)
-        found[node.name] = seen & set(start)
+        found[node.name] = seen & set(among)
     return found
 
 

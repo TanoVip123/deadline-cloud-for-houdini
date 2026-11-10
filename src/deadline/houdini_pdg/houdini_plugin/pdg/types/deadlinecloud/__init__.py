@@ -38,7 +38,7 @@ from deadline.houdini_pdg.houdini.host import (
     HoudiniPdgHost,
     PreCookChecks,
     cook_set_names,
-    show_error_later,
+    show_error_popup,
 )
 from deadline.houdini_pdg.houdini.settings import SchedulerSettings
 from deadline.houdini_pdg.ports import Clock, WorkItemHandle
@@ -233,7 +233,7 @@ class DeadlineCloudPDGScheduler(PyScheduler):
             return
         self._popup_shown = True
         try:
-            show_error_later(message)
+            show_error_popup(message)
         except Exception:
             _logger.exception("Could not show the error in a popup")
 

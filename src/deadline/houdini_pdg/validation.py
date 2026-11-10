@@ -25,7 +25,7 @@ from .graph import (
     NodeInfo,
     RawItem,
     WorkItemSpec,
-    upstream_closure,
+    find_ancestors_among,
 )
 from .scene_reads import (
     AttributeVariableUse,
@@ -323,10 +323,10 @@ def _undeliverable_reason(
 # -- the graph's shape --------------------------------------------------------
 
 
-def _dynamic_causes(nodes: Sequence[NodeInfo]) -> List[NodeInfo]:
+def _find_dynamic_causes(nodes: Sequence[NodeInfo]) -> List[NodeInfo]:
     """The dynamic nodes that cause the dynamism, not those PDG flags only for being below one."""
     dynamic: Set[str] = {node.name for node in nodes if node.is_dynamic}
-    above: Dict[str, Set[str]] = upstream_closure(nodes, dynamic)
+    above: Dict[str, Set[str]] = find_ancestors_among(nodes, dynamic)
     causes: List[NodeInfo] = [
         node
         for node in nodes
@@ -357,7 +357,7 @@ def _check_dynamic_nodes(ctx: ValidationContext) -> Verdict:
                     "this network with another scheduler."
                 ),
             )
-            for node in _dynamic_causes(ctx.nodes)
+            for node in _find_dynamic_causes(ctx.nodes)
         )
     )
 
@@ -488,7 +488,7 @@ def _check_quotas(ctx: ValidationContext) -> Verdict:
     return Verdict(refusals=tuple(refusals))
 
 
-def no_farm_work(ctx: ValidationContext) -> Verdict:
+def check_no_farm_work(ctx: ValidationContext) -> Verdict:
     """Refuse a cook that generated items but no step for a worker to run.
 
     The job template requires at least one step, so a snapshot with none is
@@ -538,7 +538,7 @@ _NO_FARM_WORK_REMEDY: str = (
 )
 
 
-def cook_set_without_steps(nodes: Sequence[NodeInfo], cook_set: Optional[Set[str]]) -> Verdict:
+def check_cook_set_has_steps(nodes: Sequence[NodeInfo], cook_set: Optional[Set[str]]) -> Verdict:
     """Refuse a cook set that names no step, before anything is generated.
 
     It stands down when the set is unknown or names a node that isn't read, since
@@ -577,7 +577,7 @@ def _check_steps_without_items(ctx: ValidationContext) -> Verdict:
     # These nodes have no items for a reason another check names, and so does
     # every dropped step below one, so each cause gets one message there.
     causes: Set[str] = {node.name for node in ctx.nodes if _explains_missing_items(node)}
-    above: Dict[str, Set[str]] = upstream_closure(ctx.nodes, causes)
+    above: Dict[str, Set[str]] = find_ancestors_among(ctx.nodes, causes)
     explained: Set[str] = causes | {
         name for name in ctx.snapshot.steps_without_items if above.get(name)
     }
@@ -1422,7 +1422,7 @@ def _check_unreachable_local_files(ctx: ValidationContext) -> Verdict:
 # new row: no other check and no part of ``validate`` changes.
 _CHECKS: Tuple[Tuple[RefusalScenario, Callable[[ValidationContext], Verdict]], ...] = (
     (RefusalScenario.DYNAMIC_NODE, _check_dynamic_nodes),
-    (RefusalScenario.NO_FARM_WORK, no_farm_work),
+    (RefusalScenario.NO_FARM_WORK, check_no_farm_work),
     (RefusalScenario.ROP_BATCH, _check_rop_batch),
     (RefusalScenario.QUOTA_EXCEEDED, _check_quotas),
     (RefusalScenario.STEP_WITHOUT_ITEMS, _check_steps_without_items),

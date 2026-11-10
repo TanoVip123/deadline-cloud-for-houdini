@@ -323,7 +323,7 @@ def test_a_cook_set_with_no_step_is_refused_before_anything_generates(
         _node("wedge2", ["wedge1"], count=0, schedulable=False),
         _node("render", ["wedge2"], count=0),
     ]
-    verdict: Verdict = validation.cook_set_without_steps(nodes, cook_set)
+    verdict: Verdict = validation.check_cook_set_has_steps(nodes, cook_set)
     assert bool(_subjects(verdict, RefusalScenario.NO_FARM_WORK)) is refused
     if refused:
         assert "wedge1" in verdict.refusals[0].subject and verdict.refusals[0].remedy

@@ -33,8 +33,8 @@ from typing import (
 import hou  # type: ignore[import-not-found]
 import pdg  # type: ignore[import-not-found]
 
-from ..errors import CookSetupError, PayloadTransferError, refusal_text
-from ..graph import GraphSnapshot, NodeInfo, synthesize, upstream_closure
+from ..errors import CookSetupError, PayloadTransferError, format_refusals
+from ..graph import GraphSnapshot, NodeInfo, synthesize
 from ..ports import ItemOutcome, ItemState, SceneFiles, T, WorkItemHandle
 from ..scene_reads import ReadReport, SceneReads, match_reads, _path_key
 from ..validation import (
@@ -42,7 +42,7 @@ from ..validation import (
     RefusalScenario,
     ValidationContext,
     Verdict,
-    cook_set_without_steps,
+    check_cook_set_has_steps,
     validate,
     waived,
 )
@@ -104,8 +104,6 @@ class HoudiniPdgHost:
         self._waiting_for: Set[str] = set()
         self._generated: Set[str] = set()
         self._generation_handler: Any = None
-        # Every node's wiring, read when the watch starts.
-        self._wiring: Tuple[NodeInfo, ...] = ()
         # The cook set PDG gave at the start, for a read after PDG stops reporting one.
         self._cook_set: Optional[FrozenSet[str]] = None
         # Separate from ``_lock``, which is held across a main-thread call.
@@ -179,14 +177,11 @@ class HoudiniPdgHost:
             self._waiting_for = steps & set(cook_set) if cook_set else steps
             self._generated = set()
             self._cook_set = frozenset(cook_set) if cook_set else None
-        # The wiring, read once, so the wait can skip what lies below a dynamic node.
-        wiring: Tuple[NodeInfo, ...] = self._read_wiring(context)
         handler: Any = context.addEventHandler(
             self._on_node_generated, pdg.EventType.NodeGenerated, True
         )
         with self._generation_lock:
             self._generation_handler = handler
-            self._wiring = wiring
 
     def pending_generation(self) -> Sequence[str]:
         """The watched steps that have neither generated nor queued an item."""
@@ -201,13 +196,12 @@ class HoudiniPdgHost:
             _name(node) for node in graph_nodes if _name(node) in pending and _has_queued_item(node)
         }
         # A dynamic node generates only once its upstream items cook, which the
-        # wait holds back, so neither it nor anything below it is awaited.
-        dynamic: Set[str] = {_name(node) for node in graph_nodes if _attr(node, "isDynamic")}
-        if dynamic:
-            with self._generation_lock:
-                wiring: Tuple[NodeInfo, ...] = self._wiring
-            below: Dict[str, Set[str]] = upstream_closure(wiring, dynamic)
-            started |= {name for name in pending if name in dynamic or below.get(name)}
+        # wait holds back. PDG flags the nodes below one as dynamic too.
+        started |= {
+            _name(node)
+            for node in graph_nodes
+            if _name(node) in pending and _attr(node, "isDynamic")
+        }
         with self._generation_lock:
             self._generated |= started
             return tuple(sorted(self._waiting_for - self._generated))
@@ -268,14 +262,6 @@ class HoudiniPdgHost:
         """The cook's settings, from the scheduler node's parms."""
         node: Any = self.scheduler_node()
         return self.on_main_thread(lambda: read_scheduler_settings(node))
-
-    def _read_wiring(self, context: Any) -> Tuple[NodeInfo, ...]:
-        """Every node and its upstream wires, or none when they can't be read."""
-        try:
-            return self.on_main_thread(lambda: readers.node_infos(_graph_nodes(context), None))
-        except Exception:
-            _logger.debug("Could not read the wiring for the generation wait", exc_info=True)
-            return ()
 
     def _on_node_generated(self, _handler: Any, event: Any) -> None:
         """Record the node PDG says finished generating."""
@@ -876,7 +862,7 @@ def _topology_verdict(node: Any, cook_set: Optional[AbstractSet[str]] = None) ->
     # A cook set with no step is known now, so it is refused now.
     verdict: Verdict = Verdict(
         refusals=tuple(r for r in full.refusals if r.scenario not in _NEEDS_ITEMS)
-        + cook_set_without_steps(infos, set(cook_set) if cook_set else None).refusals,
+        + check_cook_set_has_steps(infos, set(cook_set) if cook_set else None).refusals,
         advisories=tuple(a for a in full.advisories if a.scenario not in _NEEDS_ITEMS),
     )
     return waived(verdict) if settings is not None and not settings.validate_graph else verdict
@@ -975,10 +961,10 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         return False
     display: Any = network.displayNode()
     verdict: Verdict = PreCookChecks().run(
-        node, interactive=False, cook_set=_display_cook_set(node, display)
+        node, interactive=False, cook_set=_find_cook_set(node, display)
     )
     if verdict.refusals:
-        _show("The cook can't start.\n\n" + refusal_text(verdict.refusals), error=True)
+        _show("The cook can't start.\n\n" + format_refusals(verdict.refusals), error=True)
         return False
     try:
         settings: SchedulerSettings = read_scheduler_settings(node)
@@ -992,7 +978,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     return True
 
 
-def _display_cook_set(node: Any, display: Any) -> Optional[FrozenSet[str]]:
+def _find_cook_set(node: Any, display: Any) -> Optional[FrozenSet[str]]:
     """The PDG names of the display node and every node wired above it, or None when unknown.
 
     A node with no PDG node keeps its own name, so the cook set check stands down for it.
@@ -1075,7 +1061,7 @@ def _text_parm(node: Any, name: str) -> str:
     return str(parm.evalAsString()) if parm is not None else ""
 
 
-def show_error_later(text: str) -> None:
+def show_error_popup(text: str) -> None:
     """Queue an error popup on the main thread, when a UI exists, and return at once.
 
     PDG's thread must never wait on a dialog, and with no UI nobody would read it.
