@@ -462,7 +462,6 @@ def _read_output_directories(node: Any, working_dir: str) -> Tuple[str, ...]:
             )
         folders.setdefault(_absolute(value), set()).add(parm_path)
     # A task's scan walks the working directory and each folder, so an overlap records files twice.
-    # The upload sends each file once (deadline 0.60.11, job_attachments/asset_sync.py:653-662).
     working: str = _absolute_key(working_dir)
     overlapping: List[str] = sorted(
         parm
