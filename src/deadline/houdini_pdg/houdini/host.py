@@ -1162,6 +1162,48 @@ def _path_of(node: Any) -> str:
     return str(_call(node, "path") or "")
 
 
+# -- the node's layout -------------------------------------------------------
+
+#: The tab the ROP puts its queue parameter folders in, by its label.
+_QUEUE_PARAMETERS_TAB: str = "Shared Job Settings"
+
+
+def rebuild_layout_from_definition(node: Any) -> None:
+    """Lay the node's parms out as its current definition does, keeping the queue parameter fields.
+
+    The ROP's queue parameter update stores the node's whole layout on the node, so a node
+    saved before the definition changed keeps its old tabs. Call this before that update.
+    """
+    from deadline.houdini_submitter.python.deadline_cloud_for_houdini.queue_parameters import (
+        _QUEUE_ENVIRONMENT_NAME_PREFIX,
+    )
+
+    # The ROP's folders in the tab are the ones holding its prefixed fields. Each field's
+    # value is kept, because the folders come back with their defaults.
+    tab: Any = node.parmTemplateGroup().findFolder(_QUEUE_PARAMETERS_TAB)
+    folders: List[Any] = [
+        template
+        for template in (tab.parmTemplates() if tab is not None else ())
+        if template.type() == hou.parmTemplateType.Folder
+        and any(
+            field.name().startswith(_QUEUE_ENVIRONMENT_NAME_PREFIX)
+            for field in template.parmTemplates()
+        )
+    ]
+    values: Dict[str, Any] = {
+        field.name(): node.parmTuple(field.name()).eval()
+        for folder in folders
+        for field in folder.parmTemplates()
+    }
+    # Removing every spare parm brings back the definition's tabs, and the definition's own
+    # parms keep their values. The folders then go back where the ROP puts them.
+    node.removeSpareParms()
+    for folder in folders:
+        node.addSpareParmTuple(folder, (_QUEUE_PARAMETERS_TAB,))
+    for name, value in values.items():
+        node.parmTuple(name).set(value)
+
+
 # -- the node's Submit button ------------------------------------------------
 
 _CONFIRM_BUTTONS: Tuple[str, ...] = ("Submit", "Cancel")

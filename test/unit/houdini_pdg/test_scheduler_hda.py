@@ -115,6 +115,18 @@ def test_the_python_module_sends_submit_to_the_schedulers_own_flow() -> None:
     compile(module, "PythonModule", "exec")
 
 
+def test_create_and_load_rebuild_the_tabs_before_the_rops_queue_update() -> None:
+    """The ROP's update stores the old layout on the node and needs a login, so the rebuild runs first."""
+    # Both scripts call the module's callback, and the callback rebuilds before the ROP runs.
+    for section in ("OnCreated", "OnLoaded"):
+        assert "hdaModule().update_queue_parameters_callback(kwargs)" in _read(_NODE, section)
+    module: str = _read(_NODE, "PythonModule")
+    callback: str = module[module.index("def update_queue_parameters_callback") :]
+    assert (
+        0 <= callback.index("rebuild_layout_from_definition(kwargs") < callback.index("rop(kwargs)")
+    )
+
+
 @pytest.mark.parametrize(
     "parm", ["priority", "failed_tasks_limit", "task_retry_limit", "max_worker_count"]
 )

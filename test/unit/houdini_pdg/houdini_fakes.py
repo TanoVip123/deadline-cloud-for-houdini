@@ -453,6 +453,7 @@ def install_hou(monkeypatch: pytest.MonkeyPatch, hip_file: str) -> FakeHou:
         "applicationVersionString": lambda: state.version,
         "ToggleParmTemplate": type("ToggleParmTemplate", (), {}),
         "severityType": types.SimpleNamespace(Error="Error", Message="Message"),
+        "parmTemplateType": types.SimpleNamespace(Folder="Folder", String="String"),
     }
     for name, value in attributes.items():
         monkeypatch.setattr(hou, name, value, raising=False)

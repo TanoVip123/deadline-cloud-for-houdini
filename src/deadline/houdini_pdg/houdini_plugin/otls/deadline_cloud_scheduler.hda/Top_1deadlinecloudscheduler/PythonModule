@@ -14,7 +14,10 @@ def callback(kwargs):
 
 
 def update_queue_parameters_callback(kwargs):
-    """Show the default farm and queue, and rebuild the queue parameters, as the ROP does."""
+    """Lay the node out as its definition does, then run the ROP's farm, queue and queue parameter update."""
+    from deadline.houdini_pdg.houdini.host import rebuild_layout_from_definition
     from deadline_cloud_for_houdini.submitter import update_queue_parameters_callback as rop
 
+    # The layout needs no login, so it runs first and a failed login still leaves the right tabs.
+    rebuild_layout_from_definition(kwargs["node"])
     rop(kwargs)
