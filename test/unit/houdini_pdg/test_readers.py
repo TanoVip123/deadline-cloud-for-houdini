@@ -88,6 +88,7 @@ class _Parm:
         node_path: str = "/obj/n",
         unexpanded_raises: bool = False,
         owner: Any = None,
+        expression: Optional[str] = None,
     ) -> None:
         # Keep what each HOM method returns.
         self._name = name
@@ -99,6 +100,7 @@ class _Parm:
         self._path = f"{node_path}/{name}"
         self._unexpanded_raises = unexpanded_raises
         self._owner = owner
+        self._expression = expression
 
     def name(self) -> str:
         return self._name
@@ -124,6 +126,12 @@ class _Parm:
 
     def rawValue(self) -> str:
         return self._raw
+
+    def expression(self) -> str:
+        # HOM raises when the parm holds no expression.
+        if self._expression is None:
+            raise RuntimeError("no expression")
+        return self._expression
 
     def getReferencedParm(self) -> "_Parm":
         # HOM returns the parm itself when it references nothing.
@@ -1653,19 +1661,32 @@ def test_os_is_never_undefined_because_it_names_the_node_that_holds_the_text() -
     assert read.undefined_variables == ()
 
 
+# The stock ``sopoutput`` expression of a File Cache, as Houdini 21 holds it.
+_STOCK_SOPOUTPUT: str = (
+    "{\n    if(ch('filemethod'))\n    {\n        return chs('file');\n    }\n    else\n"
+    "    {\n        return chs('cachedir') + '/' + chs('cachename');\n    }\n}"
+)
+
+
 @pytest.mark.parametrize(
-    "type_name, method, parm, expected",
+    "type_name, method, parm, sopoutput, expected",
     [
-        ("filecache::2.0", 1, "file", True),
-        ("filecache::2.0", 0, "file", False),
-        ("filecache::2.0", 1, "basedir", False),
-        ("file", 1, "file", False),
+        ("filecache::2.0", 1, "file", _STOCK_SOPOUTPUT, True),
+        ("filecache::2.0", 0, "file", _STOCK_SOPOUTPUT, False),
+        ("filecache::2.0", 1, "basedir", _STOCK_SOPOUTPUT, False),
+        ("file", 1, "file", _STOCK_SOPOUTPUT, False),
+        # A literal typed over the expression is the write, so ``file`` is not.
+        ("filecache::2.0", 1, "file", None, False),
+        ("filecache::2.0", 1, "file", "chs('cachedir') + '/x.bgeo.sc'", False),
     ],
 )
 def test_a_file_cache_file_is_a_write_only_when_its_write_uses_it(
-    type_name: str, method: int, parm: str, expected: bool
+    type_name: str, method: int, parm: str, sopoutput: Optional[str], expected: bool
 ) -> None:
-    """A File Cache writes ``file`` only with ``filemethod`` on, and a File SOP's ``file`` is only a read."""
+    """A File Cache writes ``file`` only when ``filemethod`` is on and ``sopoutput`` copies ``file``.
+
+    A File SOP's ``file`` is only a read.
+    """
     cache: _Hom = _Hom(
         "/obj/topnet1/t",
         category="Top",
@@ -1673,6 +1694,7 @@ def test_a_file_cache_file_is_a_write_only_when_its_write_uses_it(
         parms=[
             _file(parm, "/proj/geo/a.bgeo.sc"),
             _Parm("filemethod", method, kind="", template="Toggle"),
+            _Parm("sopoutput", "/proj/x.bgeo.sc", kind="", expression=sopoutput),
         ],
     )
     (read,) = collect_scene_reads({"t": cache}).reads

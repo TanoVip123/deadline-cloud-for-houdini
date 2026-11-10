@@ -185,10 +185,16 @@ def collect_scene_reads(
                 node_path: str = _path_of(node)
                 node_name: str = _name_of(node)
                 node_type: str = _node_type_name(node)
-                # A File Cache writes its ``file`` when ``filemethod`` is on, because
-                # its ``sopoutput`` then copies ``file``.
-                file_cache_writes: bool = node_type == _FILE_CACHE and bool(
-                    _call(_call(node, "parm", "filemethod"), "eval")
+                # A File Cache writes its ``file`` when ``filemethod`` is on and
+                # ``sopoutput`` still holds an expression that copies ``file``.
+                file_cache_writes: bool = (
+                    node_type == _FILE_CACHE
+                    and bool(_call(_call(node, "parm", "filemethod"), "eval"))
+                    and bool(
+                        _COPIES_FILE.search(
+                            str(_call(_call(node, "parm", "sopoutput"), "expression") or "")
+                        )
+                    )
                 )
                 for parm, raw, value, owner in _file_parms(node, node_name):
                     reads.append(
@@ -703,6 +709,9 @@ def _string_parms(node: Any, kind: str) -> List[Any]:
 
 # The File Cache node type whose ``file`` parm is its write.
 _FILE_CACHE: str = "filecache::2.0"
+
+# ``chs('file')`` or ``chs("file")`` in an expression: the File Cache's stock ``sopoutput``.
+_COPIES_FILE: "re.Pattern[str]" = re.compile(r"""\bchs\(\s*["']file["']\s*\)""")
 
 # ``$NAME`` or ``${NAME}``: group 1 holds the braced name, group 2 the bare one.
 _VARIABLE: "re.Pattern[str]" = re.compile(r"\$\{(\w+)\}|\$(\w+)")
