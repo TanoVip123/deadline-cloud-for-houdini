@@ -33,6 +33,7 @@ from .scene_reads import (
     ReadVerdict,
     SceneRead,
     _depends_on_work_item,
+    _has_root,
     _is_below,
     job_folders,
     reads_opening,
@@ -1447,7 +1448,7 @@ def _check_unreachable_local_files(ctx: ValidationContext) -> Verdict:
         # folders is unanswerable or already carried, so it is skipped.
         if (
             "$" in resolved
-            or not os.path.isabs(resolved)
+            or not _has_root(resolved)
             or _is_inside_job(resolved, ctx.working_dir, ctx.output_directories)
         ):
             continue
