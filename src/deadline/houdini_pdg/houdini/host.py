@@ -1247,6 +1247,12 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         inputs: List[Tuple[str, str]] = read_listed_inputs(node)
         # The graph context and the cook set that the steps below use.
         context: Any = _get_or_create_graph_context(node)
+        # Every check below reads the graph, so a network without one can't be judged.
+        if context is None:
+            raise CookSetupError(
+                "The TOP network has no PDG graph yet, so Submit can't check it. "
+                "Cook the network's TOP nodes once, then submit again."
+            )
         cook_set: Optional[FrozenSet[str]] = _find_cook_set(context, display)
         # A job shape over a quota is known from the wires, so nothing is generated for
         # it, unless the artist turned validation off.

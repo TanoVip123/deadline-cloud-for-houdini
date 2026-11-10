@@ -694,3 +694,18 @@ def test_submit_checks_the_generated_items_through_the_cook_buttons_checks(scene
     finally:
         sys.setprofile(previous)
     assert len(graphs) == 1 and graphs[0] is scheduler.dependency_graph
+
+
+def test_a_network_with_no_pdg_graph_is_told_so_and_nothing_is_generated(scene: FakeHou) -> None:
+    """Submit went on with no graph and raised a bare AttributeError, which reached the artist."""
+    # The node has no graph context, and cooking its TOP nodes doesn't make one either.
+    network: FakeNetwork = _network()
+    network.scheduler_node.context = None
+    network.scheduler_node.cook_creates = None
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert [text for text, _ in scene.messages.calls] == [
+        "The TOP network has no PDG graph yet, so Submit can't check it. "
+        "Cook the network's TOP nodes once, then submit again."
+    ]
+    display: Any = network.topnet.displayNode()
+    assert display.generate_calls == [] and _cooks(network) == []
