@@ -1351,17 +1351,23 @@ def test_custom_amounts_and_attributes_are_read_from_each_multiparm_entry(scene:
     """Each entry is its own requirement, and an attribute's values are split at the commas."""
     node: FakeNode = _requirements_node(
         hr_mode="custom",
-        hr_amounts=1,
+        hr_amounts=2,
         hr_amount_name1="licenses",
         hr_amount_min1=2,
         hr_amount_max1=5,
+        hr_amount_name2="cores",
+        hr_amount_min2=4,
+        hr_amount_max2=-1,
         hr_attributes=1,
         hr_attr_name1="studio",
         hr_attr_option1="allOf",
         hr_attr_values1="vfx, fire",
     )
     assert read_host_requirements(node) == {
-        "amounts": [{"name": "amount.worker.licenses", "min": 2, "max": 5}],
+        "amounts": [
+            {"name": "amount.worker.licenses", "min": 2, "max": 5},
+            {"name": "amount.worker.cores", "min": 4},
+        ],
         "attributes": [{"name": "attr.worker.studio", "allOf": ["vfx", "fire"]}],
     }
 
@@ -1504,6 +1510,7 @@ def test_an_output_folder_at_home_is_refused_naming_its_parm(
     scene: FakeHou, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Each task would upload everything it finds there, which is the whole home directory."""
+    # Home is the only output folder on the tab.
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     node: FakeNode = _settings_node(working_dir="$HIP")
     _listed(node, "output_directories", "output_dir", [str(tmp_path / "home")])

@@ -418,6 +418,7 @@ def test_a_missing_listed_file_is_shown_before_the_confirmation(
 
 def test_one_extra_input_file_alone_is_counted(scene: FakeHou, tmp_path: Path) -> None:
     """With no output folder listed, the line must still count the input the artist added."""
+    # One listed file, and nothing else on the tab.
     network: Network = _network()
     node: Any = network.scheduler_node
     lut: Path = tmp_path / "lut.cube"
@@ -433,6 +434,7 @@ def test_after_generating_a_read_no_step_writes_and_no_disk_holds_is_refused(
     scene: FakeHou,
 ) -> None:
     """With the items generated, a missing file outside the job is known, so Submit names it."""
+    # render reads a literal file that no step writes and the disk doesn't hold.
     network: Network = _network()
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
     network.node("render").hom.set_parm("file", "/elsewhere/tree.bgeo.sc", kind="FileReference")
@@ -443,9 +445,42 @@ def test_after_generating_a_read_no_step_writes_and_no_disk_holds_is_refused(
 
 def test_an_unconnected_input_slot_does_not_hide_a_cook_with_no_step(scene: FakeHou) -> None:
     """Houdini lists an empty input slot as None, which has no path and names no node."""
+    # The wedge, with one empty input slot, is the display node.
     network: Network = _network()
     wedge: Any = network.node("wedge1").hom
     wedge._inputs = [None]
     network.topnet.display = wedge
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert "No node in this cook runs a command on a worker" in scene.messages.calls[0][0]
+
+
+def test_after_generating_a_step_read_only_by_its_files_is_still_consumed(scene: FakeHou) -> None:
+    """A step joined to its reader only by a file read must not count as a leaf, or its lost outputs pass."""
+    # sim and render share no wire, and render reads the file sim writes outside the job.
+    network: Network = build_network(
+        [
+            ("sim", "hython sim.py", "Processor", []),
+            ("render", "hython render.py", "Processor", []),
+        ],
+        scheduler_parms={"working_dir": "$HIP", "auto_save_hip": 0},
+    )
+    network.node("render").hom.set_parm("file", "/elsewhere/sim/out.bgeo.sc", kind="FileReference")
+    _generated(network, {"sim": 1, "render": 1})
+    graph: Any = network.context.schedulers["deadlinecloudscheduler1"].dependency_graph[0]
+    (sim_item,) = [item for item in graph if item.node.name == "sim"]
+    sim_item.expectedOutputFiles = [("/elsewhere/sim/out.bgeo.sc", "file/geo")]
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert "sim:" in scene.messages.calls[0][0] and "outside the working directory" in (
+        scene.messages.calls[0][0]
+    )
+
+
+def test_a_node_whose_pdg_name_differs_from_its_name_is_named_as_pdg_names_it(
+    scene: FakeHou,
+) -> None:
+    """PDG names a node inside a subnet differently, and the cook set check reads PDG's names."""
+    network: Network = _network()
+    network.node("wedge1").name = "subnet1_wedge1"
+    network.topnet.display = network.node("subnet1_wedge1").hom
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     assert "No node in this cook runs a command on a worker" in scene.messages.calls[0][0]
