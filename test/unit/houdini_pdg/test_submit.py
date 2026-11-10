@@ -576,3 +576,27 @@ def test_a_displayed_subnet_cooks_the_steps_inside_it_and_above_them(scene: Fake
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     text: str = scene.messages.calls[0][0]
     assert "render:" in text and "side:" not in text
+
+
+def test_a_bad_host_requirement_is_shown_before_anything_is_generated(scene: FakeHou) -> None:
+    """A typo on the Host Requirements tab must not cost the artist a whole generate first."""
+    # A GPU minimum above its maximum.
+    network: FakeNetwork = _network()
+    _with_requirements(network, hr_gpu_min=4, hr_gpu_max=2)
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert "hr_gpu_min" in scene.messages.calls[0][0]
+    assert network.topnet.displayNode().generate_calls == []
+
+
+def test_a_missing_listed_file_is_shown_before_anything_is_generated(
+    scene: FakeHou, tmp_path: Path
+) -> None:
+    """A listed path that isn't on disk must not cost the artist a whole generate first."""
+    # One listed file that isn't on disk.
+    network: FakeNetwork = _network()
+    node: Any = network.scheduler_node
+    node.set_parm("input_filenames", 1)
+    node.set_parm("input_filenames1", str(tmp_path / "nowhere.cube"), kind="FileReference")
+    assert submit(node, get_setting=_workstation) is False
+    assert "input_filenames1" in scene.messages.calls[0][0]
+    assert network.topnet.displayNode().generate_calls == []

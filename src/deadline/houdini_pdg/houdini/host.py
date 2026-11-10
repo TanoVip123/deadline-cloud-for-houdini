@@ -1161,8 +1161,8 @@ _CONFIRM_BUTTONS: Tuple[str, ...] = ("Submit", "Cancel")
 def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> bool:
     """Run the node's Submit. Return True when the cook started.
 
-    First the unsaved-scene check, then the network's default scheduler and the
-    farm, then a generate and every check on its items, then one confirmation,
+    First the unsaved-scene check, then the network's default scheduler, the farm
+    and the node's tabs, then a generate and every check on its items, then one confirmation,
     then a cook of the display node. Each step raises the problem it finds, and
     one place shows it.
     """
@@ -1181,8 +1181,11 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             raise CookSetupError(
                 "The TOP network has no display node, so there is nothing to cook. Set one."
             )
-        # The settings, the graph context and the cook set are read once, for every check below.
+        # The node's tabs are read first, so a bad value is shown before anything is generated.
         settings: SchedulerSettings = read_scheduler_settings(node)
+        requirements: Optional[Dict[str, Any]] = read_host_requirements(node)
+        inputs: List[Tuple[str, str]] = read_listed_inputs(node)
+        # The graph context and the cook set are read once, for every check below.
         context: Any = _get_or_create_graph_context(node)
         cook_set: Optional[FrozenSet[str]] = _find_cook_set(context, display)
         # A job shape over a quota is known from the wires, so nothing is generated for
@@ -1221,8 +1224,6 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         )
         if verdict.refusals:
             raise GraphRefusedError(verdict)
-        requirements: Optional[Dict[str, Any]] = read_host_requirements(node)
-        inputs: List[Tuple[str, str]] = read_listed_inputs(node)
     except UserInitiatedCancel:
         return False
     except GraphRefusedError as refused:
