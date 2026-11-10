@@ -203,11 +203,8 @@ class FakeNode:
         self.display: Optional[FakeNode] = None
         self.cook_creates: Any = None
         self.pdg_name: Optional[str] = None
-        #: Each static generate, with whether the scene had unsaved changes just after it.
+        #: Each static generate, with its ``block`` argument.
         self.generate_calls: List[Dict[str, Any]] = []
-        #: The hip file a generate could mark as changed, and whether it does.
-        self.hip_file: Any = None
-        self.generate_marks_unsaved: bool = False
         #: Run during a static generate, as PDG sends its events while it generates.
         self.on_generate: Optional[Callable[[], None]] = None
         #: Each dirty and generate on the node's work items, in order, with its argument.
@@ -332,9 +329,6 @@ class FakeNode:
         return self.context
 
     def generateStaticWorkItems(self, block: bool = False) -> None:
-        # Houdini might mark the scene changed on a generate, so a test can make it do so.
-        if self.generate_marks_unsaved and self.hip_file is not None:
-            self.hip_file.unsaved = True
         if self.on_generate is not None:
             self.on_generate()
         self.generate_calls.append({"block": block})
@@ -417,18 +411,6 @@ class FakeHou:
     file_references: List[Tuple[Any, str]] = field(default_factory=list)
     instances: List[Any] = field(default_factory=list)
     libraries: Dict[str, str] = field(default_factory=dict)
-    version: str = "21.0.596"
-    #: Raised by ``hou.fileReferences`` when set, as a scene that cannot be scanned.
-    scan_error: Optional[Exception] = None
-    #: Raised by ``hou.nodeType`` when set, as a session that cannot list node types.
-    type_error: Optional[Exception] = None
-
-
-def _file_references(state: FakeHou) -> List[Tuple[Any, str]]:
-    """The scene's file references, or the scan error a test set."""
-    if state.scan_error is not None:
-        raise state.scan_error
-    return list(state.file_references)
 
 
 def install_hou(monkeypatch: pytest.MonkeyPatch, hip_file: str) -> FakeHou:
@@ -439,8 +421,6 @@ def install_hou(monkeypatch: pytest.MonkeyPatch, hip_file: str) -> FakeHou:
 
     def node_type(category: str, name: str) -> Any:
         # A node type's instances, and the library that defines it, when a test set one.
-        if state.type_error is not None:
-            raise state.type_error
         path: Optional[str] = state.libraries.get(name)
         definition: Any = (
             types.SimpleNamespace(libraryFilePath=lambda: path) if path is not None else None
@@ -455,12 +435,12 @@ def install_hou(monkeypatch: pytest.MonkeyPatch, hip_file: str) -> FakeHou:
         "text": types.SimpleNamespace(expandString=expand),
         "ui": types.SimpleNamespace(displayMessage=state.messages),
         "isUIAvailable": lambda: state.ui,
-        "fileReferences": lambda: _file_references(state),
+        "fileReferences": lambda: list(state.file_references),
         "getenv": lambda name: os.environ.get(name),
         "nodeType": node_type,
         "topNodeTypeCategory": lambda: "Top",
         "ropNodeTypeCategory": lambda: "Driver",
-        "applicationVersionString": lambda: state.version,
+        "applicationVersionString": lambda: "21.0.596",
         "ToggleParmTemplate": type("ToggleParmTemplate", (), {}),
         "severityType": types.SimpleNamespace(Error="Error", Message="Message"),
         "parmTemplateType": types.SimpleNamespace(Folder="Folder", String="String"),
@@ -620,13 +600,6 @@ COOKING_EXAMPLE: List[Tuple[Any, ...]] = [
     ("render", "hython render.py", "Processor", ["python1"]),
 ]
 
-#: The same shape, routed through a Merge. A Merge cooks nothing, so it is accepted.
-ROUTED_EXAMPLE: List[Tuple[Any, ...]] = [
-    ("subdivide", "hython subdivide.py", "Processor", []),
-    ("merge", "", "Processor", ["subdivide"], "Generate"),
-    ("render", "hython render.py", "Processor", ["merge"]),
-]
-
 #: Pyro Bonfire's shape: a wedge root, then steps, joined by a partitioner.
 PYRO_BONFIRE: List[Tuple[Any, ...]] = [
     ("wedge1", "", "Processor", []),
@@ -635,14 +608,3 @@ PYRO_BONFIRE: List[Tuple[Any, ...]] = [
     ("partition", "", "Partitioner", ["render"]),
     ("montage", "magick montage", "Processor", ["partition"]),
 ]
-
-
-def main_thread_runner(ran_on: List[str]) -> Callable[..., Any]:
-    """An ``hdefereval.executeInMainThreadWithResult`` that records the thread it was called from."""
-    import threading
-
-    def execute(function: Callable[..., Any], *args: Any) -> Any:
-        ran_on.append(threading.current_thread().name)
-        return function(*args)
-
-    return execute

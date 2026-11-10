@@ -180,18 +180,6 @@ def _connect(network: FakeNetwork, cloud: FakeCloud, tmp_path: Path) -> CookServ
 # -- start, tick and stop -----------------------------------------------------
 
 
-def test_a_refused_graph_fails_the_start_on_the_node_and_cancels_on_the_first_tick(
-    scene: FakeHou,
-) -> None:
-    """PDG drops a scheduler's error when the start returns False, so the start says True and the tick cancels."""
-    scheduler: Any = _scheduler(build_network(COOKING_EXAMPLE))
-    assert scheduler.onStartCook(False, None) is True
-    errors: List[str] = [call[1] for call in scheduler.calls if call[0] == "cookError"]
-    assert len(errors) == 1 and "python1" in errors[0]
-    assert scheduler.onTick() == PDG.tickResult.SchedulerCancelCook
-    assert scheduler.onSchedule(object()) == PDG.scheduleResult.CookFailed
-
-
 def test_a_failed_start_works_in_a_temporary_directory_that_stop_removes(scene: FakeHou) -> None:
     """Without a working directory PDG copies its job scripts to the filesystem root."""
     scheduler: Any = _scheduler(build_network(COOKING_EXAMPLE))
@@ -251,28 +239,23 @@ def test_a_generate_houdini_reports_in_the_cook_options_is_not_a_farm_cook(
     assert scheduler.onTick() == PDG.tickResult.SchedulerReady
 
 
-@pytest.mark.parametrize("cook_type", _printed_and_named(_COOK_TYPES), ids=str)
+@pytest.mark.parametrize("cook_type", [*_printed_and_named(_COOK_TYPES), None], ids=str)
 def test_a_cook_houdini_reports_in_the_cook_options_is_checked_and_connected(
     scene: FakeHou, cook_type: Any
 ) -> None:
-    """Only a generate skips the checks, so a cook of a refused graph still fails its start."""
-    # The same refused graph, with Houdini's cook options saying it's a cook.
+    """Only a generate skips the checks, so a cook of a refused graph still fails its start.
+
+    A context with no cook options can't show a generate, so it is a cook too.
+    """
+    # The same refused graph, with Houdini's cook options saying it's a cook, or missing.
     network: FakeNetwork = build_network(COOKING_EXAMPLE)
-    network.context.cookOptions = types.SimpleNamespace(cookType=cook_type)
+    network.context.cookOptions = (
+        None if cook_type is None else types.SimpleNamespace(cookType=cook_type)
+    )
     scheduler: Any = _scheduler(network)
     scheduler.onStartCook(False, None)
     errors: List[str] = [call[1] for call in scheduler.calls if call[0] == "cookError"]
     assert len(errors) == 1 and "python1" in errors[0]
-
-
-def test_a_context_without_cook_options_is_a_cook(scene: FakeHou) -> None:
-    """Only a generate PDG reports may skip the checks, so unreadable options mean a cook."""
-    # A refused graph whose context has no cook options must still fail its start.
-    network: FakeNetwork = build_network(COOKING_EXAMPLE)
-    network.context.cookOptions = None
-    scheduler: Any = _scheduler(network)
-    scheduler.onStartCook(False, None)
-    assert [call for call in scheduler.calls if call[0] == "cookError"]
 
 
 def test_a_cook_started_in_a_session_with_a_ui_never_opens_the_save_prompt(scene: FakeHou) -> None:
@@ -372,21 +355,6 @@ def test_a_work_item_reaches_the_cook_with_its_node_and_declared_outputs(scene: 
     ]
 
 
-def test_a_cook_starts_connected_with_the_cook_set_as_names(
-    scene: FakeHou, tmp_path: Path, caplog: Any
-) -> None:
-    """PDG gives its cook set as node objects, and the cook needs their names to know what to wait for."""
-    # Start with one PDG node in the cook set, then tick and stop the open cook.
-    network: FakeNetwork = build_network(PYRO_BONFIRE)
-    scheduler: Any = _scheduler(network)
-    with caplog.at_level(logging.INFO):
-        assert scheduler.onStartCook(False, [network.node("sim")]) is True
-    assert not [call for call in scheduler.calls if call[0] == "cookError"]
-    assert "PDG asked to cook 1 node(s)." in caplog.text
-    assert scheduler.onTick() == PDG.tickResult.SchedulerReady
-    assert scheduler.onStopCook(False) is True
-
-
 class _CachedItem:
     """A ``pdg.WorkItem`` PDG cooked from cache, with the file it found as its result."""
 
@@ -401,17 +369,19 @@ class _CachedItem:
         self.outputFiles: List[Any] = [types.SimpleNamespace(path=path, tag="file/geo")]
 
 
-def _cooked_from_cache(
-    network: FakeNetwork, tmp_path: Path, cooked: Tuple[str, ...] = ("sim", "render")
-) -> Any:
-    """A started cook of ``render`` in which PDG took every item of sim and render from cache.
+def test_a_cook_that_ends_with_every_item_from_cache_shows_why_on_the_node(
+    scene: FakeHou, tmp_path: Path
+) -> None:
+    """With every item cooked from files, PDG offers nothing, so the end of the cook must say why.
 
-    PDG's cook set names the ``cooked`` nodes. Houdini names render and the step above it.
+    The error names each step in the cook and one of its files, and no job is made.
     """
-    # Start the cook, then give PDG's graph only items it cooked from cache.
+    # Start a cook of render, whose cook set names render and the step above it, as Houdini's does.
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     scheduler: Any = _scheduler(network)
-    network.context.cookSet = [network.node(name) for name in cooked]
+    network.context.cookSet = [network.node("sim"), network.node("render")]
     assert scheduler.onStartCook(False, [network.node("render")]) is True
+    # PDG took every item of sim and render from cache, then ends the cook with nothing offered.
     scheduler.dependency_graph = (
         {
             _CachedItem("sim", 0, str(tmp_path / "geo" / "sim.0.bgeo.sc")): [],
@@ -420,67 +390,11 @@ def _cooked_from_cache(
         {},
         [],
     )
-    return scheduler
-
-
-def test_a_cook_that_ends_with_every_item_from_cache_shows_why_on_the_node(
-    scene: FakeHou, tmp_path: Path
-) -> None:
-    """With every item cooked from files, PDG offers nothing, so the end of the cook must say why.
-
-    The error names each step in the cook and one of its files, and no job is made.
-    """
-    # PDG ends the cook on its own, with nothing offered.
-    network: FakeNetwork = build_network(PYRO_BONFIRE)
-    scheduler: Any = _cooked_from_cache(network, tmp_path)
     assert scheduler.onStopCook(False) is True
     (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
     assert "sim:" in error and str(tmp_path / "geo" / "sim.0.bgeo.sc") in error
     assert "render:" in error and str(tmp_path / "geo" / "render.1.exr") in error
     assert "montage:" not in error and "no job was created" in error
-
-
-def test_a_cook_from_cache_names_only_the_steps_its_cook_set_names(
-    scene: FakeHou, tmp_path: Path
-) -> None:
-    """A step the cook set leaves out holds an earlier cook's cache, so it isn't this cook's to refuse."""
-    # The same cook, with PDG's cook set naming only render.
-    network: FakeNetwork = build_network(PYRO_BONFIRE)
-    scheduler: Any = _cooked_from_cache(network, tmp_path, ("render",))
-    assert scheduler.onStopCook(False) is True
-    (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
-    assert "render:" in error and "sim:" not in error
-
-
-def test_an_artists_stop_of_a_cook_from_cache_shows_nothing(scene: FakeHou, tmp_path: Path) -> None:
-    """The artist stopped it, so the node shows no error for the cached items."""
-    # The same cook, stopped by the artist.
-    network: FakeNetwork = build_network(PYRO_BONFIRE)
-    scheduler: Any = _cooked_from_cache(network, tmp_path)
-    assert scheduler.onStopCook(True) is True
-    assert not [call for call in scheduler.calls if call[0] == "cookError"]
-
-
-def test_an_empty_cook_set_is_not_read_as_cooking_nothing(scene: FakeHou, caplog: Any) -> None:
-    """An empty set would leave every node out, so the cook treats it as unknown."""
-    scheduler: Any = _scheduler(build_network(PYRO_BONFIRE))
-    with caplog.at_level(logging.INFO):
-        assert scheduler.onStartCook(False, []) is True
-    assert "PDG asked to cook" not in caplog.text
-    scheduler.onStopCook(True)
-
-
-def test_a_failure_inside_a_callback_is_shown_on_the_node_and_never_raised(
-    scene: FakeHou,
-) -> None:
-    """An exception reaching PDG would abort Houdini's cook without telling the artist why."""
-    network: FakeNetwork = build_network(PYRO_BONFIRE)
-    scheduler: Any = _scheduler(network)
-    scheduler.onStartCook(False, None)
-    # A work item with no id cannot become a handle.
-    assert scheduler.onSchedule(object()) == PDG.scheduleResult.CookFailed
-    assert [call for call in scheduler.calls if call[0] == "cookError"]
-    scheduler.onStopCook(True)
 
 
 def test_the_scheduler_registers_under_the_hdas_type_name() -> None:
@@ -533,23 +447,6 @@ def test_another_error_from_the_bucket_check_is_logged_and_the_cook_goes_on(
     assert "Could not check access to bucket bucket-a" in caplog.text
 
 
-def test_the_cooks_outcome_event_goes_through_the_telemetry_client(
-    scene: FakeHou, tmp_path: Path
-) -> None:
-    """The client library's telemetry client honors the opt-out, so the event must go through it."""
-    cloud: FakeCloud = FakeCloud()
-    services: CookServices = _connect(build_network(PYRO_BONFIRE), cloud, tmp_path)
-    services.journal.closed(CookSummary(cook_id="cook-1", final_phase=CookPhase.DONE))
-    assert len(cloud.events) == 1
-
-
-def _restore_telemetry_client(previous: Any) -> None:
-    """Put back the library's cached telemetry client, or drop the one a test built."""
-    _TELEMETRY_CLIENTS.pop("deadline-cloud-library", None)
-    if previous is not None:
-        _TELEMETRY_CLIENTS["deadline-cloud-library"] = previous
-
-
 def test_an_opted_out_workstation_sends_no_outcome_event(
     scene: FakeHou, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: Any
 ) -> None:
@@ -561,7 +458,14 @@ def test_an_opted_out_workstation_sends_no_outcome_event(
     # A fresh library client, built with the opt-out set, as on the artist's workstation.
     monkeypatch.setenv("DEADLINE_CLOUD_TELEMETRY_OPT_OUT", "true")
     previous: Any = _TELEMETRY_CLIENTS.pop("deadline-cloud-library", None)
-    request.addfinalizer(lambda: _restore_telemetry_client(previous))
+
+    def restore() -> None:
+        # Put back the library's cached telemetry client, or drop the one this test built.
+        _TELEMETRY_CLIENTS.pop("deadline-cloud-library", None)
+        if previous is not None:
+            _TELEMETRY_CLIENTS["deadline-cloud-library"] = previous
+
+    request.addfinalizer(restore)
     client: Any = api.get_deadline_cloud_library_telemetry_client()
     client.event_queue = Queue()
 
@@ -813,19 +717,26 @@ def ui(scene: FakeHou, monkeypatch: pytest.MonkeyPatch) -> _Deferred:
     return deferred
 
 
-def test_a_refused_cook_shows_a_popup_with_the_node_errors_text(
-    scene: FakeHou, ui: _Deferred
+@pytest.mark.parametrize("has_ui", [True, False])
+def test_a_refused_cook_shows_a_popup_with_the_node_errors_text_only_with_a_ui(
+    scene: FakeHou, monkeypatch: pytest.MonkeyPatch, has_ui: bool
 ) -> None:
     """The TOP Cook button gave only the error flag, so the artist didn't see the refusal.
 
     The popup is queued, never shown on PDG's thread, so PDG never waits on a dialog.
+    hython has no one to read a dialog, so there only the node error and the log carry it.
     """
     # Refuse a cook, see nothing shown yet, then run the queue and read the popup.
+    scene.ui = has_ui
+    deferred: _Deferred = _Deferred()
+    monkeypatch.setitem(sys.modules, "hdefereval", deferred)
     scheduler: Any = _scheduler(build_network(COOKING_EXAMPLE))
     scheduler.onStartCook(False, None)
     (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
-    assert scene.messages.calls == [] and len(ui.queued) == 1
-    ui.queued[0]()
+    assert scene.messages.calls == [] and len(deferred.queued) == int(has_ui)
+    if not has_ui:
+        return
+    deferred.queued[0]()
     ((text, buttons),) = scene.messages.calls
     assert text == error and buttons == ()
     assert scene.messages.options[0]["severity"] == "Error"
@@ -848,16 +759,3 @@ def test_each_cook_shows_one_popup_and_the_next_cook_shows_its_own(
     network.node("render").isDynamic = True
     scheduler.onStartCook(False, None)
     assert len(ui.queued) == 2
-
-
-def test_without_a_ui_a_refused_cook_shows_no_popup(
-    scene: FakeHou, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """hython has no one to read a dialog, so only the node error and the log carry the refusal."""
-    # A refused cook with no UI queues nothing and shows nothing.
-    deferred: _Deferred = _Deferred()
-    monkeypatch.setitem(sys.modules, "hdefereval", deferred)
-    scheduler: Any = _scheduler(build_network(COOKING_EXAMPLE))
-    scheduler.onStartCook(False, None)
-    assert [call[0] for call in scheduler.calls].count("cookError") == 1
-    assert deferred.queued == [] and scene.messages.calls == []

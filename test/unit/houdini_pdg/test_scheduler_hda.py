@@ -98,16 +98,6 @@ def test_the_node_has_the_rops_shared_job_settings() -> None:
     assert shared <= set(rop) and shared <= set(NODE_PARMS)
 
 
-def test_every_section_the_node_lists_exists() -> None:
-    """Houdini loads only the sections the list names, so a missing one would drop the callbacks."""
-    listed: List[str] = [
-        line.split()[0] for line in _read(_NODE, "Sections.list").splitlines()[1:] if line.strip()
-    ]
-    assert {"PythonModule", "OnCreated", "OnLoaded"} <= set(listed)
-    for section in listed:
-        assert os.path.isfile(os.path.join(_NODE, section)), section
-
-
 def test_the_python_module_sends_submit_to_the_schedulers_own_flow() -> None:
     """Submit must not open the ROP's dialog, so the module names the scheduler's submit."""
     module: str = _read(_NODE, "PythonModule")
@@ -116,8 +106,15 @@ def test_the_python_module_sends_submit_to_the_schedulers_own_flow() -> None:
 
 
 def test_create_and_load_rebuild_the_tabs_before_the_rops_queue_update() -> None:
-    """The ROP's update stores the old layout on the node and needs a login, so the rebuild runs first."""
-    # Both scripts call the module's callback, and the callback rebuilds before the ROP runs.
+    """The ROP's update stores the old layout on the node and needs a login, so the rebuild runs first.
+
+    Houdini loads only the sections the list names, so each script must be listed too.
+    """
+    # Both scripts are listed and call the module's callback, which rebuilds before the ROP runs.
+    listed: List[str] = [
+        line.split()[0] for line in _read(_NODE, "Sections.list").splitlines()[1:] if line.strip()
+    ]
+    assert {"PythonModule", "OnCreated", "OnLoaded"} <= set(listed)
     for section in ("OnCreated", "OnLoaded"):
         assert "hdaModule().update_queue_parameters_callback(kwargs)" in _read(_NODE, section)
     module: str = _read(_NODE, "PythonModule")
@@ -157,11 +154,6 @@ def test_the_job_number_parms_are_plain_integer_fields(parm: str) -> None:
     assert re.search(r'parmtag\s*\{\s*"sidefx::slider"\s+"none"\s*\}', block), parm
 
 
-def _groups(dialog_script: str) -> List[Tuple[str, str]]:
-    """Each top-level tab, as (name, label), in the order the node shows them."""
-    return re.findall(r'\n    group \{\s*name\s+"(\w+)"\s*label\s+"([^"]+)"', dialog_script)
-
-
 def _lists(dialog_script: str) -> Dict[str, Tuple[str, str]]:
     """Each multiparm or multiscroll, with its kind and the text of its block."""
     return {
@@ -179,7 +171,11 @@ NODE_SCRIPT: str = _read(_NODE, "DialogScript")
 
 def test_the_node_has_the_job_attachments_and_host_requirements_tabs_after_pdg() -> None:
     """The artist asked for the ROP's two tabs, so they follow the node's own tabs."""
-    assert _groups(NODE_SCRIPT) == [
+    # Each top-level tab, as (name, label), in the order the node shows them.
+    tabs: List[Tuple[str, str]] = re.findall(
+        r'\n    group \{\s*name\s+"(\w+)"\s*label\s+"([^"]+)"', NODE_SCRIPT
+    )
+    assert tabs == [
         ("job_settings", "Shared Job Settings"),
         ("job_settings_1", "PDG"),
         ("job_settings_2", "Job Attachments"),

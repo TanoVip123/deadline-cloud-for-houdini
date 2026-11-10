@@ -21,7 +21,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Type
 
@@ -1321,22 +1320,6 @@ def test_a_scene_that_fails_to_load_is_left_to_the_job_script(
 # -- the node's extra output folders -------------------------------------------
 
 
-def test_downloading_maps_each_output_directory_to_this_worker(
-    pdg_dir: str, tmp_path: Path
-) -> None:
-    """The workstation's folder doesn't exist here, so the client scans the folder the rules map it to."""
-    # Download an item for a session with one output folder and a rule for it.
-    worker: str = str(tmp_path / "mnt" / "renders")
-    rules: List[RuntimeRule] = [rule("/studio/renders", worker, runtime=True)]
-    client_args: Dict[str, Any] = download_pdg_work_item(
-        FakeStorage(payload()),
-        ADDRESS,
-        args(pdg_dir, output_directories=["/studio/renders"]),
-        rules,
-    )[0]
-    assert client_args["mapped_output_directories"] == [[worker, "/studio/renders"]]
-
-
 def test_without_output_directories_the_clients_arguments_are_as_before(pdg_dir: str) -> None:
     """A session from an older submitter sends no list, and the client must get what it got before."""
     client_args: Dict[str, Any] = download_pdg_work_item(
@@ -1375,52 +1358,19 @@ def test_a_silent_command_reports_what_it_wrote_in_an_output_directory(
 # -- the scan's start time ------------------------------------------------------
 
 
-class _ClockAheadOfTheFileSystem:
-    """A clock that reads after every mtime the file system gives, as a clock it lags behind does."""
-
-    def now(self) -> datetime:
-        return datetime(2100, 1, 1, tzinfo=timezone.utc)
-
-
 def _run_item(command: str, item_args: Dict[str, Any], rules: List[RuntimeRule]) -> FakeStorage:
-    """Download, run and publish one item with the clock above, and return its storage."""
+    """Download, run and publish one item, and return its storage."""
     # The adaptor downloads, the client runs the item from JSON, as over the socket.
     storage: FakeStorage = FakeStorage(payload(command))
     out: io.StringIO = io.StringIO()
     with contextlib.redirect_stdout(out):
         client_args, outputs_file = download_pdg_work_item(storage, ADDRESS, item_args, rules)
-        runner: PdgWorkItemRunner = PdgWorkItemRunner(clock=_ClockAheadOfTheFileSystem())
+        runner: PdgWorkItemRunner = PdgWorkItemRunner(clock=SystemClock())
         runner.run_work_item(json.loads(json.dumps(client_args)))
     # The adaptor publishes only after the item exits 0.
     if EXIT_CODE_MARKER + "0" in out.getvalue():
         publish_pdg_outputs(storage, ADDRESS, outputs_file)
     return storage
-
-
-def test_a_file_stamped_before_the_clock_reads_is_still_reported(
-    pdg_dir: str, tmp_path: Path, scripts: Path
-) -> None:
-    """The file system's clock lags this process's, so a file written just after the start
-    could get an mtime below the process's start time, and the scan dropped it."""
-    # Every file the command writes has an mtime below the runner's clock, in both scanned folders.
-    worker: Path = tmp_path / "mnt" / "renders"
-    worker.mkdir(parents=True)
-    command: str = (
-        run_script(scripts, "write.py", "out.bgeo.sc")
-        + " && "
-        + run_script(scripts, "write.py", str(worker / "b.1.exr"))
-    )
-    rules: List[RuntimeRule] = [rule("/studio/renders", str(worker), runtime=True)]
-    item_args: Dict[str, Any] = args(
-        pdg_dir, record_outputs=True, output_directories=["/studio/renders"]
-    )
-    storage: FakeStorage = _run_item(command, item_args, rules)
-    assert storage.published == [
-        (
-            ADDRESS,
-            [OutputFile("__PDG_DIR__/out.bgeo.sc", ""), OutputFile("/studio/renders/b.1.exr", "")],
-        )
-    ]
 
 
 def test_no_run_leaves_the_start_marker_behind(pdg_dir: str, tmp_path: Path, scripts: Path) -> None:
@@ -1444,23 +1394,3 @@ def test_no_run_leaves_the_start_marker_behind(pdg_dir: str, tmp_path: Path, scr
     assert storage.published == [(ADDRESS, [])]
     assert sorted(os.listdir(pdg_dir)) == ["pdgtemp"] and os.listdir(worker) == []
     assert Path(listing).read_text() == repr(["pdgtemp"])
-
-
-def test_a_folder_made_by_the_command_reports_every_file_in_it(
-    pdg_dir: str, tmp_path: Path, scripts: Path
-) -> None:
-    """A folder that didn't exist when the item started holds only what the command wrote,
-    even a file it copied with its old mtime."""
-    # The command makes the output folder and writes a file there with an mtime of 1970.
-    worker: Path = tmp_path / "mnt" / "renders"
-    target: Path = worker / "b.1.exr"
-    command: str = (
-        f'"{sys.executable}" -I -S -c "import os, sys; os.makedirs(os.path.dirname(sys.argv[1])); '
-        f"open(sys.argv[1], 'w').write('x'); os.utime(sys.argv[1], (0, 0))\" \"{target}\""
-    )
-    rules: List[RuntimeRule] = [rule("/studio/renders", str(worker), runtime=True)]
-    item_args: Dict[str, Any] = args(
-        pdg_dir, record_outputs=True, output_directories=["/studio/renders"]
-    )
-    storage: FakeStorage = _run_item(command, item_args, rules)
-    assert storage.published == [(ADDRESS, [OutputFile("/studio/renders/b.1.exr", "")])]

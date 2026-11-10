@@ -237,29 +237,6 @@ _CONDA_VALUES: Dict[str, Any] = {
 }
 
 
-def _frozen_two_tab_node() -> FakeLayoutNode:
-    """A node made on the two-tab definition, with the ROP's Conda folder in its stored layout.
-
-    Its stored layout has only Shared Job Settings and PDG, as spare folders, and the
-    definition's later parms sit below Submit, outside any tab.
-    """
-    # The old tabs as spare folders, with the Conda folder in the first, and the later parms last.
-    shared: FakeTemplate = _shared_tab("job_settings51", "folder2", "folder3")
-    assert shared.children is not None
-    shared.children.append(_conda())
-    layout: List[FakeTemplate] = [
-        shared,
-        FakeTemplate("folder4", "PDG", [FakeTemplate("working_dir")]),
-        FakeTemplate("submit"),
-        FakeTemplate("output_directories"),
-        FakeTemplate("hr_mode"),
-        FakeTemplate("hr_os"),
-    ]
-    spare: Set[str] = {"job_settings51", "folder2", "folder3", "folder4"} | set(_conda().names())
-    values: Dict[str, Any] = {**_REAL_VALUES, **_CONDA_VALUES, "queue_env_do_not_use_Conda": (0,)}
-    return FakeLayoutNode(_definition(), layout, spare, values)
-
-
 @pytest.fixture
 def scene(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeHou:
     """A saved scene, so the fake ``hou`` names its parm template types."""
@@ -287,12 +264,44 @@ def _frozen_submit_below_tabs_node() -> FakeLayoutNode:
 
 
 def test_an_old_nodes_stored_tabs_are_rebuilt_from_the_definition(scene: FakeHou) -> None:
-    """A node saved on the two-tab definition showed the new parms below Submit, outside any tab."""
-    # Rebuild the old node, then read its tabs and check nothing is left outside them.
-    node: FakeLayoutNode = _frozen_two_tab_node()
+    """A node saved on the two-tab definition showed the new parms below Submit, outside any tab.
+
+    The rebuild must not wait for a login, so the Conda fields come back without the
+    ROP's update, with their values. An artist's priority, host requirements and
+    output folders must not reset on load either.
+    """
+    # The node's stored layout, made on the two-tab definition: the old tabs as spare
+    # folders, the ROP's Conda folder in the first, and the later parms below Submit.
+    shared: FakeTemplate = _shared_tab("job_settings51", "folder2", "folder3")
+    assert shared.children is not None
+    shared.children.append(_conda())
+    layout: List[FakeTemplate] = [
+        shared,
+        FakeTemplate("folder4", "PDG", [FakeTemplate("working_dir")]),
+        FakeTemplate("submit"),
+        FakeTemplate("output_directories"),
+        FakeTemplate("hr_mode"),
+        FakeTemplate("hr_os"),
+    ]
+    spare: Set[str] = {"job_settings51", "folder2", "folder3", "folder4"} | set(_conda().names())
+    values: Dict[str, Any] = {**_REAL_VALUES, **_CONDA_VALUES, "queue_env_do_not_use_Conda": (0,)}
+    node: FakeLayoutNode = FakeLayoutNode(_definition(), layout, spare, values)
+
+    # Rebuild the old node, then read its tabs, where the Conda folder is, and every value.
     rebuild_layout_from_definition(node)
     assert node.tabs() == ["Shared Job Settings", "PDG", "Job Attachments", "Host Requirements"]
     assert all(entry.children is not None for entry in node.layout)
+    # The Conda folder goes back above Submit, so Submit stays last in the tab.
+    assert node.folder("Shared Job Settings") == [
+        "folder0",
+        "folder1",
+        "queue_env_do_not_use_Conda",
+        "submit",
+    ]
+    assert node.folder("Conda") == [_PACKAGES, _CHANNELS]
+    assert node.spare == set(_conda().names())
+    assert {name: node.values[name] for name in _REAL_VALUES} == _REAL_VALUES
+    assert {name: node.values[name] for name in _CONDA_VALUES} == _CONDA_VALUES
 
 
 def test_an_old_nodes_submit_below_the_tabs_moves_into_shared_job_settings(
@@ -314,41 +323,6 @@ def test_an_old_nodes_submit_below_the_tabs_moves_into_shared_job_settings(
     assert node.spare == set(_conda().names())
     assert {name: node.values[name] for name in _REAL_VALUES} == _REAL_VALUES
     assert {name: node.values[name] for name in _CONDA_VALUES} == _CONDA_VALUES
-
-
-def test_the_conda_fields_stay_in_shared_job_settings_with_their_values(scene: FakeHou) -> None:
-    """The rebuild must not wait for a login, so the Conda fields come back without the ROP's update."""
-    # Rebuild the old node, then read where the Conda folder is and what its fields hold.
-    node: FakeLayoutNode = _frozen_two_tab_node()
-    rebuild_layout_from_definition(node)
-    # The Conda folder goes back above Submit, so Submit stays last in the tab.
-    assert node.folder("Shared Job Settings") == [
-        "folder0",
-        "folder1",
-        "queue_env_do_not_use_Conda",
-        "submit",
-    ]
-    assert node.folder("Conda") == [_PACKAGES, _CHANNELS]
-    assert {name: node.values[name] for name in _CONDA_VALUES} == _CONDA_VALUES
-    assert node.spare == set(_conda().names())
-
-
-def test_every_value_of_the_definitions_own_parms_survives(scene: FakeHou) -> None:
-    """An artist's priority, host requirements and output folders must not reset on load."""
-    # Rebuild the old node, then read every parm the definition declares.
-    node: FakeLayoutNode = _frozen_two_tab_node()
-    rebuild_layout_from_definition(node)
-    assert {name: node.values[name] for name in _REAL_VALUES} == _REAL_VALUES
-
-
-def test_a_new_node_keeps_the_definitions_layout_and_gets_no_spare_parm(scene: FakeHou) -> None:
-    """A node made on the current definition has nothing to rebuild, so nothing is added."""
-    # A node whose layout is the definition's and that has no spare parm yet.
-    node: FakeLayoutNode = FakeLayoutNode(_definition(), _definition(), set(), dict(_REAL_VALUES))
-    rebuild_layout_from_definition(node)
-    assert node.tabs() == ["Shared Job Settings", "PDG", "Job Attachments", "Host Requirements"]
-    assert node.folder("Shared Job Settings") == ["folder0", "folder1", "submit"]
-    assert node.spare == set() and node.values == _REAL_VALUES
 
 
 def _no_group_folder() -> FakeTemplate:

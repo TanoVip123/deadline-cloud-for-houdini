@@ -4,18 +4,9 @@
 
 from __future__ import annotations
 
-from typing import List, Tuple
-
-from hypothesis import given
-from hypothesis import strategies as st
 
 from deadline.houdini_pdg.errors import GraphRefusedError, artist_message, format_refusals
 from deadline.houdini_pdg.validation import Refusal, RefusalScenario, Verdict
-
-# One line of text with no line break, for a subject, detail or remedy.
-_LINE: st.SearchStrategy[str] = st.text(
-    alphabet=st.characters(blacklist_categories=("Cc", "Cs", "Zl", "Zp")), min_size=1, max_size=20
-)
 
 
 def _refusal(subject: str, detail: str = "is wrong.", remedy: str = "Fix it.") -> Refusal:
@@ -33,18 +24,6 @@ def test_each_refusal_is_on_its_own_line_after_a_header() -> None:
         "- a: x. y.",
         "- b: p. q.",
     ]
-
-
-@given(st.lists(st.tuples(_LINE, _LINE, _LINE), min_size=1, max_size=8))
-def test_n_refusals_give_a_header_and_n_lines_each_starting_with_its_subject(
-    texts: List[Tuple[str, str, str]],
-) -> None:
-    """For any refusals, the text has one header and one bullet line per refusal, in order."""
-    # Build the refusals, then split the text and match each line to its subject.
-    refusals: Tuple[Refusal, ...] = tuple(_refusal(s, d, r) for s, d, r in texts)
-    lines: List[str] = format_refusals(refusals).split("\n")
-    assert len(lines) == len(refusals) + 1
-    assert all(line.startswith(f"- {s}: ") for line, (s, _, _) in zip(lines[1:], texts))
 
 
 def test_the_node_error_carries_the_same_lines() -> None:

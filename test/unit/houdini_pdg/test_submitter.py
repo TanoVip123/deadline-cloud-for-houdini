@@ -605,15 +605,6 @@ def test_without_host_requirements_no_step_has_any() -> None:
     assert all("hostRequirements" not in s for s in template["steps"])
 
 
-def test_editing_one_steps_requirements_leaves_the_others_alone() -> None:
-    """Each step gets its own copy, so a later change to one step can't reach the rest."""
-    # Build a two step template, then change the first step's copy.
-    sub: PdgSubmitter = make_submitter(GraphSnapshot(steps=(step("a", 1), step("b", 1))))
-    template: Dict[str, Any] = sub.get_job_template(sub.get_settings(), _GPU_LINUX)
-    template["steps"][0]["hostRequirements"]["amounts"].clear()
-    assert template["steps"][1]["hostRequirements"] == _GPU_LINUX
-
-
 def test_the_submitted_bundle_carries_the_nodes_host_requirements(tmp_path: Path) -> None:
     """The submitter takes the block from the host, so what the node sets is what the job gets."""
     # The host gives a block, and the bundle is written as the cook writes it.

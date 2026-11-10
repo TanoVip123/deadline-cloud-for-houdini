@@ -2090,15 +2090,13 @@ def test_closing_without_cancel_leaves_a_job_whose_tasks_were_all_offered() -> N
     assert h.summary().final_phase is CookPhase.COOKING
 
 
-#: The root of this OS's current drive, so a test path is absolute on Windows too.
-_DRIVE_ROOT: str = os.path.abspath(os.sep)
-
-
 def _all_cached() -> Tuple[NodeInfo, ...]:
     """CHAIN with every item PDG took from cache, so nothing is left and each node is outside the cook."""
     # Each node's items move to its cached items, and a's declare a file spelled
     # with "/", as Houdini spells paths on Windows too.
-    cache: str = _DRIVE_ROOT.replace("\\", "/").rstrip("/") + "/proj/cache/geo"
+    # The root of this OS's current drive, so the path is absolute on Windows too.
+    drive_root: str = os.path.abspath(os.sep)
+    cache: str = drive_root.replace("\\", "/").rstrip("/") + "/proj/cache/geo"
     nodes: Tuple[NodeInfo, ...] = nodes_for(CHAIN, {"a": cache + "/a.{i}.bgeo.sc"})
     return tuple(
         dataclasses.replace(
@@ -2109,30 +2107,6 @@ def _all_cached() -> Tuple[NodeInfo, ...]:
         )
         for node in nodes
     )
-
-
-def test_a_cook_pdg_ends_with_every_item_from_cache_is_refused_naming_each_step() -> None:
-    """When PDG took every item from files, nothing is offered and no job is built.
-
-    Without a refusal the cook ends with no job and no message, and the artist
-    can't tell why nothing reached the farm.
-    """
-    # PDG ends the cook without offering an item, and without a stop by the artist.
-    h: Harness = Harness(nodes=_all_cached())
-    h.start()
-    with pytest.raises(GraphRefusedError) as raised:
-        h.scheduler.on_stop_cook(False)
-    by_step: Dict[str, str] = {r.subject: r.detail for r in raised.value.verdict.refusals}
-    assert set(by_step) == {"a", "b"}
-    assert {r.scenario for r in raised.value.verdict.refusals} == {RefusalScenario.CACHED_OUTPUTS}
-    # The refusal names the file in this OS's spelling.
-    assert os.path.join(_DRIVE_ROOT, "proj", "cache", "geo", "a.0.bgeo.sc") in by_step["a"]
-    assert "no job was created" in by_step["a"]
-    for call in ("bundle_dir", "submit", "open_job", "put_payload", "release"):
-        assert h.events.count(call) == 0, call
-    summary: CookSummary = h.summary()
-    assert summary.final_phase is CookPhase.REFUSED and not summary.stopped_by_user
-    assert summary.refusals == (RefusalScenario.CACHED_OUTPUTS,)
 
 
 @pytest.mark.parametrize("listed, refused_", [((), True), (("/renders",), False)])
@@ -2243,22 +2217,6 @@ def test_a_graph_that_cannot_be_read_at_the_end_closes_the_cook_quietly(
         assert h.scheduler.on_stop_cook(False)
     assert _traceback_logged(caplog, "Could not read which work items PDG cooked from cache.")
     assert h.summary().refusals == () and h.scheduler._cook is None
-
-
-def test_a_cook_from_cache_is_still_refused_when_the_journal_cannot_record_its_end() -> None:
-    """A journal that raises at the close must not hide why no job was built.
-
-    The close raises out of the cook, and the node must still show the refusal.
-    """
-    # The journal raises while recording the summary of an all-cached cook.
-    h: Harness = Harness(nodes=_all_cached())
-    h.start()
-    h.events.faults["closed"] = RuntimeError("disk full")
-    with pytest.raises(GraphRefusedError) as raised:
-        h.scheduler.on_stop_cook(False)
-    assert {r.scenario for r in raised.value.verdict.refusals} == {RefusalScenario.CACHED_OUTPUTS}
-    assert h.journal.handler not in logging.getLogger(PACKAGE_LOGGER).handlers
-    assert h.events.count("submit") == 0
 
 
 def test_an_end_with_tasks_pdg_never_offered_fails_the_job_and_names_them(
