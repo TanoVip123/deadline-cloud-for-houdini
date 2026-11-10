@@ -1237,7 +1237,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     First the unsaved-scene check, then the network's default scheduler, the farm
     and the node's tabs, then a generate and every check on its items, then one confirmation,
     then a cook of the display node. Each step raises the problem it finds, and
-    one place shows it.
+    one place shows it in a popup and on the node's error tab.
     """
     from deadline.client.exceptions import UserInitiatedCancel
 
@@ -1308,11 +1308,29 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             raise GraphRefusedError(verdict)
     except UserInitiatedCancel:
         return False
-    except GraphRefusedError as refused:
-        _show("The cook can't start.\n\n" + format_refusals(refused.verdict.refusals))
-        return False
-    except CookSetupError as e:
-        _show(str(e))
+    except (GraphRefusedError, CookSetupError) as stopped:
+        text: str = (
+            "The cook can't start.\n\n" + format_refusals(stopped.verdict.refusals)
+            if isinstance(stopped, GraphRefusedError)
+            else str(stopped)
+        )
+        _show(text)
+        # The error tab keeps the text after the popup closes. PDG shows a cookError only
+        # once the node updates, and a generate on the scheduler node does that at once.
+        found: Any = _call(
+            _call(node, "getPDGGraphContext"),
+            "schedulerForName",
+            _call(node, "getPDGNodeName") or node.name(),
+        )
+        if found is None:
+            _logger.warning(
+                "Could not put the error on %s's error tab, because PDG has no scheduler "
+                "for the node until the network generates.",
+                node.path(),
+            )
+        else:
+            _call(found, "cookError", text)
+            _call(node, "generateStaticWorkItems", True)
         return False
     counts: str = (
         f"Steps: {len(snapshot.steps)}, tasks: {snapshot.total_tasks}"

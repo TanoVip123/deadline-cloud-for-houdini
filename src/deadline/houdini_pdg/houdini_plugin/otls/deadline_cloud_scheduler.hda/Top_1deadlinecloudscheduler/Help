@@ -45,7 +45,9 @@ check that fails starts nothing and creates no job.
   and any warnings. Click __Submit__ there, and the TOP network's
   display node cooks in the background. The job uses the settings on this
   node, and Submit doesn't change them, except that Always Save turns on
-  automatic saving.
+  automatic saving. When a check fails, Submit shows why in a popup. Once
+  the network has generated, it also puts the same text on this node's error
+  tab, so you can read it again while you fix the scene.
 
 Some checks need the generated work items, so the cook runs every check again
 before it submits the job. Results stay on the farm: download them with

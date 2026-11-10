@@ -739,3 +739,103 @@ def test_submit_dirties_the_items_keeping_files_before_it_generates(scene: FakeH
     text: str = scene.messages.calls[0][0]
     assert "sim:" in text and "outside the working directory" in text
     assert _cooks(network) == []
+
+
+class _ErrorTab:
+    """The scheduler node's error tab, as Houdini 21.0's hython showed it.
+
+    A ``cookError`` shows at the next generate on the scheduler node, and Submit's dirty
+    of the display node's items clears what shows.
+    """
+
+    def __init__(self, network: FakeNetwork) -> None:
+        self.shown: List[str] = []
+        self.scheduler: Any = network.context.schedulers["deadlinecloudscheduler1"]
+        self._read: int = 0
+        # Clear the tab on the display node's dirty, and show new errors on the node's generate.
+        display: Any = network.topnet.displayNode()
+        dirty: Any = display.dirtyAllWorkItems
+
+        def dirty_and_clear(remove_outputs: bool) -> None:
+            dirty(remove_outputs)
+            self.shown.clear()
+
+        display.dirtyAllWorkItems = dirty_and_clear
+        network.scheduler_node.on_generate = self._show_new_errors
+
+    def _show_new_errors(self) -> None:
+        calls: List[Tuple[Any, ...]] = self.scheduler.calls
+        self.shown.extend(call[1] for call in calls[self._read :] if call[0] == "cookError")
+        self._read = len(calls)
+
+
+def _refused_on_the_tab(scene: FakeHou) -> Tuple[FakeNetwork, _ErrorTab, str]:
+    """Submit a network whose render step is a Service step, which is refused, and return its popup text."""
+    network: FakeNetwork = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    tab: _ErrorTab = _ErrorTab(network)
+    network.node("render").hom.set_parm("pdg_cooktype", 3)
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    return network, tab, scene.messages.calls[-1][0]
+
+
+def test_a_refusal_stays_on_the_error_tab_until_the_fixed_scenes_next_submit(
+    scene: FakeHou,
+) -> None:
+    """The popup closes, so the artist needs the text on the node while fixing the scene.
+
+    The text must show at once, through the scheduler node's generate after ``cookError``,
+    and Submit's next dirty must clear it, so a fixed scene shows no stale error.
+    """
+    network: FakeNetwork
+    tab: _ErrorTab
+    text: str
+    network, tab, text = _refused_on_the_tab(scene)
+    assert "The cook can't start." in text and tab.shown == [text]
+    # The display node's items are only Submit's own dirty and generate.
+    display: Any = network.topnet.displayNode()
+    assert display.work_item_calls == [("dirty", False), ("generate", True)]
+    # Fix render and Submit again.
+    network.node("render").hom.remove_parm("pdg_cooktype")
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    assert tab.shown == []
+
+
+def test_a_cancel_at_the_save_prompt_leaves_the_error_tab_as_it_was(scene: FakeHou) -> None:
+    """Cancel checks nothing, so it must neither clear the last error nor add one."""
+    network: FakeNetwork
+    tab: _ErrorTab
+    text: str
+    network, tab, text = _refused_on_the_tab(scene)
+    scene.hip_file.unsaved = True
+    scene.messages.answers = [2]
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert tab.shown == [text]
+    assert [call for call in tab.scheduler.calls if call[0] == "cookError"] == [("cookError", text)]
+
+
+def test_a_bad_tab_value_goes_on_the_error_tab_too(scene: FakeHou) -> None:
+    """A CookSetupError's popup closes like a refusal's, so its text must stay on the node too."""
+    # PDG has the scheduler from an earlier generate, and the GPU minimum is above its maximum.
+    network: FakeNetwork = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    tab: _ErrorTab = _ErrorTab(network)
+    _with_requirements(network, hr_gpu_min=4, hr_gpu_max=2)
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    ((text, _buttons),) = scene.messages.calls
+    assert "hr_gpu_min" in text and tab.shown == [text]
+
+
+def test_with_no_scheduler_yet_the_popup_shows_and_the_tab_is_left_with_a_log_line(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Before any generate PDG may have no scheduler for the node, so only the popup can show.
+
+    The log must say why the tab is empty, and nothing is generated on the scheduler node.
+    """
+    network: FakeNetwork = _network()
+    _with_requirements(network, hr_gpu_min=4, hr_gpu_max=2)
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert "hr_gpu_min" in scene.messages.calls[0][0]
+    assert network.scheduler_node.generate_calls == []
+    assert "error tab" in caplog.text
