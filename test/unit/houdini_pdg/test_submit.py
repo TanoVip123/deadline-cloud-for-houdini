@@ -485,3 +485,20 @@ def test_a_node_whose_pdg_name_differs_from_its_name_is_named_as_pdg_names_it(
     network.topnet.display = network.node("subnet1_wedge1").hom
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     assert "No node in this cook runs a command on a worker" in scene.messages.calls[0][0]
+
+
+def test_each_submit_judges_the_graph_as_it_is_now(scene: FakeHou) -> None:
+    """A second Submit must read the graph again, or it would pass a step the artist just broke.
+
+    The same node submits twice, and between the two the render step's cook type
+    becomes Service, which the cook refuses.
+    """
+    network: FakeNetwork = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    # Make render a service step, then Submit the same node again.
+    network.node("render").hom.set_parm("pdg_cooktype", 3)
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    text: str = scene.messages.calls[-1][0]
+    assert "The cook can't start." in text and "render:" in text
+    assert _cooks(network) == [{"block": False}]

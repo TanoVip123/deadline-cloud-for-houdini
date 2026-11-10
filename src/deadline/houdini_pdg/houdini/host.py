@@ -33,7 +33,7 @@ from typing import (
 import hou  # type: ignore[import-not-found]
 import pdg  # type: ignore[import-not-found]
 
-from ..errors import CookSetupError, PayloadTransferError, format_refusals
+from ..errors import CookSetupError, GraphRefusedError, PayloadTransferError, format_refusals
 from ..graph import GraphSnapshot, NodeInfo, find_ancestors_among, synthesize
 from ..ports import ItemOutcome, ItemState, SceneFiles, T, WorkItemHandle
 from ..submitter import farm_problem, get_workstation_setting
@@ -335,21 +335,25 @@ class PreCookChecks:
         With ``interactive``, unsaved changes are saved first, or the artist cancels,
         which raises ``UserInitiatedCancel``. ``cook_set`` names the nodes the cook runs.
         """
-        if interactive:
-            on_main_thread(lambda: prompt_to_save(node))
-        # A settings problem is reported by the cook when it starts, so the topology
-        # is still judged without it.
-        verdict: Verdict = on_main_thread(
-            lambda: _check_network(
+
+        # One trip to the main thread for the prompt and both checks, since each waits on the UI.
+        def check() -> Verdict:
+            if interactive:
+                prompt_to_save(node)
+            # A settings problem is reported by the cook when it starts, so the topology
+            # is still judged without it.
+            found: Verdict = _check_network(
                 node,
                 _get_or_create_graph_context(node),
                 _read_settings_or_none(node),
                 cook_set,
                 None,
             )[0]
-        )
-        refusals: Tuple[Refusal, ...] = verdict.refusals + on_main_thread(_check_saved_scene)
-        return Verdict(refusals=refusals, advisories=verdict.advisories)
+            return Verdict(
+                refusals=found.refusals + _check_saved_scene(), advisories=found.advisories
+            )
+
+        return on_main_thread(check)
 
 
 def on_main_thread(read: Callable[[], T]) -> T:
@@ -1167,73 +1171,71 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
 
     First the unsaved-scene check, then the network's default scheduler and the
     farm, then a generate and every check on its items, then one confirmation,
-    then a cook of the display node.
+    then a cook of the display node. Each step raises the problem it finds, and
+    one place shows it.
     """
     from deadline.client.exceptions import UserInitiatedCancel
 
     read: Callable[[str], str] = get_setting or get_workstation_setting
-    # The save prompt comes first, so the artist answers it before anything else.
     try:
+        # The save prompt comes first, so the artist answers it before anything else.
         prompt_to_save(node)
-    except UserInitiatedCancel:
-        return False
-    network: Any = node.parent()
-    problem: str = _default_scheduler_problem(node, network) or farm_problem(read)
-    if problem:
-        _show(problem)
-        return False
-    display: Any = network.displayNode()
-    if display is None:
-        _show("The TOP network has no display node, so there is nothing to cook. Set one.")
-        return False
-    # The settings, the graph context and the cook set are read once, for every check below.
-    try:
+        network: Any = node.parent()
+        problem: str = _default_scheduler_problem(node, network) or farm_problem(read)
+        if problem:
+            raise CookSetupError(problem)
+        display: Any = network.displayNode()
+        if display is None:
+            raise CookSetupError(
+                "The TOP network has no display node, so there is nothing to cook. Set one."
+            )
+        # The settings, the graph context and the cook set are read once, for every check below.
         settings: SchedulerSettings = read_scheduler_settings(node)
-    except CookSetupError as e:
-        _show(str(e))
-        return False
-    context: Any = _get_or_create_graph_context(node)
-    cook_set: Optional[FrozenSet[str]] = _find_cook_set(context, display)
-    # A job shape over a quota is known from the wires, so nothing is generated for
-    # it, unless the artist turned validation off.
-    shape: Verdict = check_shape_quotas(readers.node_infos(_graph_nodes(context), None, cook_set))
-    if shape.refusals and settings.validate_graph:
-        _show("The cook can't start.\n\n" + format_refusals(shape.refusals))
-        return False
-    # Generate the display node's items, so every check sees the job the cook would
-    # submit, and stop at the first step that passes a task quota.
-    over_quota: List[Verdict] = []
+        context: Any = _get_or_create_graph_context(node)
+        cook_set: Optional[FrozenSet[str]] = _find_cook_set(context, display)
+        # A job shape over a quota is known from the wires, so nothing is generated for
+        # it, unless the artist turned validation off.
+        shape: Verdict = check_shape_quotas(
+            readers.node_infos(_graph_nodes(context), None, cook_set)
+        )
+        if shape.refusals and settings.validate_graph:
+            raise GraphRefusedError(shape)
+        # Generate the display node's items, so every check sees the job the cook would
+        # submit, and stop at the first step that passes a task quota.
+        over_quota: List[Verdict] = []
 
-    def stop(verdict: Verdict) -> bool:
-        if settings.validate_graph:
-            over_quota.append(verdict)
-        return settings.validate_graph
+        def stop(verdict: Verdict) -> bool:
+            if settings.validate_graph:
+                over_quota.append(verdict)
+            return settings.validate_graph
 
-    handler: Any = watch_task_counts(context, stop)
-    try:
-        display.generateStaticWorkItems(block=True)
-    finally:
-        _call(context, "removeEventHandler", handler)
-    if over_quota:
-        _show("The cook can't start.\n\n" + format_refusals(over_quota[0].refusals))
-        return False
-    # Read the items from this scheduler, as the cook does.
-    scheduler: Any = _call(
-        context, "schedulerForName", _call(node, "getPDGNodeName") or node.name()
-    )
-    dependency_graph: Any = _call(scheduler, "dependencyGraph", True)
-    checked: Verdict
-    snapshot: GraphSnapshot
-    checked, snapshot = _check_network(node, context, settings, cook_set, dependency_graph)
-    verdict: Verdict = Verdict(
-        refusals=checked.refusals + _check_saved_scene(), advisories=checked.advisories
-    )
-    if verdict.refusals:
-        _show("The cook can't start.\n\n" + format_refusals(verdict.refusals))
-        return False
-    try:
+        handler: Any = watch_task_counts(context, stop)
+        try:
+            display.generateStaticWorkItems(block=True)
+        finally:
+            _call(context, "removeEventHandler", handler)
+        if over_quota:
+            raise GraphRefusedError(over_quota[0])
+        # Read the items from this scheduler, as the cook does, and check them all.
+        scheduler: Any = _call(
+            context, "schedulerForName", _call(node, "getPDGNodeName") or node.name()
+        )
+        dependency_graph: Any = _call(scheduler, "dependencyGraph", True)
+        checked: Verdict
+        snapshot: GraphSnapshot
+        checked, snapshot = _check_network(node, context, settings, cook_set, dependency_graph)
+        verdict: Verdict = Verdict(
+            refusals=checked.refusals + _check_saved_scene(), advisories=checked.advisories
+        )
+        if verdict.refusals:
+            raise GraphRefusedError(verdict)
         requirements: Optional[Dict[str, Any]] = read_host_requirements(node)
         inputs: List[Tuple[str, str]] = read_listed_inputs(node)
+    except UserInitiatedCancel:
+        return False
+    except GraphRefusedError as refused:
+        _show("The cook can't start.\n\n" + format_refusals(refused.verdict.refusals))
+        return False
     except CookSetupError as e:
         _show(str(e))
         return False
@@ -1250,9 +1252,8 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         if inputs or settings.output_directories
         else "Extra attachments: none"
     )
-    if not _ask_to_confirm(
-        node, settings, verdict, read, [counts, _describe_host_requirements(requirements), attached]
-    ):
+    lines: List[str] = [counts, _describe_host_requirements(requirements), attached]
+    if not _ask_to_confirm(node, settings, verdict, read, lines):
         return False
     # The display node is what the network's own Cook button cooks.
     display.cookWorkItems(block=False)
