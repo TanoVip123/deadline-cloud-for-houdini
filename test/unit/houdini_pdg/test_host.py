@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Sequence, Set, Tuple
 
 import pytest
+from openjd.model import decode_job_template
 
 from .houdini_fakes import (
     COOKING_EXAMPLE,
@@ -1364,11 +1365,47 @@ def test_custom_amounts_and_attributes_are_read_from_each_multiparm_entry(scene:
     )
     assert read_host_requirements(node) == {
         "amounts": [
-            {"name": "amount.worker.licenses", "min": 2, "max": 5},
-            {"name": "amount.worker.cores", "min": 4},
+            {"name": "amount.licenses", "min": 2, "max": 5},
+            {"name": "amount.cores", "min": 4},
         ],
-        "attributes": [{"name": "attr.worker.studio", "allOf": ["vfx", "fire"]}],
+        "attributes": [{"name": "attr.studio", "allOf": ["vfx", "fire"]}],
     }
+
+
+def test_a_template_with_the_tabs_custom_and_hardware_requirements_decodes(
+    scene: FakeHou,
+) -> None:
+    """Open Job Description keeps amount.worker. and attr.worker. for itself, so a custom name
+    there makes Submit fail on every step. The template is decoded by openjd itself."""
+    node: FakeNode = _requirements_node(
+        hr_mode="custom",
+        hr_os="linux",
+        hr_gpu_min=1,
+        hr_amounts=1,
+        hr_amount_name1="license",
+        hr_amount_min1=1,
+        hr_amount_max1=-1,
+        hr_attributes=1,
+        hr_attr_name1="site",
+        hr_attr_option1="anyOf",
+        hr_attr_values1="a, b",
+    )
+    requirements: Any = read_host_requirements(node)
+    # The smallest valid template, with the tab's block on its one step.
+    template: Dict[str, Any] = {
+        "specificationVersion": "jobtemplate-2023-09",
+        "name": "requirements",
+        "steps": [
+            {
+                "name": "step",
+                "hostRequirements": requirements,
+                "script": {"actions": {"onRun": {"command": "echo"}}},
+            }
+        ],
+    }
+    decode_job_template(template=template)
+    names: List[str] = [e["name"] for g in ("amounts", "attributes") for e in requirements[g]]
+    assert "amount.license" in names and "attr.site" in names
 
 
 def test_custom_with_nothing_set_gives_no_requirements(scene: FakeHou) -> None:

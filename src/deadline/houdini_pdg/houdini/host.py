@@ -508,6 +508,9 @@ _HARDWARE_PARMS: Tuple[Tuple[str, str, int], ...] = (
 )
 #: What a number parm holds when the artist set nothing.
 _NOT_SET: int = -1
+#: The prefixes the ROP's dialog puts on custom amount and attribute names.
+_CUSTOM_AMOUNT_PREFIX: str = "amount."
+_CUSTOM_ATTRIBUTE_PREFIX: str = "attr."
 
 
 def read_host_requirements(node: Any) -> Optional[Dict[str, Any]]:
@@ -583,8 +586,17 @@ def read_host_requirements(node: Any) -> Optional[Dict[str, Any]]:
     serialized: Dict[str, Any] = HostRequirements(
         os_requirements=OsRequirements(operating_systems=systems, cpu_archs=archs),  # type: ignore[arg-type]
         hardware_requirements=HardwareRequirements(**hardware),
-        custom_requirements=CustomRequirements(amounts=amounts, attributes=attributes),
+        custom_requirements=CustomRequirements(),
     ).serialize()
+    # The library names custom entries amount.worker.<name> and attr.worker.<name>, a
+    # namespace Open Job Description keeps for itself, so they are renamed as the ROP names them.
+    for group, prefix, entries in (
+        ("amounts", _CUSTOM_AMOUNT_PREFIX, amounts),
+        ("attributes", _CUSTOM_ATTRIBUTE_PREFIX, attributes),
+    ):
+        serialized.setdefault(group, []).extend(
+            {**entry.serialize(), "name": prefix + entry.name} for entry in entries
+        )
     block: Dict[str, Any] = {group: entries for group, entries in serialized.items() if entries}
     return block or None
 

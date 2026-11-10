@@ -406,7 +406,7 @@
                 type    string
                 default { "" }
                 parmtag { "script_callback_language" "python" }
-                help    "The amount's name, without the amount.worker. prefix."
+                help    "The amount's name, without the amount. prefix."
             }
             parm {
                 name    "hr_amount_min#"
@@ -440,7 +440,7 @@
                 type    string
                 default { "" }
                 parmtag { "script_callback_language" "python" }
-                help    "The attribute's name, without the attr.worker. prefix."
+                help    "The attribute's name, without the attr. prefix."
             }
             parm {
                 name    "hr_attr_option#"
