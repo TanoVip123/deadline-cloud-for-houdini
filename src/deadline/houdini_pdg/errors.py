@@ -14,7 +14,9 @@
 
 from __future__ import annotations
 
-from .validation import Verdict
+from typing import List, Sequence
+
+from .validation import Refusal, Verdict
 
 
 class PDGSchedulerError(Exception):
@@ -30,8 +32,13 @@ class GraphRefusedError(PDGSchedulerError):
 
     def __init__(self, verdict: Verdict) -> None:
         self.verdict = verdict
-        lines = [f"{r.subject}: {r.detail} {r.remedy}" for r in verdict.refusals]
-        super().__init__(f"The graph was refused ({len(lines)} refusal(s)): " + "; ".join(lines))
+        super().__init__(refusal_text(verdict.refusals))
+
+
+def refusal_text(refusals: Sequence[Refusal]) -> str:
+    """The refusals as one header line, then one "subject: detail remedy" line each."""
+    lines: List[str] = [f"{r.subject}: {r.detail} {r.remedy}" for r in refusals]
+    return "\n".join([f"The graph was refused ({len(lines)} refusal(s)):"] + lines)
 
 
 class TaskMapIncompleteError(PDGSchedulerError):

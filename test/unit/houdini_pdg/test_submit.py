@@ -208,3 +208,19 @@ def test_a_wrong_working_directory_is_named_before_any_confirmation(scene: FakeH
     assert "'working_dir'" in text and buttons == ()
     assert scene.messages.options[0]["severity"] == "Error"
     assert _cooks(network) == []
+
+
+def test_the_refusal_popup_lists_one_refusal_per_line(scene: FakeHou) -> None:
+    """The popup uses the node error's text, a header and then one line per refusal."""
+    import re
+
+    network: Network = build_network(
+        COOKING_EXAMPLE, scheduler_parms={"working_dir": "$HIP", "validate_graph": 1}
+    )
+    submit(network.scheduler_node, get_setting=_workstation)
+    lines: List[str] = scene.messages.calls[0][0].split("\n")
+    header: int = next(
+        i for i, line in enumerate(lines) if line.startswith("The graph was refused")
+    )
+    count: int = int(re.search(r"\((\d+) refusal", lines[header]).group(1))  # type: ignore[union-attr]
+    assert count >= 1 and len(lines) == header + 1 + count

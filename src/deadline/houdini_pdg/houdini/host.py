@@ -33,7 +33,7 @@ from typing import (
 import hou  # type: ignore[import-not-found]
 import pdg  # type: ignore[import-not-found]
 
-from ..errors import CookSetupError, PayloadTransferError
+from ..errors import CookSetupError, PayloadTransferError, refusal_text
 from ..graph import GraphSnapshot, NodeInfo, synthesize
 from ..ports import ItemOutcome, ItemState, SceneFiles, T, WorkItemHandle
 from ..scene_reads import ReadReport, SceneReads, match_reads, _path_key
@@ -943,11 +943,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         return False
     verdict: Verdict = PreCookChecks().run(node, interactive=False)
     if verdict.refusals:
-        _show(
-            "The cook can't start:\n\n"
-            + "\n\n".join(f"{r.subject}: {r.detail} {r.remedy}" for r in verdict.refusals),
-            error=True,
-        )
+        _show("The cook can't start.\n\n" + refusal_text(verdict.refusals), error=True)
         return False
     try:
         settings: SchedulerSettings = read_scheduler_settings(node)
