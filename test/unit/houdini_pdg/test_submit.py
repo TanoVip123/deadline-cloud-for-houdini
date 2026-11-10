@@ -744,8 +744,8 @@ def test_submit_dirties_the_items_keeping_files_before_it_generates(scene: FakeH
 class _ErrorTab:
     """The scheduler node's error tab, as Houdini 21.0's hython showed it.
 
-    A ``cookError`` shows at the next generate on the scheduler node, and Submit's dirty
-    of the display node's items clears what shows.
+    A ``cookError`` shows at the next blocking generate on the scheduler node, and
+    Submit's dirty of the display node's items clears what shows.
     """
 
     def __init__(self, network: FakeNetwork) -> None:
@@ -755,22 +755,27 @@ class _ErrorTab:
         # Clear the tab on the display node's dirty, and show new errors on the node's generate.
         display: Any = network.topnet.displayNode()
         dirty: Any = display.dirtyAllWorkItems
+        generate: Any = network.scheduler_node.generateStaticWorkItems
 
         def dirty_and_clear(remove_outputs: bool) -> None:
             dirty(remove_outputs)
             self.shown.clear()
 
-        display.dirtyAllWorkItems = dirty_and_clear
-        network.scheduler_node.on_generate = self._show_new_errors
+        def generate_and_show(block: bool = False) -> None:
+            generate(block)
+            # A generate that doesn't block returns before the node updates.
+            if block:
+                calls: List[Tuple[Any, ...]] = self.scheduler.calls
+                self.shown.extend(c[1] for c in calls[self._read :] if c[0] == "cookError")
+                self._read = len(calls)
 
-    def _show_new_errors(self) -> None:
-        calls: List[Tuple[Any, ...]] = self.scheduler.calls
-        self.shown.extend(call[1] for call in calls[self._read :] if call[0] == "cookError")
-        self._read = len(calls)
+        display.dirtyAllWorkItems = dirty_and_clear
+        network.scheduler_node.generateStaticWorkItems = generate_and_show
 
 
 def _refused_on_the_tab(scene: FakeHou) -> Tuple[FakeNetwork, _ErrorTab, str]:
     """Submit a network whose render step is a Service step, which is refused, and return its popup text."""
+    # PDG has the scheduler from an earlier generate, and render becomes a Service step.
     network: FakeNetwork = _network()
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
     tab: _ErrorTab = _ErrorTab(network)
@@ -787,6 +792,7 @@ def test_a_refusal_stays_on_the_error_tab_until_the_fixed_scenes_next_submit(
     The text must show at once, through the scheduler node's generate after ``cookError``,
     and Submit's next dirty must clear it, so a fixed scene shows no stale error.
     """
+    # The first Submit is refused, and its popup text shows on the tab.
     network: FakeNetwork
     tab: _ErrorTab
     text: str
@@ -803,6 +809,7 @@ def test_a_refusal_stays_on_the_error_tab_until_the_fixed_scenes_next_submit(
 
 def test_a_cancel_at_the_save_prompt_leaves_the_error_tab_as_it_was(scene: FakeHou) -> None:
     """Cancel checks nothing, so it must neither clear the last error nor add one."""
+    # A refused Submit, then a change to the scene and a cancel at the save prompt.
     network: FakeNetwork
     tab: _ErrorTab
     text: str
@@ -833,6 +840,7 @@ def test_with_no_scheduler_yet_the_popup_shows_and_the_tab_is_left_with_a_log_li
 
     The log must say why the tab is empty, and nothing is generated on the scheduler node.
     """
+    # Nothing has generated, so PDG names no scheduler, and the GPU minimum is above its maximum.
     network: FakeNetwork = _network()
     _with_requirements(network, hr_gpu_min=4, hr_gpu_max=2)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
