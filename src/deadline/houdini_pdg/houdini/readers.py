@@ -200,7 +200,7 @@ def collect_scene_reads(
                             path=value,
                             is_output=is_output_parm(node_type, parm),
                             static_prefix=_static_prefix(raw, owner, expand),
-                            undefined_variables=_undefined_variables(raw, expand),
+                            undefined_variables=_undefined_variables(raw, owner, expand),
                             is_file_cache_write=file_cache_writes and parm == "file",
                         )
                     )
@@ -708,22 +708,28 @@ _FILE_CACHE: str = "filecache::2.0"
 _VARIABLE: "re.Pattern[str]" = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 
 
-def _undefined_variables(raw: str, expand: Optional[Callable[[str], str]]) -> Tuple[str, ...]:
-    """The ``$NAME`` variables in ``raw`` that ``expand`` raises for, each once. ``()`` without ``expand``."""
+# ``$OS`` and ``${OS}``: the name of the node that holds the parm.
+_OS_VARIABLE: "re.Pattern[str]" = re.compile(r"\$\{OS\}|\$OS(?!\w)")
+
+
+def _undefined_variables(
+    raw: str, owner: str, expand: Optional[Callable[[str], str]]
+) -> Tuple[str, ...]:
+    """The ``$NAME`` variables in ``raw`` that ``expand`` raises for, each once. ``()`` without ``expand``.
+
+    ``$OS`` names ``owner``, the node that holds the text, so it is defined when ``owner`` is known.
+    """
     if expand is None:
         return ()
     found: Dict[str, None] = {}
-    for braced, bare in _VARIABLE.findall(raw):
+    named: str = _OS_VARIABLE.sub(lambda _: owner, raw) if owner else raw
+    for braced, bare in _VARIABLE.findall(named):
         name: str = braced or bare
         try:
             expand("$" + name)
         except Exception:
             found[name] = None
     return tuple(found)
-
-
-# ``$OS`` and ``${OS}``: the name of the node that holds the parm.
-_OS_VARIABLE: "re.Pattern[str]" = re.compile(r"\$\{OS\}|\$OS(?!\w)")
 
 
 def _static_prefix(raw: str, owner: str, expand: Optional[Callable[[str], str]]) -> str:

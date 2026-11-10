@@ -504,6 +504,21 @@ def test_a_reads_static_prefix_has_its_variables_expanded(
     assert prefixes["other"] == ""
 
 
+def test_a_variable_the_session_expands_is_not_undefined_though_it_is_not_in_the_environment(
+    scene: FakeHou,
+) -> None:
+    """``$F4`` is Houdini's own variable, not an environment one, so it must not count as undefined.
+
+    Otherwise a carried attribute named ``f4`` would be refused as a variable here.
+    """
+    # The fake expands ``$F4`` to the frame, and leaves the unknown variable as typed.
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
+    hom: Any = network.node("render").hom
+    hom.set_parm("file", "$HIP/geo/$F4.${NO_SUCH_VARIABLE_X}.bgeo", kind="FileReference")
+    (read,) = HoudiniPdgHost(network.scheduler()).read_scene().reads
+    assert read.undefined_variables == ("NO_SUCH_VARIABLE_X",)
+
+
 def test_read_scene_walks_every_top_node_including_those_that_are_not_steps(
     scene: FakeHou,
 ) -> None:

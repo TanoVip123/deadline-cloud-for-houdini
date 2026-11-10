@@ -1641,6 +1641,18 @@ def test_a_read_records_the_variables_houdini_leaves_undefined() -> None:
     assert unknown.undefined_variables == ()
 
 
+def test_os_is_never_undefined_because_it_names_the_node_that_holds_the_text() -> None:
+    """``$OS`` is the owner node's name, which a global expander can't know, so it isn't undefined.
+
+    Otherwise a carried attribute named ``os`` would be refused as a variable.
+    """
+    top: _Hom = _Hom(
+        "/obj/topnet1/t", category="Top", parms=[_file("picture", "/v", "$HIP/$OS.${OS}.exr")]
+    )
+    (read,) = collect_scene_reads({"t": top}, expand=_hip).reads
+    assert read.undefined_variables == ()
+
+
 @pytest.mark.parametrize(
     "type_name, method, parm, expected",
     [

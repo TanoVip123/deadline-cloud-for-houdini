@@ -728,11 +728,12 @@ _VARIABLE: "re.Pattern[str]" = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 def _expand_variables(text: str) -> str:
     """``text`` with Houdini's variables expanded. Raises for a variable Houdini does not define.
 
-    Houdini expands an unknown variable to nothing, which would shorten a path.
+    The test is the session's own expansion, not the environment, so ``$F4`` and ``$T``
+    count as defined. An unknown variable gives nothing or stays as typed, which breaks a path.
     """
     for braced, bare in _VARIABLE.findall(text):
         name: str = braced or bare
-        if hou.getenv(name) is None:
+        if str(hou.text.expandString("$" + name)) in ("", "$" + name):
             raise KeyError(name)
     return str(hou.text.expandString(text))
 
