@@ -674,14 +674,6 @@ class Cook:
             if self._package_logger.level != self._package_logger_previous_level:
                 self._package_logger.setLevel(self._package_logger_previous_level)
 
-    def refuse_while_generating(self, verdict: Verdict) -> bool:
-        """Refuse the cook for a quota PDG passed while generating. Return whether to stop it.
-
-        PDG's stop that follows is a cancel, so the refusal is reported then. With
-        validation off, or once the snapshot is taken, it is only logged.
-        """
-        return self._refuse_before_any_offer(verdict)
-
     def refused_at_end(self) -> Optional[Verdict]:
         """The refusal of a cook PDG ended before offering anything, for its cache or a quota."""
         return self._refused_at_end
@@ -702,13 +694,13 @@ class Cook:
         except Exception:
             _logger.warning("Could not read which work items PDG cooked from cache.", exc_info=True)
             return
-        self._refuse_before_any_offer(found)
+        self.refuse_before_any_offer(found)
 
-    def _refuse_before_any_offer(self, found: Verdict) -> bool:
-        """Refuse a cook that has offered nothing yet, and keep the refusal for ``on_stop_cook``.
+    def refuse_before_any_offer(self, found: Verdict) -> bool:
+        """Refuse a cook that has offered nothing yet, and return whether it did.
 
-        With validation off the refusal is only a warning, as it is for a snapshot.
-        Returns whether the cook was refused.
+        Used for a quota passed while generating and for a cook that offered nothing, and
+        kept for ``on_stop_cook``. With validation off, or after the snapshot, it only logs.
         """
         verdict: Verdict = found if self._settings.validate_graph else waived(found)
         self._log_validation_verdict(verdict)
@@ -1361,7 +1353,7 @@ class PdgScheduler:
                 cook.close(cancel=False)
             raise
         try:
-            self._host.watch_generation(cook_set, cook.refuse_while_generating)
+            self._host.watch_generation(cook_set, cook.refuse_before_any_offer)
         except Exception:
             # Without it the first work item reads the graph at once.
             _logger.warning("Could not follow PDG's generation of the graph.", exc_info=True)
