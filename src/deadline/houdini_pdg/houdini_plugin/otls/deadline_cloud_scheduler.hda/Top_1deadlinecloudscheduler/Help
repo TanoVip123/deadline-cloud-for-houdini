@@ -31,8 +31,11 @@ check that fails starts nothing and creates no job.
 * Click __Submit__ on this node. If the scene has unsaved changes, it first
   saves them, or asks you to. Then it checks that the TOP network cooks on this
   scheduler, and runs the checks that need only the network's topology. If
-  they pass, it shows the job's farm, queue, name, priority, and working
-  directory, and any warnings. Click __Submit__ there, and the TOP network's
+  they pass, it generates the work items and runs every check on them. It
+  stops generating as soon as a step or the job has more tasks than Deadline
+  Cloud allows. Then it shows the job's farm, queue, name, priority, working
+  directory, step and task counts, host requirements, and extra attachments,
+  and any warnings. Click __Submit__ there, and the TOP network's
   display node cooks in the background. The job uses the settings on this
   node, and Submit doesn't change them, except that Always Save turns on
   automatic saving.
@@ -132,6 +135,61 @@ Include Adaptor Wheels:
 Adaptor Wheels:
     #id: adaptor_wheels
     The directory that holds the adaptor wheels.
+
+== Job Attachments ==
+
+The cook attaches the saved scene and the files its parms name on every cook.
+Use these lists only for what that scan can't find.
+
+Input Filenames:
+    #id: input_filenames
+    Files the job needs that the scene doesn't name in a parm, such as a file a
+    Python node opens. They are attached next to the scene's own files. A
+    listed file that doesn't exist stops the cook.
+
+Input Directories:
+    #id: input_directories
+    Folders whose files are all attached as inputs. A folder that is a drive or
+    a home directory, or holds one, stops the cook.
+
+Output Directories:
+    #id: output_directories
+    Folders outside the working directory that tasks write to. Each task
+    uploads what it writes there, so the steps below and Deadline Cloud
+    Monitor can fetch it. A folder that holds the working directory, or is
+    inside it, stops the cook.
+
+== Host Requirements ==
+
+The requirements apply to every step of the job, as on the Deadline Cloud ROP.
+Each number is -1 when it's not set.
+
+Run On:
+    #id: hr_mode
+    __All available worker hosts__, or only __Worker hosts that meet the
+    following requirements__.
+
+Operating System:
+    #id: hr_os
+    The operating systems a worker may run. Leave empty for any.
+
+CPU Architecture:
+    #id: hr_cpu_arch
+    The CPU architectures a worker may have. Leave empty for any.
+
+vCPUs Min:
+    #id: hr_vcpu_min
+    The fewest vCPUs a worker must have. The other minimum and maximum fields
+    work the same way. Memory and GPU memory are in GiB.
+
+Custom Amounts:
+    #id: hr_amounts
+    Amounts your fleet defines, each with a name and a minimum or maximum.
+
+Custom Attributes:
+    #id: hr_attributes
+    Attributes your fleet defines, each with a name, any of or all of, and
+    comma-separated values.
 
 Submit:
     #id: submit

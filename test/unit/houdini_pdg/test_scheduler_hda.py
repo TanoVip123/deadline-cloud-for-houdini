@@ -123,3 +123,96 @@ def test_the_job_number_parms_are_plain_integer_fields(parm: str) -> None:
     block: str = NODE_PARMS[parm]
     assert re.search(r"type\s+integer", block)
     assert re.search(r'parmtag\s*\{\s*"sidefx::slider"\s+"none"\s*\}', block), parm
+
+
+def _groups(dialog_script: str) -> List[Tuple[str, str]]:
+    """Each top-level tab, as (name, label), in the order the node shows them."""
+    return re.findall(r'\n    group \{\s*name\s+"(\w+)"\s*label\s+"([^"]+)"', dialog_script)
+
+
+def _lists(dialog_script: str) -> Dict[str, Tuple[str, str]]:
+    """Each multiparm or multiscroll, with its kind and the text of its block."""
+    return {
+        match.group(2): (match.group(1), match.group(3))
+        for match in re.finditer(
+            r"\b(multiparm|multiscroll)\s*\{\s*name\s+\"(\w+)\"(.*?)\n        \}",
+            dialog_script,
+            re.S,
+        )
+    }
+
+
+NODE_SCRIPT: str = _read(_NODE, "DialogScript")
+
+
+def test_the_node_has_the_job_attachments_and_host_requirements_tabs_after_pdg() -> None:
+    """The artist asked for the ROP's two tabs, so they follow the node's own tabs."""
+    assert _groups(NODE_SCRIPT) == [
+        ("job_settings", "Shared Job Settings"),
+        ("job_settings_1", "PDG"),
+        ("job_settings_2", "Job Attachments"),
+        ("host_requirements", "Host Requirements"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "name, entry, kind",
+    [
+        ("input_filenames", "input_filenames#", "file"),
+        ("input_directories", "input_dir#", "directory"),
+        ("output_directories", "output_dir#", "directory"),
+    ],
+)
+def test_the_attachment_lists_match_the_rops(name: str, entry: str, kind: str) -> None:
+    """The ROP's reader evaluates these by name, so a renamed parm would read as an empty list."""
+    for script in (NODE_SCRIPT, _read(_ROP, "DialogScript")):
+        list_kind, block = _lists(script)[name]
+        assert list_kind == "multiscroll"
+        assert re.search(r'name\s+"' + re.escape(entry) + r'"\s.*?type\s+' + kind, block, re.S)
+
+
+def test_the_node_has_no_parse_files_button_and_no_stored_scan() -> None:
+    """The cook scans the scene every time, so a stored scan would only go stale."""
+    names: Set[str] = set(_lists(NODE_SCRIPT)) | set(NODE_PARMS)
+    assert "parse_files" not in names
+    assert not {name for name in names if name.startswith("auto_")} - {"auto_save_hip"}
+
+
+_HOST_PARMS: List[Tuple[str, str]] = [("hr_os", '""'), ("hr_cpu_arch", '""')] + [
+    (f"hr_{field}_{end}", '"-1"')
+    for field in ("vcpu", "memory", "gpu", "gpu_memory", "scratch")
+    for end in ("min", "max")
+]
+
+
+@pytest.mark.parametrize("parm, default", _HOST_PARMS)
+def test_each_host_requirement_defaults_to_not_set_and_waits_for_custom(
+    parm: str, default: str
+) -> None:
+    """The host reads -1 as not set, and a field that works with "all workers" chosen would mislead."""
+    block: str = NODE_PARMS[parm]
+    assert re.search(r"default\s*\{\s*" + re.escape(default) + r"\s*\}", block), parm
+    assert 'disablewhen "{ hr_mode == all }"' in block, parm
+
+
+def test_the_host_requirements_mode_offers_all_workers_first() -> None:
+    """A new node must run on any worker, as a ROP whose tab was never opened does."""
+    block: str = NODE_PARMS["hr_mode"]
+    assert re.findall(r'"(\w+)"\s+"[^"]+"', block) == ["all", "custom"]
+    assert re.search(r'default\s*\{\s*"0"\s*\}', block)
+
+
+@pytest.mark.parametrize(
+    "name, entries",
+    [
+        ("hr_amounts", ["hr_amount_name#", "hr_amount_min#", "hr_amount_max#"]),
+        ("hr_attributes", ["hr_attr_name#", "hr_attr_option#", "hr_attr_values#"]),
+    ],
+)
+def test_the_custom_requirement_lists_have_the_entries_the_host_reads(
+    name: str, entries: List[str]
+) -> None:
+    """The host reads each entry by name and number, so a renamed one would be dropped."""
+    kind, block = _lists(NODE_SCRIPT)[name]
+    assert kind == "multiparm" and 'disablewhen "{ hr_mode == all }"' in block
+    assert re.findall(r'name\s+"(hr_\w+#)"', block) == entries
