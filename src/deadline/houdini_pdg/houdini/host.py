@@ -267,6 +267,11 @@ class HoudiniPdgHost:
             self._node = self.on_main_thread(lambda: _scheduler_node(self._scheduler))
         return self._node
 
+    def host_requirements(self) -> Optional[Dict[str, Any]]:
+        """The node's Host Requirements tab as the job's block, or None for any worker."""
+        node: Any = self.scheduler_node()
+        return self.on_main_thread(lambda: read_host_requirements(node))
+
     def read_settings(self) -> SchedulerSettings:
         """The cook's settings, from the scheduler node's parms."""
         node: Any = self.scheduler_node()
@@ -418,6 +423,108 @@ def read_scheduler_settings(node: Any) -> SchedulerSettings:
         debug_level=_debug_level(node),
         validate_graph=bool(_parm(node, _VALIDATE_GRAPH_PARM, 1, as_text=False)),
     )
+
+
+#: Each hardware field of the tab: its parm stem, the library's field stem, and the
+#: factor from what the artist types to what the service counts (GiB to MiB).
+_HARDWARE_PARMS: Tuple[Tuple[str, str, int], ...] = (
+    ("vcpu", "cpu", 1),
+    ("memory", "memory", 1024),
+    ("gpu", "acceleration", 1),
+    ("gpu_memory", "acceleration_memory", 1024),
+    ("scratch", "scratch_space", 1),
+)
+#: What a number parm holds when the artist set nothing.
+_NOT_SET: int = -1
+
+
+def read_host_requirements(node: Any) -> Optional[Dict[str, Any]]:
+    """The Host Requirements tab as the block the ROP's dialog gives, or None for any worker.
+
+    Built with the client library's classes. A value they refuse raises ``CookSetupError``
+    naming the parm. Call it on the main thread.
+    """
+    from deadline.client.ui.dataclasses import (
+        CustomAmountRequirement,
+        CustomAttributeRequirement,
+        CustomRequirements,
+        HardwareRequirements,
+        HostRequirements,
+        OsRequirements,
+    )
+
+    if _parm(node, "hr_mode", "all", as_text=True) != "custom":
+        return None
+    # Operating systems and CPU architectures, each checked on its own to name its parm.
+    systems: List[str] = str(_parm(node, "hr_os", "", as_text=True)).split()
+    archs: List[str] = str(_parm(node, "hr_cpu_arch", "", as_text=True)).split()
+    for parm, chosen in (
+        ("hr_os", {"operating_systems": systems}),
+        ("hr_cpu_arch", {"cpu_archs": archs}),
+    ):
+        _built(lambda: OsRequirements(**chosen), parm)
+    # Each min and max pair, converted to the units the service counts.
+    hardware: Dict[str, int] = {}
+    for stem, field, factor in _HARDWARE_PARMS:
+        pair: Dict[str, int] = {}
+        for end in ("min", "max"):
+            typed: int = int(_parm(node, f"hr_{stem}_{end}", _NOT_SET, as_text=False))
+            pair[f"{field}_{end}"] = typed * factor if typed != _NOT_SET else _NOT_SET
+        _built(lambda: HardwareRequirements(**pair), f"hr_{stem}_min and hr_{stem}_max")
+        hardware.update(pair)
+    # The custom amounts and attributes, one multiparm entry each, numbered from 1.
+    amounts: List[Any] = []
+    for index in range(1, int(_parm(node, "hr_amounts", 0, as_text=False)) + 1):
+        bounds: List[int] = [
+            int(_parm(node, f"hr_amount_{end}{index}", _NOT_SET, as_text=False))
+            for end in ("min", "max")
+        ]
+        amount: Any = _built(
+            lambda: CustomAmountRequirement(
+                name=str(_parm(node, f"hr_amount_name{index}", "", as_text=True)).strip(),
+                min=bounds[0] if bounds[0] != _NOT_SET else CustomAmountRequirement.DEFAULT_VALUE,
+                max=bounds[1] if bounds[1] != _NOT_SET else CustomAmountRequirement.DEFAULT_VALUE,
+            ),
+            f"hr_amount_name{index}, hr_amount_min{index} and hr_amount_max{index}",
+        )
+        amounts.append(amount)
+    attributes: List[Any] = []
+    for index in range(1, int(_parm(node, "hr_attributes", 0, as_text=False)) + 1):
+        values: List[str] = [
+            value.strip()
+            for value in str(_parm(node, f"hr_attr_values{index}", "", as_text=True)).split(",")
+            if value.strip()
+        ]
+        # The library checks the values only when it serializes the entry.
+        attribute: Any = _built(
+            lambda: CustomAttributeRequirement(
+                name=str(_parm(node, f"hr_attr_name{index}", "", as_text=True)).strip(),
+                option=str(_parm(node, f"hr_attr_option{index}", "anyOf", as_text=True)),
+                values=values,
+            ),
+            f"hr_attr_name{index}, hr_attr_option{index} and hr_attr_values{index}",
+        )
+        _built(attribute.serialize, f"hr_attr_values{index}")
+        attributes.append(attribute)
+    # The library writes an empty list for a group with nothing set, and the service
+    # refuses an empty block, so both are dropped.
+    serialized: Dict[str, Any] = HostRequirements(
+        os_requirements=OsRequirements(operating_systems=systems, cpu_archs=archs),  # type: ignore[arg-type]
+        hardware_requirements=HardwareRequirements(**hardware),
+        custom_requirements=CustomRequirements(amounts=amounts, attributes=attributes),
+    ).serialize()
+    block: Dict[str, Any] = {group: entries for group, entries in serialized.items() if entries}
+    return block or None
+
+
+def _built(build: Callable[[], T], parms: str) -> T:
+    """``build()``, with a ``ValueError`` from the library raised as ``CookSetupError`` naming ``parms``."""
+    try:
+        return build()
+    except ValueError as e:
+        raise CookSetupError(
+            f"The Host Requirements tab's {parms} parm(s) are not valid: {e}"
+        ) from e
 
 
 def _debug_level(node: Any) -> int:
@@ -1052,6 +1159,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         return False
     try:
         settings: SchedulerSettings = read_scheduler_settings(node)
+        requirements: Optional[Dict[str, Any]] = read_host_requirements(node)
     except CookSetupError as e:
         _show(str(e), error=True)
         return False
@@ -1060,7 +1168,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         if dependency_graph is not None
         else "Steps and tasks: counted when the cook starts"
     )
-    if not _confirmed(node, settings, verdict, read, counts):
+    if not _confirmed(node, settings, verdict, read, [counts, _describe(requirements)]):
         return False
     # The display node is what the network's own Cook button cooks.
     display.cookWorkItems(block=False)
@@ -1125,7 +1233,7 @@ def _confirmed(
     settings: SchedulerSettings,
     verdict: Verdict,
     read: Callable[[str], str],
-    counts: str,
+    extra: List[str],
 ) -> bool:
     """Show what will be submitted, with any advisory, and return whether the artist chose Submit."""
     # The job as it will be submitted, then any warnings in the details.
@@ -1135,7 +1243,7 @@ def _confirmed(
         f"Job name: {_text_parm(node, 'name') or os.path.basename(str(hou.hipFile.path()))}",
         f"Priority: {_text_parm(node, 'priority') or '50'}",
         f"Working directory: {settings.working_dir}",
-        counts,
+        *extra,
     ]
     details: str = "\n\n".join(f"{a.subject}: {a.detail}" for a in verdict.advisories)
     choice: int = hou.ui.displayMessage(
@@ -1147,6 +1255,24 @@ def _confirmed(
         details=details or None,
     )
     return choice == 0
+
+
+def _describe(requirements: Optional[Dict[str, Any]]) -> str:
+    """The host requirements as one confirmation line, such as ``amount.worker.gpu min 1``."""
+    if not requirements:
+        return "Host requirements: any worker"
+    # Each attribute with its values, then each amount with its bounds.
+    parts: List[str] = [
+        f"{entry['name']} {'any of' if 'anyOf' in entry else 'all of'} "
+        + ", ".join(entry.get("anyOf") or entry.get("allOf") or ())
+        for entry in requirements.get("attributes", ())
+    ] + [
+        " ".join(
+            [entry["name"]] + [f"{end} {entry[end]}" for end in ("min", "max") if end in entry]
+        )
+        for entry in requirements.get("amounts", ())
+    ]
+    return "Host requirements: " + ", ".join(parts)
 
 
 def _text_parm(node: Any, name: str) -> str:

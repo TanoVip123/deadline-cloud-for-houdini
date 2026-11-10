@@ -281,6 +281,10 @@ class PdgHost(Protocol):
         """The scheduler node's queue parameter values, as OpenJD parameter values."""
         ...
 
+    def host_requirements(self) -> Optional[Dict[str, Any]]:
+        """The job's host requirements block, or None when any worker may run it."""
+        ...
+
     def on_main_thread(self, read: Callable[[], T]) -> T:
         """Run ``read`` where it may use ``hou``, and return its result or raise its error."""
         ...

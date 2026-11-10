@@ -41,6 +41,7 @@ from deadline.houdini_pdg.houdini.host import (
     HoudiniPdgHost,
     PreCookChecks,
     cook_set_names,
+    read_host_requirements,
     read_scheduler_settings,
 )
 from deadline.houdini_pdg.houdini.settings import SchedulerSettings
@@ -1273,3 +1274,106 @@ def test_the_scene_directory_comes_from_the_hip_when_the_environment_lacks_it(
     """The checks resolve ``$HIP`` paths, and a session may not have ``HIP`` set."""
     monkeypatch.delenv("HIP")
     assert host_module._environment()["HIP"] == str(tmp_path / "scene")
+
+
+# -- host requirements --------------------------------------------------------
+
+
+def _requirements_node(**parms: Any) -> FakeNode:
+    """A scheduler node with the Host Requirements tab at its defaults, plus ``parms``."""
+    # Every number defaults to -1, which means not set, as on the HDA.
+    defaults: Dict[str, Any] = {"hr_mode": "all", "hr_os": "", "hr_cpu_arch": ""}
+    for field in ("vcpu", "memory", "gpu", "gpu_memory", "scratch"):
+        defaults[f"hr_{field}_min"] = -1
+        defaults[f"hr_{field}_max"] = -1
+    defaults.update({"hr_amounts": 0, "hr_attributes": 0})
+    defaults.update(parms)
+    return FakeNode(SCHEDULER_PATH, parms=defaults)
+
+
+def test_run_on_all_workers_gives_no_requirements(scene: FakeHou) -> None:
+    """Even with values set, the first choice on the tab means any worker may run the job."""
+    node: FakeNode = _requirements_node(hr_os="linux", hr_gpu_min=1)
+    assert read_host_requirements(node) is None
+
+
+def test_a_node_from_before_the_tab_existed_has_no_requirements(scene: FakeHou) -> None:
+    """A scene saved before the tab has none of its parms, and must still cook on any worker."""
+    assert read_host_requirements(FakeNode(SCHEDULER_PATH, parms={})) is None
+
+
+def test_the_tabs_values_become_the_block_the_rops_dialog_gives(scene: FakeHou) -> None:
+    """Memory is typed in GiB and the service counts MiB, so a missed conversion asks for 16 MiB."""
+    node: FakeNode = _requirements_node(
+        hr_mode="custom", hr_os="linux windows", hr_vcpu_min=8, hr_memory_min=16, hr_memory_max=64
+    )
+    assert read_host_requirements(node) == {
+        "attributes": [{"name": "attr.worker.os.family", "anyOf": ["linux", "windows"]}],
+        "amounts": [
+            {"name": "amount.worker.vcpu", "min": 8},
+            {"name": "amount.worker.memory", "min": 16384, "max": 65536},
+        ],
+    }
+
+
+def test_gpu_memory_is_converted_from_gib_and_scratch_is_not(scene: FakeHou) -> None:
+    """The service counts GPU memory in MiB and scratch space in GiB, as the ROP's dialog sends them."""
+    node: FakeNode = _requirements_node(hr_mode="custom", hr_gpu_memory_min=8, hr_scratch_max=100)
+    assert read_host_requirements(node) == {
+        "amounts": [
+            {"name": "amount.worker.gpu.memory", "min": 8192},
+            {"name": "amount.worker.disk.scratch", "max": 100},
+        ]
+    }
+
+
+def test_custom_amounts_and_attributes_are_read_from_each_multiparm_entry(scene: FakeHou) -> None:
+    """Each entry is its own requirement, and an attribute's values are split at the commas."""
+    node: FakeNode = _requirements_node(
+        hr_mode="custom",
+        hr_amounts=1,
+        hr_amount_name1="licenses",
+        hr_amount_min1=2,
+        hr_amount_max1=-1,
+        hr_attributes=1,
+        hr_attr_name1="studio",
+        hr_attr_option1="allOf",
+        hr_attr_values1="vfx, fire",
+    )
+    assert read_host_requirements(node) == {
+        "amounts": [{"name": "amount.worker.licenses", "min": 2}],
+        "attributes": [{"name": "attr.worker.studio", "allOf": ["vfx", "fire"]}],
+    }
+
+
+def test_custom_with_nothing_set_gives_no_requirements(scene: FakeHou) -> None:
+    """An empty block would make the service refuse the job, so it is left out."""
+    assert read_host_requirements(_requirements_node(hr_mode="custom")) is None
+
+
+@pytest.mark.parametrize(
+    "parms, named",
+    [
+        ({"hr_gpu_min": 4, "hr_gpu_max": 2}, "hr_gpu_min"),
+        ({"hr_os": "beos"}, "hr_os"),
+        (
+            {
+                "hr_attributes": 1,
+                "hr_attr_name1": "studio",
+                "hr_attr_option1": "anyOf",
+                "hr_attr_values1": " ",
+            },
+            "hr_attr_values1",
+        ),
+        (
+            {"hr_amounts": 1, "hr_amount_name1": "", "hr_amount_min1": 1, "hr_amount_max1": -1},
+            "hr_amount_name1",
+        ),
+    ],
+)
+def test_a_value_the_library_refuses_names_the_parm(
+    scene: FakeHou, parms: Dict[str, Any], named: str
+) -> None:
+    """The service would refuse the job after the upload, without naming what to fix."""
+    with pytest.raises(CookSetupError, match=named):
+        read_host_requirements(_requirements_node(hr_mode="custom", **parms))

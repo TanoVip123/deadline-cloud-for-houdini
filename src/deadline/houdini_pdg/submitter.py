@@ -8,6 +8,7 @@ same place as the ROP's: the workstation defaults and the node's queue parameter
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import os
 import uuid
@@ -158,14 +159,17 @@ class PdgSubmitter(BaseSubmitter):
         settings: BaseSubmitterSettings,
         host_requirements: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """One step per snapshot step, each with an INT ``TaskIndex`` parameter, plus the shared wheels override."""
-        # The scheduler offers no host requirements, so the argument is ignored.
+        """One step per snapshot step, each with an INT ``TaskIndex`` parameter, plus the shared wheels override.
+
+        ``host_requirements`` goes on every step, as the ROP does.
+        """
         template: Dict[str, Any] = _job_template(
             self._require_snapshot(),
             houdini_version=self._host.houdini_version(),
             queue_parameter_definitions=self._host.on_main_thread(
                 lambda: read_queue_parameter_definitions(self._node)
             ),
+            host_requirements=host_requirements,
         )
         if settings.description:
             template["description"] = settings.description
@@ -241,7 +245,9 @@ class PdgSubmitter(BaseSubmitter):
             # The node's queue parameters are declared in the template, and the
             # queue's own are merged in on creation, so none are fetched here.
             settings: PdgSubmitterSettings = self.get_settings()
-            context: SubmissionContext = self.get_submission_context(settings, queue_parameters=[])
+            context: SubmissionContext = self.get_submission_context(
+                settings, queue_parameters=[], host_requirements=self._host.host_requirements()
+            )
             os.makedirs(bundle_dir, exist_ok=True)
             write_job_bundle(context, bundle_dir)
         except (PDGSchedulerError, ValueError):
@@ -350,6 +356,7 @@ def _job_template(
     *,
     houdini_version: str,
     queue_parameter_definitions: List[Dict[str, Any]],
+    host_requirements: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """The template for a snapshot. Pure, so it can be validated without a farm or a scene."""
     # A dependency outside the job would make CreateJob refuse it, so refuse it here.
@@ -363,12 +370,17 @@ def _job_template(
         d for d in queue_parameter_definitions if d.get("name") not in _RESERVED_PARAMETER_NAMES
     ]
     definitions += [dict(definition) for definition in _PDG_PARAMETER_DEFINITIONS]
+    # One set of requirements for the whole job, copied so each step owns its own.
+    steps: List[Dict[str, Any]] = [_step(step) for step in snapshot.steps]
+    if host_requirements:
+        for definition in steps:
+            definition["hostRequirements"] = copy.deepcopy(host_requirements)
     return {
         "specificationVersion": "jobtemplate-2023-09",
         "name": "{{Param.CookName}}",
         "parameterDefinitions": definitions,
         "jobEnvironments": [_session_environment(houdini_version)],
-        "steps": [_step(step) for step in snapshot.steps],
+        "steps": steps,
     }
 
 

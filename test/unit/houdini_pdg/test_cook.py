@@ -295,6 +295,9 @@ class FakeHost:
         self.watching = True
         self.on_quota_exceeded = on_quota_exceeded
 
+    def host_requirements(self) -> Optional[Dict[str, Any]]:
+        return None
+
     def pending_generation(self) -> Sequence[str]:
         # Each queued answer is used once: names, or an error to raise.
         self.events("pending_generation")

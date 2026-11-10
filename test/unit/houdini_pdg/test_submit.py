@@ -326,3 +326,40 @@ def test_a_step_over_the_task_quota_stops_submits_generate_and_is_shown(scene: F
     assert network.context.canceled.wait(5) and _cooks(network) == []
     # The count stops with the generate, so a later cook isn't counted by it.
     assert network.context.handlers == []
+
+
+def _with_requirements(network: Network, **parms: Any) -> None:
+    """Set the Host Requirements tab to custom with ``parms``, the rest at the HDA's defaults."""
+    values: Dict[str, Any] = {"hr_mode": "custom", "hr_os": "", "hr_cpu_arch": ""}
+    for field in ("vcpu", "memory", "gpu", "gpu_memory", "scratch"):
+        values[f"hr_{field}_min"] = -1
+        values[f"hr_{field}_max"] = -1
+    values.update({"hr_amounts": 0, "hr_attributes": 0}, **parms)
+    for name, value in values.items():
+        network.scheduler_node.set_parm(name, value)
+
+
+def test_the_confirmation_lists_the_host_requirements(scene: FakeHou) -> None:
+    """The artist sees which workers can take the job before choosing Submit."""
+    network: Network = _network()
+    _with_requirements(network, hr_os="linux", hr_gpu_min=1)
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    text: str = scene.messages.calls[0][0]
+    assert "Host requirements: attr.worker.os.family any of linux, amount.worker.gpu min 1" in text
+
+
+def test_the_confirmation_says_any_worker_when_there_are_no_requirements(scene: FakeHou) -> None:
+    """Without the line an artist can't tell a job for any worker from one whose tab was ignored."""
+    network: Network = _network()
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    assert "Host requirements: any worker" in scene.messages.calls[0][0]
+
+
+def test_an_invalid_host_requirement_is_shown_and_nothing_cooks(scene: FakeHou) -> None:
+    """The service would refuse the job only after the scene was uploaded."""
+    network: Network = _network()
+    _with_requirements(network, hr_gpu_min=4, hr_gpu_max=2)
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    ((text, buttons),) = scene.messages.calls
+    assert "hr_gpu_min" in text and buttons == ()
+    assert _cooks(network) == []

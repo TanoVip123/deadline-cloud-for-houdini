@@ -22,6 +22,7 @@ from typing import (
     Set,
     Tuple,
     Type,
+    cast,
 )
 
 import jsonschema
@@ -140,6 +141,8 @@ class FakeHost:
         self.queue_values: List[Dict[str, Any]] = queue_values or []
         self.allowed: List[bool] = allowed if allowed is not None else [False]
         self.main_thread_reads: int = 0
+        #: The block the node's Host Requirements tab gives, or None for any worker.
+        self.requirements: Optional[Dict[str, Any]] = None
 
     def scene_files(self) -> SceneFiles:
         return self.scene
@@ -149,6 +152,9 @@ class FakeHost:
 
     def queue_parameter_values(self) -> List[Dict[str, Any]]:
         return self.queue_values
+
+    def host_requirements(self) -> Optional[Dict[str, Any]]:
+        return self.requirements
 
     def on_main_thread(self, read: Callable[[], Any]) -> Any:
         # Count the read, and open the window a guarded node checks.
@@ -570,6 +576,48 @@ def test_the_node_queue_parameters_are_declared_first_and_valued() -> None:
     assert names[:2] == ["CondaPackages", "CondaChannels"]
     values: Dict[str, Any] = values_by_name(sub.get_parameter_values(settings_, []))
     assert values["CondaPackages"] == "houdini=21.0.* houdini-openjd=0.7.*"
+
+
+_GPU_LINUX: Dict[str, Any] = {
+    "attributes": [{"name": "attr.worker.os.family", "anyOf": ["linux"]}],
+    "amounts": [{"name": "amount.worker.gpu", "min": 1}],
+}
+
+
+@settings(max_examples=25, deadline=None)
+@given(snapshots())
+def test_the_host_requirements_go_on_every_step_and_the_template_still_decodes(
+    snapshot: GraphSnapshot,
+) -> None:
+    """One set for the whole job, as the ROP does, so every step of a session runs on matching workers."""
+    template: Dict[str, Any] = make_submitter(snapshot).get_job_template(
+        make_submitter(snapshot).get_settings(), host_requirements=_GPU_LINUX
+    )
+    assert [s["hostRequirements"] for s in template["steps"]] == [_GPU_LINUX] * len(snapshot.steps)
+    decode_job_template(template=template)
+
+
+def test_without_host_requirements_no_step_has_any() -> None:
+    """Any worker may run the job, so a step must not carry an empty block the service refuses."""
+    template: Dict[str, Any] = template_for(GraphSnapshot(steps=(step("a", 1), step("b", 1))))
+    assert all("hostRequirements" not in s for s in template["steps"])
+
+
+def test_editing_one_steps_requirements_leaves_the_others_alone() -> None:
+    """Each step gets its own copy, so a later change to one step can't reach the rest."""
+    sub: PdgSubmitter = make_submitter(GraphSnapshot(steps=(step("a", 1), step("b", 1))))
+    template: Dict[str, Any] = sub.get_job_template(sub.get_settings(), _GPU_LINUX)
+    template["steps"][0]["hostRequirements"]["amounts"].clear()
+    assert template["steps"][1]["hostRequirements"] == _GPU_LINUX
+
+
+def test_the_submitted_bundle_carries_the_nodes_host_requirements(tmp_path: Path) -> None:
+    """The submitter takes the block from the host, so what the node sets is what the job gets."""
+    sub: PdgSubmitter = make_submitter()
+    cast(FakeHost, sub._host).requirements = _GPU_LINUX
+    sub.submit(GraphSnapshot(steps=(step("a", 1),)), str(tmp_path / "bundle"))
+    bundle: Dict[str, Any] = read_bundle(tmp_path / "bundle")
+    assert bundle["template"]["steps"][0]["hostRequirements"] == _GPU_LINUX
 
 
 def test_the_description_reaches_the_template() -> None:
