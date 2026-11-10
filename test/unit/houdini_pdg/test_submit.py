@@ -17,6 +17,7 @@ from .houdini_fakes import (
     FakeHou,
     FakeNetwork,
     FakeNode,
+    FakePdgNode,
     build_network,
     install_hou,
 )
@@ -521,3 +522,57 @@ def test_a_displayed_node_with_no_pdg_node_leaves_no_step_out_of_the_checks(
     _generated(network, {"sim": 1, "montage": 1})
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     assert "render:" in scene.messages.calls[0][0]
+
+
+def _with_side_branch() -> FakeNetwork:
+    """Pyro Bonfire plus ``side``, a step wired only to the wedge, which no display below montage cooks."""
+    return build_network(
+        [*PYRO_BONFIRE, ("side", "hython side.py", "Processor", ["wedge1"])],
+        scheduler_parms={
+            "working_dir": "$HIP",
+            "debug_level": 0,
+            "validate_graph": 1,
+            "auto_save_hip": 0,
+            "name": "bonfire",
+            "priority": 50,
+        },
+    )
+
+
+def test_a_displayed_subnet_leaves_a_branch_it_does_not_cook_out_of_the_checks(
+    scene: FakeHou,
+) -> None:
+    """A step the subnet doesn't cook generates nothing, and refusing it for that is false.
+
+    The artist could only get past it by turning validation off.
+    """
+    # Display a subnet wired below montage, and generate the steps above montage only.
+    network: FakeNetwork = _with_side_branch()
+    subnet: FakeNode = network.topnet.add(
+        FakeNode("/obj/topnet1/subnet1"), network.node("montage").hom
+    )
+    network.topnet.display = subnet
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    assert "Steps: 3, tasks: 3" in scene.messages.calls[0][0]
+
+
+def test_a_displayed_subnet_cooks_the_steps_inside_it_and_above_them(scene: FakeHou) -> None:
+    """A step inside the subnet, and the steps wired above it, are in the cook and are checked.
+
+    Without the inner step, render, which generated nothing, would go unreported.
+    """
+    # A subnet with no inputs holds one step wired to montage, and render generates nothing.
+    network: FakeNetwork = _with_side_branch()
+    subnet: FakeNode = network.topnet.add(FakeNode("/obj/topnet1/subnet1"))
+    inner: FakeNode = subnet.add(
+        FakeNode("/obj/topnet1/subnet1/inner"), network.node("montage").hom
+    )
+    pdg_inner: FakePdgNode = FakePdgNode(name="subnet1_inner", command="hython inner.py", hom=inner)
+    inner.pdg_node = pdg_inner
+    network.context.nodes.append(pdg_inner)
+    network.topnet.display = subnet
+    _generated(network, {"sim": 1, "montage": 1, "subnet1_inner": 1})
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    text: str = scene.messages.calls[0][0]
+    assert "render:" in text and "side:" not in text

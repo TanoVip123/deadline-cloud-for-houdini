@@ -231,13 +231,22 @@ class FakeNode:
         return list(self._children)
 
     def allSubChildren(self) -> List["FakeNode"]:
-        return list(self._children)
+        # Every node inside this one, at any depth, as Houdini lists them.
+        return [node for child in self._children for node in (child, *child.allSubChildren())]
 
     def inputs(self) -> List["FakeNode"]:
         return list(self._inputs)
 
     def inputAncestors(self) -> List["FakeNode"]:
-        return []
+        # Every node wired above this one, each once, nearest first, as Houdini lists them.
+        found: List[FakeNode] = []
+        queue: List[Optional[FakeNode]] = list(self._inputs)
+        while queue:
+            node: Optional[FakeNode] = queue.pop(0)
+            if node is not None and node not in found:
+                found.append(node)
+                queue.extend(node._inputs)
+        return found
 
     def parms(self) -> List[FakeParm]:
         return list(self._parms.values())

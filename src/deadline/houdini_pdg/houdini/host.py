@@ -1256,7 +1256,8 @@ def _find_cook_set(context: Any, display: Any) -> Optional[FrozenSet[str]]:
     """The PDG names of the display node and every node wired above it, or None when unknown.
 
     The wires are read as the cook reads them. A display node with no PDG node of its
-    own, such as a subnet, gives None, so no step is left out of the checks.
+    own, such as a subnet, starts from the nodes wired into it and the nodes inside it.
+    None when none of those has a PDG node either, so no step is left out of the checks.
     """
     # PDG's name for each TOP node by path, and the wires as the readers find them.
     graph_nodes: List[Any] = _graph_nodes(context)
@@ -1264,12 +1265,18 @@ def _find_cook_set(context: Any, display: Any) -> Optional[FrozenSet[str]]:
         _path_of(hom): name for name, hom in _top_nodes(graph_nodes).items() if hom
     }
     infos: Tuple[NodeInfo, ...] = readers.node_infos(graph_nodes, None)
-    # The display node, named as PDG names it, and everything wired above it.
+    # The display node as PDG names it, or else what is wired into it and what it holds.
     name: Optional[str] = by_path.get(_path_of(display))
-    above: Set[str] = find_ancestors_among(infos, {info.name for info in infos}).get(
-        name or "", set()
+    around: List[Any] = [
+        *(_call(display, "inputAncestors") or ()),
+        *(_call(display, "allSubChildren") or ()),
+    ]
+    starts: Set[str] = (
+        {name} if name else {by_path[path] for path in map(_path_of, around) if path in by_path}
     )
-    return frozenset({name} | above) if name else None
+    # Each start and everything wired above it.
+    ancestors: Dict[str, Set[str]] = find_ancestors_among(infos, {info.name for info in infos})
+    return frozenset(starts.union(*(ancestors.get(start, set()) for start in starts))) or None
 
 
 def _default_scheduler_problem(node: Any, network: Any) -> str:
