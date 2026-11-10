@@ -2583,6 +2583,7 @@ def test_a_scene_in_an_extra_output_directory_is_not_advised() -> None:
 
 def test_a_set_hip_is_kept_over_the_saved_scenes_folder(monkeypatch: pytest.MonkeyPatch) -> None:
     """A session's own $HIP decides where $HIP paths resolve, so the saved file must not replace it."""
+    # A set $HIP wins, an unset one comes from the saved file, and no file sets nothing.
     monkeypatch.setenv("HIP", "/session/hip")
     assert validation.environment_with_hip("/saved/scene.hip")["HIP"] == "/session/hip"
     monkeypatch.delenv("HIP")
