@@ -123,7 +123,8 @@ class DeadlineCloudPDGScheduler(PyScheduler):
         self._core: Optional[PdgScheduler] = None
         self._start_failed: bool = False
         self._scratch_dir: Optional[str] = None
-        # Whether this cook has shown its error popup, so each cook shows one.
+        # Per cook: PDG calls onStartCook, onSchedule and onStopCook separately, so no caller
+        # can pass it. onStartCook resets it, like _start_failed.
         self._popup_shown: bool = False
 
     def onStartCook(self, static: bool, cook_set: Any) -> bool:

@@ -829,8 +829,10 @@ def test_a_refused_cook_shows_a_popup_with_the_node_errors_text(
     assert scene.messages.options[0]["severity"] == "Error"
 
 
-def test_a_cook_shows_one_popup_however_many_errors_it_has(scene: FakeHou, ui: _Deferred) -> None:
-    """A dialog per offered item would bury the artist, so each cook shows its first error only."""
+def test_each_cook_shows_one_popup_and_the_next_cook_shows_its_own(
+    scene: FakeHou, ui: _Deferred
+) -> None:
+    """A dialog per offered item would bury the artist, but a later cook's refusal must still show."""
     network: Network = build_network(PYRO_BONFIRE)
     scheduler: Any = _scheduler(network)
     assert scheduler.onStartCook(False, [network.node("sim")]) is True
