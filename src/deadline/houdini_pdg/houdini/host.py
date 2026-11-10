@@ -36,7 +36,7 @@ import pdg  # type: ignore[import-not-found]
 from ..errors import CookSetupError, PayloadTransferError, format_refusals
 from ..graph import GraphSnapshot, NodeInfo, synthesize
 from ..ports import ItemOutcome, ItemState, SceneFiles, T, WorkItemHandle
-from ..scene_reads import ReadReport, SceneReads, match_reads, _path_key
+from ..scene_reads import ReadReport, SceneReads, _is_below, _path_key, match_reads
 from ..validation import (
     Refusal,
     RefusalScenario,
@@ -360,6 +360,7 @@ def watch_task_counts(context: Any, stop: Callable[[Verdict], bool]) -> Any:
         if not name or not _is_step(node):
             return
         with lock:
+            # Record this step's count, and ask the cook to stop once the counts pass a quota.
             if stopped[0]:
                 return
             counts[name] = len(_attr(node, "workItems") or ())
@@ -436,10 +437,11 @@ def _output_directories(node: Any, working_dir: str) -> Tuple[str, ...]:
     for parm, value in _listed_values(node, "output_directories", "output_dir"):
         folders.setdefault(_absolute(value), set()).add(parm)
     # The working directory is already uploaded, so a folder in it or above it uploads twice.
+    working: str = _absolute_key(working_dir)
     overlapping: List[str] = sorted(
         parm
         for folder, parms in folders.items()
-        if _is_below(folder, working_dir) or _is_below(working_dir, folder)
+        if _is_below(_absolute_key(folder), working) or _is_below(working, _absolute_key(folder))
         for parm in parms
     )
     if overlapping:
@@ -460,6 +462,7 @@ def _listed_values(node: Any, list_parm: str, entry: str) -> List[Tuple[str, str
     """
     listed: List[Tuple[str, str]] = []
     for index in range(1, int(_parm(node, list_parm, 0, as_text=False)) + 1):
+        # Skip an empty entry, and refuse an unset variable, which no worker could resolve.
         name: str = f"{entry}{index}"
         value: str = str(_parm(node, name, "", as_text=True)).strip()
         if not value:
@@ -468,13 +471,6 @@ def _listed_values(node: Any, list_parm: str, entry: str) -> List[Tuple[str, str
             raise CookSetupError(f"The '{name}' parm names a variable that is not set: '{value}'.")
         listed.append((_path_of(node.parm(name)) or name, value))
     return listed
-
-
-def _is_below(path: str, folder: str) -> bool:
-    """Whether ``path`` is ``folder`` or inside it, compared as ``_absolute_key`` spells them."""
-    child: str = _absolute_key(path)
-    parent: str = _absolute_key(folder)
-    return child == parent or child.startswith(parent.rstrip(os.sep) + os.sep)
 
 
 #: Each hardware field of the tab: its parm stem, the library's field stem, and the
@@ -1094,15 +1090,22 @@ def _check_network(
     reads: Optional[ReadReport] = (
         match_reads(snapshot, scene.reads, working_dir, folders) if scene.available else None
     )
-    if reads is not None and dependency_graph is not None:
-        snapshot = synthesize(infos, data_edges=reads.data_edges)
-    elif reads is not None:
-        reads = dataclasses.replace(reads, matches=(), data_edges={}, attribute_variables=())
+    generated: bool = reads is not None and dependency_graph is not None
+    shape: GraphSnapshot = (
+        synthesize(infos, data_edges=reads.data_edges)
+        if reads is not None and generated
+        else snapshot
+    )
+    judged: Optional[ReadReport] = (
+        dataclasses.replace(reads, matches=(), data_edges={}, attribute_variables=())
+        if reads is not None and not generated
+        else reads
+    )
     full: Verdict = validate(
         ValidationContext(
             nodes=infos,
-            snapshot=snapshot,
-            reads=reads,
+            snapshot=shape,
+            reads=judged,
             working_dir=working_dir,
             output_directories=folders,
             env=_environment(),
@@ -1120,9 +1123,7 @@ def _check_network(
         + check_cook_set_has_steps(infos, set(cook_set) if cook_set else None).refusals,
         advisories=tuple(a for a in full.advisories if a.scenario not in waiting),
     )
-    if settings is not None and not settings.validate_graph:
-        verdict = waived(verdict)
-    return verdict, snapshot
+    return (verdict if settings is None or settings.validate_graph else waived(verdict)), shape
 
 
 def _settings_or_none(node: Any) -> Optional[SchedulerSettings]:

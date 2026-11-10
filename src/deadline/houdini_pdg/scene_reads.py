@@ -223,7 +223,9 @@ def match_reads(
     are matched the same way, but kept apart in ``node_reads`` and ``node_writes``.
     """
     # The job's folders, which no root or prefix may hold.
-    folders: Tuple[str, ...] = _job_folders(working_dir, output_directories)
+    folders: Tuple[str, ...] = tuple(
+        os.path.normpath(folder) for folder in (working_dir, *output_directories) if folder
+    )
     producers: Tuple[_Producer, ...] = _output_roots(snapshot, working_dir, folders)
     existing: Dict[str, Set[str]] = {step.name: set(step.dependencies) for step in snapshot.steps}
     # A node that maps to no step adds no edge, so its reads are set aside here.
@@ -381,13 +383,6 @@ def _is_below(path: str, ancestor: str, paths: ModuleType = os.path) -> bool:
     if path == ancestor:
         return True
     return path.startswith(ancestor.rstrip(paths.sep) + paths.sep)
-
-
-def _job_folders(working_dir: str, output_directories: Sequence[str]) -> Tuple[str, ...]:
-    """The working directory and the extra output folders, normalized, leaving out empty ones."""
-    return tuple(
-        os.path.normpath(folder) for folder in (working_dir, *output_directories) if folder
-    )
 
 
 def _output_roots(

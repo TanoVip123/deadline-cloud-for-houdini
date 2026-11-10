@@ -546,6 +546,7 @@ def check_generated_counts(counts: Mapping[str, int], quotas: Quotas = Quotas())
 
     PDG is still generating, so the refusal says the generation was stopped.
     """
+    # Each step over its own limit, then the total of every step generated so far.
     stopped: str = " PDG was still generating, so the generation was stopped."
     refusals: List[Refusal] = [
         _quota_refusal(name, count, quotas.max_tasks_per_step, _TASKS_PER_STEP, stopped)

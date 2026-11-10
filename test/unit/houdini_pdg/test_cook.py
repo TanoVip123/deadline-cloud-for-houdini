@@ -2172,13 +2172,14 @@ def test_a_quota_crossed_while_pdg_generates_refuses_the_cook_it_stops() -> None
     with pytest.raises(GraphRefusedError) as raised:
         h.scheduler.on_stop_cook(True)
     assert [r.subject for r in raised.value.verdict.refusals] == ["b"]
-    assert h.summary().final_phase is CookPhase.REFUSED
+    assert h.summary().final_phase is CookPhase.REFUSED and not h.summary().stopped_by_user
     assert h.summary().refusals == (RefusalScenario.QUOTA_EXCEEDED,)
     assert h.events.count("submit") == 0
 
 
 def test_with_validation_off_a_quota_crossed_while_generating_does_not_stop_the_cook() -> None:
     """Validation off keeps every refusal as a warning, so generation is not stopped for one."""
+    # Validation is off, and generation reports a step over its quota.
     h: Harness = Harness(validate_graph=False)
     h.start()
     assert h.host.on_quota_exceeded is not None
@@ -2188,6 +2189,7 @@ def test_with_validation_off_a_quota_crossed_while_generating_does_not_stop_the_
 
 def test_a_quota_crossed_after_the_snapshot_changes_nothing() -> None:
     """Once the job exists, the snapshot already judged its quotas, so a late report is ignored."""
+    # The job is already cooking when generation reports a quota.
     h: Harness = Harness().cooking()
     assert h.host.on_quota_exceeded is not None
     assert h.host.on_quota_exceeded(_over_quota()) is False

@@ -660,7 +660,10 @@ class Cook:
                     job.cancel()
                 elif job is not None:
                     job.fail()
-            summary: CookSummary = self._summarize(final, counts, stopped_by_user=cancel)
+            # A cancel that follows a quota refusal was the cook's own, not the artist's.
+            summary: CookSummary = self._summarize(
+                final, counts, stopped_by_user=cancel and self._refused_at_end is None
+            )
             self._summary = summary
             self._services.journal.closed(summary)
             return summary
@@ -676,6 +679,7 @@ class Cook:
         PDG's stop that follows is a cancel, so the refusal is reported then. With
         validation off, or once the snapshot is taken, it is only logged.
         """
+        # Keep the refusal as a warning when validation is off, then refuse once from CONNECTED.
         found: Verdict = verdict if self._settings.validate_graph else waived(verdict)
         self._log_validation_verdict(found)
         if not found.refusals:

@@ -500,21 +500,26 @@ def _record_outputs(
     """
     # The scan leaves out the payloads and the linked scene, which the command didn't write.
     hip_link: str = os.path.join(item.pdg_dir, os.path.basename(item.scene_file))
-    record: List[Dict[str, str]]
-    if outputs:
-        record = [{"path": _tokenize(o.path, item.pdg_dir), "tag": o.tag} for o in outputs]
-    else:
-        scanned: List[OutputFile] = _scan_outputs(
-            item.pdg_dir,
-            exclude=(item.pdg_temp, hip_link if item.scene_file else ""),
-            since=started,
+    recorded: List[OutputFile] = list(outputs) or _scan_outputs(
+        item.pdg_dir,
+        exclude=(item.pdg_temp, hip_link if item.scene_file else ""),
+        since=started,
+    )
+    record: List[Dict[str, str]] = [
+        {"path": _tokenize(o.path, item.pdg_dir), "tag": o.tag} for o in recorded
+    ]
+    # A scan also covers each extra output folder, recorded by the workstation's path,
+    # which is the one the scheduler and PDG know.
+    for worker, local in () if outputs else item.output_directories:
+        record.extend(
+            {
+                "path": local.rstrip("/\\")
+                + "/"
+                + Path(o.path).relative_to(Path(os.path.abspath(worker))).as_posix(),
+                "tag": o.tag,
+            }
+            for o in _scan_outputs(worker, since=started)
         )
-        record = [{"path": _tokenize(o.path, item.pdg_dir), "tag": o.tag} for o in scanned]
-        for worker, local in item.output_directories:
-            record += [
-                {"path": _relocate(o.path, worker, local), "tag": o.tag}
-                for o in _scan_outputs(worker, since=started)
-            ]
     # An error fails the item, since a success with no record gives the next step wrong inputs.
     with open(_outputs_file(item.pdg_temp, item.payload.item_name), "w", encoding="utf-8") as f:
         json.dump({"outputs": record}, f)
@@ -798,15 +803,6 @@ def _scan_outputs(
             continue
         outputs.append(OutputFile(str(path)))
     return outputs
-
-
-def _relocate(path: str, worker: str, local: str) -> str:
-    """``path`` under the worker's ``worker`` folder, spelled under the workstation's ``local`` folder.
-
-    The rest of the path uses ``/``, as ``_tokenize`` writes it.
-    """
-    relative: str = Path(path).relative_to(Path(os.path.abspath(worker))).as_posix()
-    return local.rstrip("/\\") + "/" + relative
 
 
 def _tokenize(path: str, pdg_dir: str) -> str:
