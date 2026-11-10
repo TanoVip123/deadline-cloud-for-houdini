@@ -1245,7 +1245,8 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         settings: SchedulerSettings = read_scheduler_settings(node)
         requirements: Optional[Dict[str, Any]] = read_host_requirements(node)
         inputs: List[Tuple[str, str]] = read_listed_inputs(node)
-        # The graph context and the cook set that the steps below use.
+        # The graph context and the cook set for the quota check and the generate. The final
+        # check reads the context and settings again, the same unless the generate changed them.
         context: Any = _get_or_create_graph_context(node)
         # Every check below reads the graph, so a network without one can't be judged.
         if context is None:
