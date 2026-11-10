@@ -400,7 +400,7 @@ def _is_below(path: str, ancestor: str, paths: ModuleType = os.path) -> bool:
 
 
 def _has_root(path: str, paths: ModuleType = os.path) -> bool:
-    """Whether ``path`` starts at a root, so the current directory can't change where it points.
+    """Whether ``path`` starts at a root, so the current folder can't change where it points.
 
     On Windows a root is a leading ``/`` or ``\\``, which lands on the current drive, or
     one after a drive, as in ``C:/a``. ``paths`` is ``os.path``, or ``ntpath`` in a test.
