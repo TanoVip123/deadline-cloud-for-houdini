@@ -755,7 +755,8 @@ class _ErrorTab:
         # Clear the tab on the display node's dirty, and show new errors on the node's generate.
         display: Any = network.topnet.displayNode()
         dirty: Any = display.dirtyAllWorkItems
-        generate: Any = network.scheduler_node.generateStaticWorkItems
+        node: Any = network.scheduler_node
+        generate: Any = node.generateStaticWorkItems
 
         def dirty_and_clear(remove_outputs: bool) -> None:
             dirty(remove_outputs)
@@ -770,7 +771,7 @@ class _ErrorTab:
                 self._read = len(calls)
 
         display.dirtyAllWorkItems = dirty_and_clear
-        network.scheduler_node.generateStaticWorkItems = generate_and_show
+        node.generateStaticWorkItems = generate_and_show
 
 
 def _refused_on_the_tab(scene: FakeHou) -> Tuple[FakeNetwork, _ErrorTab, str]:
