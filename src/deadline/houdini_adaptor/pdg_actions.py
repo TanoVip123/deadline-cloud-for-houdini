@@ -14,14 +14,13 @@ import gzip
 import importlib
 import json
 import logging
-import math
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import traceback
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import (
     Any,
@@ -370,7 +369,18 @@ class PdgWorkItemRunner:
         try:
             item: _DownloadedItem = _read_work_item(args)
             self._set_environment(item)
-            started: datetime = self._clock.now()
+            # Each folder the scan reads, with its file system's time before the command runs.
+            started: Dict[str, Optional[int]] = (
+                {
+                    folder: _read_file_system_time(folder)
+                    for folder in (
+                        item.pdg_dir,
+                        *(worker for worker, _local in item.mapped_output_directories),
+                    )
+                }
+                if item.record_outputs
+                else {}
+            )
             exit_code, outputs = self._run(item)
             # Only a step with no declared outputs records them.
             if item.record_outputs and exit_code == 0:
@@ -491,13 +501,13 @@ def _read_work_item(args: Mapping[str, Any]) -> _DownloadedItem:
 
 
 def _record_outputs(
-    item: _DownloadedItem, outputs: Sequence[OutputFile], started: datetime
+    item: _DownloadedItem, outputs: Sequence[OutputFile], started: Mapping[str, Optional[int]]
 ) -> None:
     """Write the outputs for the adaptor to publish, with paths tokenized under ``__PDG_DIR__``.
 
-    A command that reported none gets a scan for the files it wrote since ``started``,
-    in ``$PDG_DIR`` and in each extra output folder, which is recorded by the
-    workstation's path.
+    A command that reported none gets a scan for the files it wrote since each folder's
+    time in ``started``, in ``$PDG_DIR`` and in each extra output folder, which is
+    recorded by the workstation's path.
     """
     # The scan leaves out the payloads and the linked scene, which the command didn't write.
     scanned: bool = not outputs
@@ -506,7 +516,7 @@ def _record_outputs(
         _scan_outputs(
             item.pdg_dir,
             exclude=(item.pdg_temp, hip_link if item.scene_file else ""),
-            since=started,
+            since=started[item.pdg_dir],
         )
         if scanned
         else list(outputs)
@@ -525,7 +535,7 @@ def _record_outputs(
                 + Path(o.path).relative_to(Path(os.path.abspath(worker))).as_posix(),
                 "tag": o.tag,
             }
-            for o in _scan_outputs(worker, since=started)
+            for o in _scan_outputs(worker, since=started[worker])
         )
     # An error fails the item, since a success with no record gives the next step wrong inputs.
     with open(_outputs_file(item.pdg_temp, item.payload.item_name), "w", encoding="utf-8") as f:
@@ -772,20 +782,38 @@ def _parse_pdg_results(lines: Iterable[str], pdg_dir: str) -> List[OutputFile]:
     return outputs
 
 
+def _read_file_system_time(folder: str) -> Optional[int]:
+    """The folder's file system time now, in nanoseconds, or None when the folder doesn't exist yet.
+
+    It's the mtime of a hidden file written there, because the file system's clock can lag
+    this process's, and the scan compares it with mtimes from the same clock.
+    """
+    handle: int
+    marker: str
+    try:
+        handle, marker = tempfile.mkstemp(prefix=".pdg-start-", dir=folder)
+    except FileNotFoundError:
+        return None
+    # Removed before the command runs, so no run, even a failed one, leaves it as an output.
+    try:
+        os.close(handle)
+        return os.stat(marker).st_mtime_ns
+    finally:
+        os.remove(marker)
+
+
 def _scan_outputs(
-    output_dir: str, *, exclude: Sequence[str] = (), since: Optional[datetime] = None
+    output_dir: str, *, exclude: Sequence[str] = (), since: Optional[int] = None
 ) -> List[OutputFile]:
     """Every regular file under the directory, for a command that reported none.
 
-    Skips hidden files, the excluded paths, and, with ``since``, files not
-    modified since then, so the inputs synced before the task are not reported.
+    Skips hidden files, the excluded paths, and, with ``since``, files modified before that
+    file system time in nanoseconds, so the inputs synced before the task are not reported.
     """
     root: Path = Path(os.path.abspath(output_dir))
     if not root.is_dir():
         return []
     excluded: List[Path] = [Path(os.path.abspath(e)) for e in exclude if e]
-    # Whole seconds, because some file systems store modification times that way.
-    cutoff: Optional[int] = math.floor(since.timestamp()) if since is not None else None
 
     def skipped(path: Path) -> bool:
         # Hidden names, and the excluded paths with everything under them.
@@ -806,7 +834,7 @@ def _scan_outputs(
         # Skip hidden and excluded files, anything that isn't a regular file, and older files.
         if skipped(path) or not path.is_file():
             continue
-        if cutoff is not None and path.stat().st_mtime < cutoff:
+        if since is not None and path.stat().st_mtime_ns < since:
             continue
         outputs.append(OutputFile(str(path)))
     return outputs
