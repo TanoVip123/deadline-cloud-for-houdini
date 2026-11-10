@@ -121,6 +121,7 @@ def node_dags(draw: Any, max_nodes: int = 6, dynamic: bool = False) -> List[Node
                 count=draw(st.integers(0, 3)),
                 top_type=draw(st.sampled_from(["Processor", "Partitioner", "Mapper"])),
                 is_dynamic=draw(st.booleans()) if dynamic else False,
+                dynamic_by_parm=draw(st.sampled_from([None, True, False])) if dynamic else None,
                 in_cook_set=draw(st.sampled_from([True, False, None])),
                 cook_type=draw(
                     st.sampled_from([None, "Generate", "InProcess", "OutOfProcess", "Service"])
@@ -299,6 +300,34 @@ def test_no_farm_work_stands_down_before_generation() -> None:
     assert not _subjects(validate(_ctx(nodes)), RefusalScenario.NO_FARM_WORK)
 
 
+@pytest.mark.parametrize(
+    "cook_set, refused",
+    [
+        ({"wedge1", "wedge2"}, True),
+        ({"wedge1", "wedge2", "render"}, False),
+        ({"wedge2", "inside_an_asset"}, False),
+        (None, False),
+    ],
+)
+def test_a_cook_set_with_no_step_is_refused_before_anything_generates(
+    cook_set: Optional[Set[str]], refused: bool
+) -> None:
+    """Cooking only in-process nodes showed nothing before, because the check needed items.
+
+    A name PDG gives that matches no node stands down, since an asset's inner
+    steps may not exist yet.
+    """
+    nodes: List[NodeInfo] = [
+        _node("wedge1", count=0, schedulable=False),
+        _node("wedge2", ["wedge1"], count=0, schedulable=False),
+        _node("render", ["wedge2"], count=0),
+    ]
+    verdict: Verdict = validation.cook_set_without_steps(nodes, cook_set)
+    assert bool(_subjects(verdict, RefusalScenario.NO_FARM_WORK)) is refused
+    if refused:
+        assert "wedge1" in verdict.refusals[0].subject and verdict.refusals[0].remedy
+
+
 def test_a_requested_empty_step_is_left_to_step_without_items_not_no_farm_work() -> None:
     """A worker step the cook asked for but that has no items yet is the snapshot race.
 
@@ -330,22 +359,70 @@ def test_a_requested_empty_step_is_left_to_step_without_items_not_no_farm_work()
 # -- dynamic nodes -------------------------------------------------------------
 
 
+def _ancestors_of(nodes: Sequence[NodeInfo], name: str) -> Set[str]:
+    """Every node ``name`` reaches by following upstream wires, by brute force."""
+    by_name: Dict[str, NodeInfo] = {n.name: n for n in nodes}
+    found: Set[str] = set()
+    frontier: List[str] = list(by_name[name].upstream) if name in by_name else []
+    while frontier:
+        current: str = frontier.pop()
+        if current in found or current not in by_name:
+            continue
+        found.add(current)
+        frontier.extend(by_name[current].upstream)
+    return found
+
+
 @given(nodes=node_dags(dynamic=True))
-def test_every_dynamic_node_is_refused_once_and_not_as_a_step_without_items(
+def test_every_dynamic_cause_is_named_once_and_never_as_a_step_without_items(
     nodes: List[NodeInfo],
 ) -> None:
-    """Dynamic subjects equal the dynamic nodes, once each, and never doubled with step-without-items."""
+    """Each dynamic node is refused itself or through a refused ancestor, and only causes are refused.
+
+    PDG also flags every node below a dynamic one, so refusing each flagged node
+    gave the artist eight messages for one parm.
+    """
     verdict: Verdict = validate(_ctx(nodes))
     dynamic: Set[str] = {n.name for n in nodes if n.is_dynamic}
+    refused: Set[str] = _subjects(verdict, RefusalScenario.DYNAMIC_NODE)
+    by_name: Dict[str, NodeInfo] = {n.name: n for n in nodes}
 
-    # Exactly the dynamic nodes are refused, once each, and never doubled as a
-    # step-without-items finding for the same node.
-    assert _subjects(verdict, RefusalScenario.DYNAMIC_NODE) == dynamic
-    assert len([r for r in verdict.refusals if r.scenario is RefusalScenario.DYNAMIC_NODE]) == len(
-        dynamic
-    )
+    # Only dynamic nodes are refused, once each.
+    assert refused <= dynamic
+    count: int = len([r for r in verdict.refusals if r.scenario is RefusalScenario.DYNAMIC_NODE])
+    assert count == len(refused)
+    # Every dynamic node is covered: refused itself, or below a refused node.
+    for name in dynamic:
+        assert name in refused or _ancestors_of(nodes, name) & refused, name
+    # A node whose own parm makes it dynamic, or that has no dynamic node above it, is a cause.
+    for name in dynamic:
+        if by_name[name].dynamic_by_parm or not _ancestors_of(nodes, name) & dynamic:
+            assert name in refused, name
     assert not dynamic & _subjects(verdict, RefusalScenario.STEP_WITHOUT_ITEMS)
     assert not dynamic & _advised(verdict, RefusalScenario.STEP_WITHOUT_ITEMS)
+
+
+def test_one_dynamic_parm_gives_one_refusal_not_one_per_node_below_it() -> None:
+    """The measured case: one node set to Each Upstream Item is Cooked, and PDG flags the nodes below too."""
+    nodes: List[NodeInfo] = [
+        _node("pyro"),
+        _node("sparks", ["pyro"], count=0, is_dynamic=True, dynamic_by_parm=True),
+        _node("part", ["sparks"], count=0, schedulable=False, is_dynamic=True),
+        _node("karma", ["part"], count=0, is_dynamic=True, dynamic_by_parm=False),
+        _node("montage", ["karma"], count=0, is_dynamic=True),
+    ]
+    verdict: Verdict = validate(_ctx(nodes))
+    assert _subjects(verdict, RefusalScenario.DYNAMIC_NODE) == {"sparks"}
+    assert not _subjects(verdict, RefusalScenario.STEP_WITHOUT_ITEMS)
+
+
+def test_a_second_node_set_to_dynamic_below_the_first_is_refused_too() -> None:
+    """Fixing only the first would leave the second, so the artist is told about both."""
+    nodes: List[NodeInfo] = [
+        _node("a", count=0, is_dynamic=True, dynamic_by_parm=True),
+        _node("b", ["a"], count=0, is_dynamic=True, dynamic_by_parm=True),
+    ]
+    assert _subjects(validate(_ctx(nodes)), RefusalScenario.DYNAMIC_NODE) == {"a", "b"}
 
 
 # -- ROP batching --------------------------------------------------------------
@@ -564,30 +641,62 @@ def test_a_dependency_quota_refusal_says_how_many_edges_carry_data() -> None:
 def test_a_step_without_items_is_refused_when_it_was_asked_for_or_is_needed(
     nodes: List[NodeInfo],
 ) -> None:
-    """A dropped step refuses iff the cook asked for it or a survivor needs it, leaving dynamic nodes and In-Process steps out."""
+    """A dropped step refuses iff the cook asked for it or a survivor needs it, unless another refusal explains it.
+
+    A dynamic node, an In-Process step, a Service node and an overridden step
+    have their own refusal, and so does every dropped step below one of them.
+    """
     snapshot: GraphSnapshot = synthesize(nodes)
     verdict: Verdict = validate(_ctx(nodes, snapshot=snapshot))
     by_name: Dict[str, NodeInfo] = {n.name: n for n in nodes}
-    dynamic: Set[str] = {
-        n.name for n in nodes if n.is_dynamic or (n.is_schedulable and n.cook_type == "InProcess")
+    causes: Set[str] = {
+        n.name
+        for n in nodes
+        if n.is_dynamic
+        or (n.is_schedulable and n.cook_type == "InProcess")
+        or n.cook_type == "Service"
+        or n.scheduler_override
+    }
+    explained: Set[str] = causes | {
+        name for name in snapshot.steps_without_items if _ancestors_of(nodes, name) & causes
     }
 
-    # A refusal is expected exactly when a dropped step that is not dynamic was
-    # requested, or a surviving step depends on a dropped one that is not dynamic.
-    # A dynamic node or an In-Process step already has its own refusal, so it never
-    # adds this one, and such a survivor is never also refused here.
+    # A refusal is expected exactly when an unexplained dropped step was requested,
+    # or an unexplained surviving step depends on an unexplained dropped one.
     requested: bool = any(
-        name not in dynamic and by_name[name].in_cook_set is not False
+        name not in explained and by_name[name].in_cook_set is not False
         for name in snapshot.steps_without_items
     )
     orphaned: bool = any(
-        name not in dynamic
+        name not in explained
         for step, missing in snapshot.dependencies_on_dropped.items()
-        if step not in dynamic
+        if step not in explained
         for name in missing
     )
     refused: bool = bool(_subjects(verdict, RefusalScenario.STEP_WITHOUT_ITEMS))
     assert refused == (requested or orphaned)
+
+
+@pytest.mark.parametrize(
+    "cause, scenario",
+    [
+        ({"cook_type": "Service"}, RefusalScenario.SERVICE_NODE),
+        ({"scheduler_override": "../localscheduler1"}, RefusalScenario.MULTIPLE_SCHEDULERS),
+    ],
+)
+def test_a_service_or_overridden_step_with_no_items_gets_one_refusal(
+    cause: Dict[str, Any], scenario: RefusalScenario
+) -> None:
+    """The measured case had two extra refusals, for the Service step and the step below it."""
+    nodes: List[NodeInfo] = [
+        _node("geo"),
+        _node("karma", ["geo"], count=0, in_cook_set=True, **cause),
+        _node("overlay", ["karma"], in_cook_set=True),
+        _node("late", ["karma"], count=0, in_cook_set=True),
+    ]
+    verdict: Verdict = validate(_ctx(nodes))
+    assert _subjects(verdict, scenario) == {"karma"}
+    assert not _subjects(verdict, RefusalScenario.STEP_WITHOUT_ITEMS)
 
 
 @given(nodes=node_dags())
@@ -596,7 +705,8 @@ def test_an_unknown_cook_set_makes_every_dropped_step_a_refusal(
 ) -> None:
     """With cook_set unknown, every dropped step is refused, the strict reading.
 
-    An In-Process step is the exception, because its own refusal names the cause.
+    An In-Process or Service step, and a dropped step below one, are the
+    exception, because the step's own refusal names the cause.
     """
     # Force every node's cook-set flag to unknown, so no drop can be excused.
     unknown: List[NodeInfo] = [replace(n, in_cook_set=None) for n in nodes]
@@ -605,8 +715,10 @@ def test_an_unknown_cook_set_makes_every_dropped_step_a_refusal(
     in_process: Set[str] = {
         n.name for n in unknown if n.is_schedulable and n.cook_type == "InProcess"
     }
+    causes: Set[str] = in_process | {n.name for n in unknown if n.cook_type == "Service"}
+    below: Set[str] = {n.name for n in unknown if _ancestors_of(unknown, n.name) & causes}
     assert _subjects(verdict, RefusalScenario.STEP_WITHOUT_ITEMS) >= (
-        set(snapshot.steps_without_items) - in_process
+        set(snapshot.steps_without_items) - causes - below
     )
     assert in_process <= _subjects(verdict, RefusalScenario.IN_PROCESS_STEP)
 

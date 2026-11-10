@@ -544,6 +544,53 @@ def test_cache_mode_is_read_as_its_menu_label(parms: List[Any], expected: Option
     assert info.cache_mode == expected
 
 
+class _GenerateWhenParm:
+    """The ``pdg_workitemgeneration`` menu parm, with its tokens out of label order as measured."""
+
+    def __init__(self, token: str) -> None:
+        self._token = token
+
+    def name(self) -> str:
+        return "pdg_workitemgeneration"
+
+    def evalAsString(self) -> str:
+        return self._token
+
+    def menuItems(self) -> Tuple[str, ...]:
+        return ("1", "3", "0", "2")
+
+    def menuLabels(self) -> Tuple[str, ...]:
+        return (
+            "All Upstream Items are Generated",
+            "All Upstream Items are Cooked",
+            "Each Upstream Item is Cooked",
+            "Automatic",
+        )
+
+
+@pytest.mark.parametrize(
+    "parms, expected",
+    [
+        ([_GenerateWhenParm("0")], True),
+        ([_GenerateWhenParm("3")], True),
+        ([_GenerateWhenParm("1")], False),
+        ([_GenerateWhenParm("2")], None),
+        ([], None),
+    ],
+)
+def test_generate_when_is_read_by_its_label_not_its_position(
+    parms: List[Any], expected: Optional[bool]
+) -> None:
+    """Only the node whose own parm is dynamic is refused, so the parm must be read right.
+
+    The menu's tokens are not in label order, so reading by position names the wrong setting.
+    """
+    node: _PdgNode = _PdgNode("n", command="x")
+    _topnet(_wire(node, "/obj/topnet1/n", parms=parms))
+    (info,) = node_infos([node], {})
+    assert info.dynamic_by_parm is expected
+
+
 def test_a_node_without_a_top_node_reads_no_parms() -> None:
     """A PDG node with no TOP node still reads, with nothing taken from parms."""
     node: _PdgNode = _PdgNode("n", command="x")

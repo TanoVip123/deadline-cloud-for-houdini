@@ -305,6 +305,22 @@ def test_a_step_with_a_queued_item_has_generated_without_announcing_it(scene: Fa
     assert host.pending_generation() == ("montage", "render")
 
 
+@pytest.mark.parametrize(
+    "dynamic, pending",
+    [("sim", ()), ("render", ("sim",)), ("montage", ("render", "sim"))],
+)
+def test_a_dynamic_step_and_the_steps_below_it_are_not_awaited(
+    scene: FakeHou, dynamic: str, pending: Tuple[str, ...]
+) -> None:
+    """A dynamic step generates only after its upstream items cook, which the wait holds back.
+
+    So the cook would stall until the timeout, and only then refuse the node.
+    """
+    host, network = _watching()
+    network.node(dynamic).isDynamic = True
+    assert host.pending_generation() == pending
+
+
 def test_stopping_removes_the_handler_and_is_safe_twice(scene: FakeHou) -> None:
     """A stop after a failed start, or a second stop, must not raise or leave a handler."""
     host, network = _watching()

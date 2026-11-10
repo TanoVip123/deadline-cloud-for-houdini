@@ -25,6 +25,7 @@ from .graph import (
     NodeInfo,
     RawItem,
     WorkItemSpec,
+    upstream_closure,
 )
 from .scene_reads import (
     AttributeVariableUse,
@@ -322,8 +323,25 @@ def _undeliverable_reason(
 # -- the graph's shape --------------------------------------------------------
 
 
+def _dynamic_causes(nodes: Sequence[NodeInfo]) -> List[NodeInfo]:
+    """The dynamic nodes that cause the dynamism, not those PDG flags only for being below one."""
+    dynamic: Set[str] = {node.name for node in nodes if node.is_dynamic}
+    above: Dict[str, Set[str]] = upstream_closure(nodes, dynamic)
+    causes: List[NodeInfo] = [
+        node
+        for node in nodes
+        if node.is_dynamic and (node.dynamic_by_parm or not above.get(node.name))
+    ]
+    # A cycle of dynamic nodes has no top, so each one is named rather than none.
+    return causes or [node for node in nodes if node.is_dynamic]
+
+
 def _check_dynamic_nodes(ctx: ValidationContext) -> Verdict:
-    """A node that generates its items while the cook runs has no tasks to describe."""
+    """A node that generates its items while the cook runs has no tasks to describe.
+
+    One refusal per cause: a node is named when its own parm makes it dynamic or
+    no dynamic node is above it.
+    """
     return Verdict(
         refusals=tuple(
             Refusal(
@@ -331,15 +349,15 @@ def _check_dynamic_nodes(ctx: ValidationContext) -> Verdict:
                 subject=node.name,
                 detail=(
                     "This node generates its work items while the cook runs, so the job "
-                    "cannot describe its tasks before it is submitted."
+                    "cannot describe its tasks before it is submitted. The nodes below it "
+                    "are dynamic for the same reason."
                 ),
                 remedy=(
-                    "Replace it with a node that generates its items up front, or cook this "
-                    "network with another scheduler."
+                    "Set its Generate When to All Upstream Items are Generated, or cook "
+                    "this network with another scheduler."
                 ),
             )
-            for node in ctx.nodes
-            if node.is_dynamic
+            for node in _dynamic_causes(ctx.nodes)
         )
     )
 
@@ -470,7 +488,7 @@ def _check_quotas(ctx: ValidationContext) -> Verdict:
     return Verdict(refusals=tuple(refusals))
 
 
-def _check_no_farm_work(ctx: ValidationContext) -> Verdict:
+def no_farm_work(ctx: ValidationContext) -> Verdict:
     """Refuse a cook that generated items but no step for a worker to run.
 
     The job template requires at least one step, so a snapshot with none is
@@ -507,11 +525,40 @@ def _check_no_farm_work(ctx: ValidationContext) -> Verdict:
                     f"describe no steps and the service would reject it. {len(in_process)} "
                     "node(s) were read and every one of them cooks in this Houdini session."
                 ),
-                remedy=(
-                    "Cook a node that runs on a worker, such as a ROP Fetch, or a Python "
-                    "Script TOP set to Cook (Out-of-Process). A network of only in-process "
-                    "nodes has nothing to send to a farm, so cook it with another scheduler."
+                remedy=_NO_FARM_WORK_REMEDY,
+            ),
+        )
+    )
+
+
+_NO_FARM_WORK_REMEDY: str = (
+    "Cook a node that runs on a worker, such as a ROP Fetch, or a Python Script TOP set "
+    "to Cook (Out-of-Process). A network of only in-process nodes has nothing to send to "
+    "a farm, so cook it with another scheduler."
+)
+
+
+def cook_set_without_steps(nodes: Sequence[NodeInfo], cook_set: Optional[Set[str]]) -> Verdict:
+    """Refuse a cook set that names no step, before anything is generated.
+
+    It stands down when the set is unknown or names a node that isn't read, since
+    an asset's inner steps may not exist yet.
+    """
+    if not cook_set:
+        return Verdict()
+    by_name: Dict[str, NodeInfo] = {node.name: node for node in nodes}
+    if any(name not in by_name or by_name[name].schedulable is not False for name in cook_set):
+        return Verdict()
+    return Verdict(
+        refusals=(
+            Refusal(
+                scenario=RefusalScenario.NO_FARM_WORK,
+                subject=_examples(sorted(cook_set)),
+                detail=(
+                    "No node in this cook runs a command on a worker, so every node would "
+                    "cook in this Houdini session and the job would have no steps."
                 ),
+                remedy=_NO_FARM_WORK_REMEDY,
             ),
         )
     )
@@ -526,12 +573,12 @@ def _check_steps_without_items(ctx: ValidationContext) -> Verdict:
     set is incomplete.
     """
     by_name: Dict[str, NodeInfo] = {node.name: node for node in ctx.nodes}
-    # A dynamic node, an In-Process step and a step PDG cooked from cache have no
-    # items for a reason another check names, so each gets one message there.
-    explained: Set[str] = {
-        node.name
-        for node in ctx.nodes
-        if node.is_dynamic or _is_in_process_step(node) or node.cached_items
+    # These nodes have no items for a reason another check names, and so does
+    # every dropped step below one, so each cause gets one message there.
+    causes: Set[str] = {node.name for node in ctx.nodes if _explains_missing_items(node)}
+    above: Dict[str, Set[str]] = upstream_closure(ctx.nodes, causes)
+    explained: Set[str] = causes | {
+        name for name in ctx.snapshot.steps_without_items if above.get(name)
     }
     dropped: List[str] = [
         name for name in ctx.snapshot.steps_without_items if name not in explained
@@ -603,6 +650,18 @@ def _check_steps_without_items(ctx: ValidationContext) -> Verdict:
         if name not in refused
     )
     return Verdict(refusals=tuple(refusals), advisories=advisories)
+
+
+def _explains_missing_items(node: NodeInfo) -> bool:
+    """Whether another refusal already says why this node has no items here."""
+    return bool(
+        node.is_dynamic
+        or _is_in_process_step(node)
+        or node.cached_items
+        or node.cook_type == _SERVICE
+        or _is_command_server(node)
+        or node.scheduler_override
+    )
 
 
 # -- the node's kind ----------------------------------------------------------
@@ -1362,7 +1421,7 @@ def _check_unreachable_local_files(ctx: ValidationContext) -> Verdict:
 # new row: no other check and no part of ``validate`` changes.
 _CHECKS: Tuple[Tuple[RefusalScenario, Callable[[ValidationContext], Verdict]], ...] = (
     (RefusalScenario.DYNAMIC_NODE, _check_dynamic_nodes),
-    (RefusalScenario.NO_FARM_WORK, _check_no_farm_work),
+    (RefusalScenario.NO_FARM_WORK, no_farm_work),
     (RefusalScenario.ROP_BATCH, _check_rop_batch),
     (RefusalScenario.QUOTA_EXCEEDED, _check_quotas),
     (RefusalScenario.STEP_WITHOUT_ITEMS, _check_steps_without_items),

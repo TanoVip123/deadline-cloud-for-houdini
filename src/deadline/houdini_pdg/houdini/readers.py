@@ -122,6 +122,7 @@ def node_infos(
                 cook_type=_cook_type(pdg_node, hom),
                 scheduler_override=_scheduler_override(hom),
                 cache_mode=_cache_mode(hom),
+                dynamic_by_parm=_dynamic_by_parm(hom),
                 node_type_name=_node_type_name(hom),
                 in_locked_asset=bool(_call(hom, "isInsideLockedHDA")),
                 expressions=() if job_script else _expressions(hom),
@@ -453,6 +454,26 @@ def _cache_mode(hom: Any) -> Optional[str]:
         return str(parm.menuLabels()[list(parm.menuItems()).index(parm.evalAsString())])
     except Exception:
         return None
+
+
+# Generate When labels, by whether they make the node generate while the cook runs.
+_GENERATE_WHEN: Dict[str, bool] = {
+    "Each Upstream Item is Cooked": True,
+    "All Upstream Items are Cooked": True,
+    "All Upstream Items are Generated": False,
+}
+
+
+def _dynamic_by_parm(hom: Any) -> Optional[bool]:
+    """Whether the node's own Generate When makes it dynamic, read by label. None for Automatic or unknown."""
+    parm: Any = _call(hom, "parm", "pdg_workitemgeneration")
+    if parm is None:
+        return None
+    try:
+        label: str = str(parm.menuLabels()[list(parm.menuItems()).index(parm.evalAsString())])
+    except Exception:
+        return None
+    return _GENERATE_WHEN.get(label)
 
 
 def _scheduler_override(hom: Any) -> str:

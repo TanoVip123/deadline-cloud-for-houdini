@@ -224,3 +224,12 @@ def test_the_refusal_popup_lists_one_refusal_per_line(scene: FakeHou) -> None:
     )
     count: int = int(re.search(r"\((\d+) refusal", lines[header]).group(1))  # type: ignore[union-attr]
     assert count >= 1 and len(lines) == header + 1 + count
+
+
+def test_submitting_a_display_node_with_no_step_above_it_is_refused(scene: FakeHou) -> None:
+    """With the wedge displayed, the cook would run only in-process nodes and make no job."""
+    network: Network = _network()
+    network.topnet.display = network.node("wedge1").hom
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert _cooks(network) == []
+    assert "No node in this cook runs a command on a worker" in scene.messages.calls[0][0]

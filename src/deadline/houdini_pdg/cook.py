@@ -54,6 +54,7 @@ from .validation import (
     ValidationContext,
     Verdict,
     cooked_from_cache,
+    no_farm_work,
     validate,
     waived,
 )
@@ -674,18 +675,19 @@ class Cook:
         return self._refused_at_end
 
     def _judge_cache_at_end(self) -> None:
-        """Refuse a cook PDG ended with no item offered when a step in it was cooked from cache."""
+        """Refuse a cook PDG ended with no item offered, when a step was cooked from cache or there was no step."""
         try:
             nodes: Tuple[NodeInfo, ...] = tuple(self._host.read_graph())
-            found: Verdict = cooked_from_cache(
-                ValidationContext(
-                    nodes=nodes,
-                    snapshot=synthesize(nodes),
-                    working_dir=self._settings.working_dir,
-                    env=self._environment(),
-                ),
-                offered_nothing=True,
+            ctx: ValidationContext = ValidationContext(
+                nodes=nodes,
+                snapshot=synthesize(nodes),
+                working_dir=self._settings.working_dir,
+                env=self._environment(),
             )
+            # Items from cache say why, and a cook with no step at all says why too.
+            found: Verdict = cooked_from_cache(ctx, offered_nothing=True)
+            if not found.refusals:
+                found = no_farm_work(ctx)
         except Exception:
             _logger.warning("Could not read which work items PDG cooked from cache.", exc_info=True)
             return
@@ -695,8 +697,11 @@ class Cook:
         if not verdict.refusals:
             return
         # The cook moves through SNAPSHOTTING to REFUSED, so the summary records it.
+        scenarios: Tuple[RefusalScenario, ...] = tuple(
+            dict.fromkeys(refusal.scenario for refusal in verdict.refusals)
+        )
         if self._state.move(CookPhase.CONNECTED, CookPhase.SNAPSHOTTING) and self._state.refuse(
-            (RefusalScenario.CACHED_OUTPUTS,), from_phase=CookPhase.SNAPSHOTTING
+            scenarios, from_phase=CookPhase.SNAPSHOTTING
         ):
             self._refused_at_end = verdict
 

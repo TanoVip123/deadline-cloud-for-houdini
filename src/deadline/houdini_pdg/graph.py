@@ -104,6 +104,9 @@ class NodeInfo:
     #: ``(parm, code)`` for each Python code parm, such as a Python Processor's
     #: generate code. Read only for nodes that run no job script.
     python_code: Tuple[Tuple[str, str], ...] = ()
+    #: Whether the node's own Generate When parm makes it dynamic: True for "each"
+    #: or "all upstream items are cooked", False for "generated", None otherwise.
+    dynamic_by_parm: Optional[bool] = None
     #: Items the cook's graph read left out because PDG cooked them from cache,
     #: on a node in this cook. Their tasks never reach the farm, so validation refuses the step.
     cached_items: Tuple[RawItem, ...] = ()
@@ -333,6 +336,24 @@ def _project(by_name: Mapping[str, NodeInfo], schedulable: AbstractSet[str]) -> 
         found.discard(name)
         projected[name] = found
     return projected
+
+
+def upstream_closure(nodes: Sequence[NodeInfo], start: AbstractSet[str]) -> Dict[str, Set[str]]:
+    """Each node's ancestors, by its upstream wires, that are in ``start``. Terminates on a cycle."""
+    by_name: Dict[str, NodeInfo] = {node.name: node for node in nodes}
+    found: Dict[str, Set[str]] = {}
+    for node in nodes:
+        # Walk the upstream wires once per node, with a visited set.
+        seen: Set[str] = set()
+        stack: List[str] = list(node.upstream)
+        while stack:
+            current: str = stack.pop()
+            if current in seen or current not in by_name:
+                continue
+            seen.add(current)
+            stack.extend(by_name[current].upstream)
+        found[node.name] = seen & set(start)
+    return found
 
 
 def _ancestors(deps: Mapping[str, AbstractSet[str]], start: str) -> Set[str]:

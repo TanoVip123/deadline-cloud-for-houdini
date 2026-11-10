@@ -737,3 +737,34 @@ def test_a_queue_without_job_attachments_cannot_cook(
     cloud: FakeCloud = FakeCloud(queue=[queue])
     with pytest.raises(CookSetupError, match="Render has no job attachments bucket"):
         _connect(build_network(PYRO_BONFIRE), cloud, tmp_path)
+
+
+def test_a_cook_of_only_in_process_nodes_is_refused_at_its_start_before_the_farm(
+    scene: FakeHou,
+) -> None:
+    """Cook Selected Node on a wedge showed no message at all, because PDG offered nothing.
+
+    PDG still starts the cook with the wedges as its cook set, so the start refuses it.
+    """
+    network: Network = build_network(PYRO_BONFIRE)
+    cloud: FakeCloud = FakeCloud()
+    scheduler: Any = _scheduler(network, cloud)
+    assert scheduler.onStartCook(False, [network.node("wedge1")]) is True
+    (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
+    assert "wedge1" in error and "No node in this cook runs a command on a worker" in error
+    assert cloud.s3.keys == [] and scheduler.onTick() == PDG.tickResult.SchedulerCancelCook
+
+
+def test_a_cook_that_offered_nothing_and_had_no_step_says_so_at_its_end(scene: FakeHou) -> None:
+    """When PDG gives no cook set at the start, the end of a cook that offered nothing still says why."""
+    network: Network = build_network(PYRO_BONFIRE)
+    scheduler: Any = _scheduler(network)
+    assert scheduler.onStartCook(False, None) is True
+    # PDG cooked the wedge in this session, so only its items are in the graph.
+    wedge: Any = _CachedItem("wedge1", 0, "")
+    wedge.command, wedge.state, wedge.outputFiles = "", types.SimpleNamespace(name="Waiting"), []
+    scheduler.dependency_graph = ({wedge: []}, {}, [])
+    network.context.cookSet = [network.node("wedge1")]
+    assert scheduler.onStopCook(False) is True
+    (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
+    assert "wedge1" in error and "No node in this cook runs a command on a worker" in error
