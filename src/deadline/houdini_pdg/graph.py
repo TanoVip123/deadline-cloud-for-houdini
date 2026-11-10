@@ -342,20 +342,10 @@ def project_steps(
 
 def find_ancestors_among(nodes: Sequence[NodeInfo], among: AbstractSet[str]) -> Dict[str, Set[str]]:
     """Each node's ancestors, by its upstream wires, that are in ``among``. Terminates on a cycle."""
-    by_name: Dict[str, NodeInfo] = {node.name: node for node in nodes}
-    found: Dict[str, Set[str]] = {}
-    for node in nodes:
-        # Walk the upstream wires once per node, with a visited set.
-        seen: Set[str] = set()
-        stack: List[str] = list(node.upstream)
-        while stack:
-            current: str = stack.pop()
-            if current in seen or current not in by_name:
-                continue
-            seen.add(current)
-            stack.extend(by_name[current].upstream)
-        found[node.name] = seen & set(among)
-    return found
+    # A wire to a name no node has adds no ancestor.
+    upstream: Dict[str, Set[str]] = {node.name: set(node.upstream) for node in nodes}
+    known: Set[str] = set(among) & upstream.keys()
+    return {name: _ancestors(upstream, name) & known for name in upstream}
 
 
 def _ancestors(deps: Mapping[str, AbstractSet[str]], start: str) -> Set[str]:

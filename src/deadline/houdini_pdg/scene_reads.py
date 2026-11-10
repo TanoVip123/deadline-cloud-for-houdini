@@ -223,9 +223,7 @@ def match_reads(
     are matched the same way, but kept apart in ``node_reads`` and ``node_writes``.
     """
     # The job's folders, which no root or prefix may hold.
-    folders: Tuple[str, ...] = tuple(
-        os.path.normpath(folder) for folder in (working_dir, *output_directories) if folder
-    )
+    folders: Tuple[str, ...] = job_folders(working_dir, output_directories)
     producers: Tuple[_Producer, ...] = _output_roots(snapshot, working_dir, folders)
     existing: Dict[str, Set[str]] = {step.name: set(step.dependencies) for step in snapshot.steps}
     # A node that maps to no step adds no edge, so its reads are set aside here.
@@ -264,6 +262,13 @@ def match_reads(
     )
 
 
+def job_folders(
+    working_dir: str, output_directories: Sequence[str], paths: ModuleType = os.path
+) -> Tuple[str, ...]:
+    """The folders the job uploads: the working directory, then each extra output folder, normalized."""
+    return tuple(paths.normpath(folder) for folder in (working_dir, *output_directories) if folder)
+
+
 def _path_key(path: str, paths: ModuleType = os.path) -> str:
     """``path`` spelled one way, for comparing it with another path.
 
@@ -292,7 +297,7 @@ def reads_opening(
     # Both sides are spelled one way, so "/" and "\" paths match on Windows.
     keys: Set[str] = {_path_key(path, paths) for path in files if path}
     folders: List[str] = [
-        _path_key(folder, paths) for folder in (working_dir, *output_directories) if folder
+        _path_key(folder, paths) for folder in job_folders(working_dir, output_directories, paths)
     ]
     found: List[SceneRead] = []
     for read in reads:
@@ -377,12 +382,20 @@ def _resolve(path: str, working_dir: str) -> str:
 
 
 def _is_below(path: str, ancestor: str, paths: ModuleType = os.path) -> bool:
-    """Whether ``path`` is ``ancestor`` or under it. ``/a/bc`` is not under ``/a/b``."""
+    """Whether ``path`` is ``ancestor`` or under it. ``/a/bc`` is not under ``/a/b``.
+
+    ``paths`` is ``os.path``, or ``ntpath`` in a test of Windows rules.
+    """
     if not path or not ancestor:
         return False
-    if path == ancestor:
+    # Fold case where the platform ignores it, so C:\Work is under c:\work on Windows.
+    child: str = paths.normcase(path)
+    parent: str = paths.normcase(ancestor)
+    if child == parent:
         return True
-    return path.startswith(ancestor.rstrip(paths.sep) + paths.sep)
+    # Compare against the ancestor plus a separator, so a sibling whose name only
+    # starts with the ancestor's is not counted as under it.
+    return child.startswith(parent.rstrip(paths.sep) + paths.sep)
 
 
 def _output_roots(

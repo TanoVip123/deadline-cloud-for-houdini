@@ -54,7 +54,7 @@ from deadline.houdini_pdg.ports import (
     WorkItemHandle,
 )
 from deadline.houdini_pdg.scene_reads import SceneReads
-from deadline.houdini_pdg.validation import RefusalScenario, Verdict
+from deadline.houdini_pdg.validation import RefusalScenario, Verdict, environment_with_hip
 
 
 @pytest.fixture
@@ -1288,7 +1288,7 @@ def test_the_scene_directory_comes_from_the_hip_when_the_environment_lacks_it(
 ) -> None:
     """The checks resolve ``$HIP`` paths, and a session may not have ``HIP`` set."""
     monkeypatch.delenv("HIP")
-    assert host_module._environment()["HIP"] == str(tmp_path / "scene")
+    assert environment_with_hip(host_module._saved_hip_file())["HIP"] == str(tmp_path / "scene")
 
 
 # -- host requirements --------------------------------------------------------

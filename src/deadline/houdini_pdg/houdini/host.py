@@ -34,15 +34,24 @@ import hou  # type: ignore[import-not-found]
 import pdg  # type: ignore[import-not-found]
 
 from ..errors import CookSetupError, PayloadTransferError, format_refusals
-from ..graph import GraphSnapshot, NodeInfo, synthesize
+from ..graph import GraphSnapshot, NodeInfo, find_ancestors_among, synthesize
 from ..ports import ItemOutcome, ItemState, SceneFiles, T, WorkItemHandle
-from ..scene_reads import ReadReport, SceneReads, _is_below, _path_key, match_reads
+from ..submitter import farm_problem, get_workstation_setting
+from ..scene_reads import (
+    ReadReport,
+    SceneReads,
+    _depends_on_work_item,
+    _is_below,
+    _path_key,
+    match_reads,
+)
 from ..validation import (
     Refusal,
     RefusalScenario,
     ValidationContext,
     Verdict,
     check_cook_set_has_steps,
+    environment_with_hip,
     check_generated_counts,
     check_shape_quotas,
     validate,
@@ -200,16 +209,12 @@ class HoudiniPdgHost:
             return ()
         # A node generated before this cook may not announce itself again. Once
         # PDG queues one of its items, its generation is done.
-        graph_nodes: List[Any] = _graph_nodes(self._scheduler.context)
-        started: Set[str] = {
-            _name(node) for node in graph_nodes if _name(node) in pending and _has_queued_item(node)
-        }
         # A dynamic node generates only once its upstream items cook, which the
         # wait holds back. PDG flags the nodes below one as dynamic too.
-        started |= {
+        started: Set[str] = {
             _name(node)
-            for node in graph_nodes
-            if _name(node) in pending and _attr(node, "isDynamic")
+            for node in _graph_nodes(self._scheduler.context)
+            if _name(node) in pending and (_has_queued_item(node) or _attr(node, "isDynamic"))
         }
         with self._generation_lock:
             self._generated |= started
@@ -326,7 +331,13 @@ class PreCookChecks:
         """
         if interactive:
             on_main_thread(lambda: prompt_to_save(node))
-        verdict: Verdict = on_main_thread(lambda: _check_network(node, cook_set, None)[0])
+        # A settings problem is reported by the cook when it starts, so the topology
+        # is still judged without it.
+        verdict: Verdict = on_main_thread(
+            lambda: _check_network(
+                node, _graph_context(node), _settings_or_none(node), cook_set, None
+            )[0]
+        )
         refusals: Tuple[Refusal, ...] = verdict.refusals + on_main_thread(_save_refusals)
         return Verdict(refusals=refusals, advisories=verdict.advisories)
 
@@ -371,7 +382,7 @@ def watch_task_counts(context: Any, stop: Callable[[Verdict], bool]) -> Any:
         if canceling:
             threading.Thread(target=lambda: _call(context, "cancelCook"), daemon=True).start()
 
-    return _call(context, "addEventHandler", on_generated, pdg.EventType.NodeGenerated, True)
+    return context.addEventHandler(on_generated, pdg.EventType.NodeGenerated, True)
 
 
 def cook_set_names(cook_set: Any) -> Optional[FrozenSet[str]]:
@@ -450,7 +461,7 @@ def _output_directories(node: Any, working_dir: str) -> Tuple[str, ...]:
             f"'{working_dir}', which every task already uploads. Remove it, or point it at a "
             "folder outside the working directory."
         )
-    _refuse_unbounded(folders, folders, os.environ)
+    _refuse_unbounded(folders)
     return tuple(sorted(folders))
 
 
@@ -630,11 +641,6 @@ def _report_missing(node: Any, name: str, default: Any) -> None:
     )
 
 
-def _depends_on_work_item(raw: str) -> bool:
-    """Whether an authored value is an expression or names a work item attribute, such as `` `@pdg_input` ``."""
-    return "`" in raw or "@" in raw
-
-
 def _absolute(path: str) -> str:
     """``path`` made absolute and normalized, or ``""`` for an empty path."""
     stripped: str = (path or "").strip()
@@ -737,14 +743,13 @@ def _names_of(node: Any) -> Set[str]:
 
 
 def _own_overrides_cleared(
-    infos: Sequence[NodeInfo], graph_nodes: Iterable[Any], own: Iterable[str]
+    infos: Sequence[NodeInfo], graph_nodes: Iterable[Any], own_names: AbstractSet[str]
 ) -> Tuple[NodeInfo, ...]:
     """Clear an override that names this scheduler, because it changes nothing.
 
     The override is resolved on the node itself, because PDG keeps a node's old
     scheduler until the next cook. PDG's answer is used only when that fails.
     """
-    own_names: Set[str] = set(own)
     # Per node name: the node the override names, by path, and PDG's resolved scheduler.
     authored: Dict[str, str] = {}
     resolved: Dict[str, str] = {}
@@ -778,7 +783,7 @@ def _override_target(hom: Any) -> str:
 
 
 def _names_own(
-    info: NodeInfo, authored: Optional[str], resolved: Optional[str], own_names: Set[str]
+    info: NodeInfo, authored: Optional[str], resolved: Optional[str], own_names: AbstractSet[str]
 ) -> bool:
     """Whether the node's override names this scheduler."""
     # A node the override resolves to decides. Otherwise its text or PDG's answer does.
@@ -817,14 +822,15 @@ def _scene_files(node: Any) -> SceneFiles:
 
     Raises ``CookSetupError`` for an unbounded path, or a listed one that doesn't exist.
     """
-    hip: str = str(hou.hipFile.path() or "")
-    hip_file: str = _absolute(hip) if hip else ""
+    hip_file: str = _saved_hip_file()
     found: Dict[str, Set[str]] = _scene_assets(node)
+    scanned: Set[str] = set(found)
     # The artist's own files and folders join the scan, each owned by its parm.
     for path, parm in read_listed_inputs(node):
         found.setdefault(path, set()).add(parm)
     paths: Set[str] = _without(found, {hip_file} | _integration_libraries())
-    _refuse_unbounded(paths, found, os.environ)
+    # The listed inputs were checked when they were read, so only the scan's are checked here.
+    _refuse_unbounded({path: found[path] for path in paths if path in scanned})
     # Job attachments rejects a directory listed as a file. An asset library can
     # be stored expanded, as a directory.
     directories: Set[str] = {path for path in paths if os.path.isdir(path)}
@@ -873,7 +879,7 @@ def read_listed_inputs(node: Any) -> List[Tuple[str, str]]:
     owners: Dict[str, Set[str]] = {}
     for path, owner in found:
         owners.setdefault(path, set()).add(owner)
-    _refuse_unbounded(owners, owners, os.environ)
+    _refuse_unbounded(owners)
     return found
 
 
@@ -962,17 +968,15 @@ def _scene_assets(node: Any) -> Dict[str, Set[str]]:
     return assets
 
 
-def _refuse_unbounded(
-    paths: Iterable[str], owners: Mapping[str, Set[str]], env: Mapping[str, str]
-) -> None:
-    """Raise ``CookSetupError`` naming each path that is a filesystem root, a home directory, or above one.
+def _refuse_unbounded(owners: Mapping[str, Set[str]]) -> None:
+    """Raise ``CookSetupError`` naming each path in ``owners`` that is a filesystem root, a home directory, or above one.
 
     Attaching such a path would hash every file below it before anything is
     submitted, so the cook would hang with no message.
     """
     # Each home directory that is set. ``_is_unbounded`` spells it as it spells the path.
-    homes: List[str] = [env[name] for name in _HOME_VARIABLES if env.get(name)]
-    unbounded: List[str] = sorted(path for path in paths if _is_unbounded(path, homes))
+    homes: List[str] = [os.environ[name] for name in _HOME_VARIABLES if os.environ.get(name)]
+    unbounded: List[str] = sorted(path for path in owners if _is_unbounded(path, homes))
     if not unbounded:
         return
     named: str = "; ".join(f"'{path}' from {', '.join(sorted(owners[path]))}" for path in unbounded)
@@ -1058,14 +1062,18 @@ def _save_refusals() -> Tuple[Refusal, ...]:
 
 
 def _check_network(
-    node: Any, cook_set: Optional[AbstractSet[str]], dependency_graph: Any
+    node: Any,
+    context: Any,
+    settings: Optional[SchedulerSettings],
+    cook_set: Optional[AbstractSet[str]],
+    dependency_graph: Any,
 ) -> Tuple[Verdict, GraphSnapshot]:
     """The verdict and the job's shape for the TOP network, before a cook.
 
     With no ``dependency_graph``, nothing is generated yet, so only the checks the
     topology answers are kept. With one, every check runs on the generated items.
+    With no ``settings``, the checks run without a working directory and are not waived.
     """
-    context: Any = _graph_context(node)
     if context is None:
         _logger.warning(
             "The TOP network has no PDG graph yet, so the checks that need it run when the "
@@ -1077,9 +1085,6 @@ def _check_network(
         readers.node_infos(graph_nodes, dependency_graph, cook_set), graph_nodes, _names_of(node)
     )
     snapshot: GraphSnapshot = synthesize(infos)
-    # A settings problem is reported by the cook when it starts, so the topology
-    # is still judged without it.
-    settings: Optional[SchedulerSettings] = _settings_or_none(node)
     working_dir: str = settings.working_dir if settings is not None else ""
     folders: Tuple[str, ...] = settings.output_directories if settings is not None else ()
     scene: SceneReads = readers.collect_scene_reads(
@@ -1090,17 +1095,13 @@ def _check_network(
     reads: Optional[ReadReport] = (
         match_reads(snapshot, scene.reads, working_dir, folders) if scene.available else None
     )
-    generated: bool = reads is not None and dependency_graph is not None
-    shape: GraphSnapshot = (
-        synthesize(infos, data_edges=reads.data_edges)
-        if reads is not None and generated
-        else snapshot
-    )
-    judged: Optional[ReadReport] = (
-        dataclasses.replace(reads, matches=(), data_edges={}, attribute_variables=())
-        if reads is not None and not generated
-        else reads
-    )
+    generated: bool = dependency_graph is not None
+    shape: GraphSnapshot = snapshot
+    judged: Optional[ReadReport] = reads
+    if reads is not None and generated:
+        shape = synthesize(infos, data_edges=reads.data_edges)
+    elif reads is not None:
+        judged = dataclasses.replace(reads, matches=(), data_edges={}, attribute_variables=())
     full: Verdict = validate(
         ValidationContext(
             nodes=infos,
@@ -1108,19 +1109,17 @@ def _check_network(
             reads=judged,
             working_dir=working_dir,
             output_directories=folders,
-            env=_environment(),
+            env=environment_with_hip(_saved_hip_file()),
         )
     )
     # Before generation, the checks that need items would report every step, so
     # they wait. A cook set with no step, and the job's shape, are known now.
-    waiting: FrozenSet[RefusalScenario] = _NEEDS_ITEMS if dependency_graph is None else frozenset()
-    topology: Tuple[Refusal, ...] = (
-        check_shape_quotas(infos).refusals if dependency_graph is None else ()
-    )
+    waiting: FrozenSet[RefusalScenario] = frozenset() if generated else _NEEDS_ITEMS
+    topology: Tuple[Refusal, ...] = () if generated else check_shape_quotas(infos).refusals
     verdict: Verdict = Verdict(
         refusals=tuple(r for r in full.refusals if r.scenario not in waiting)
         + topology
-        + check_cook_set_has_steps(infos, set(cook_set) if cook_set else None).refusals,
+        + check_cook_set_has_steps(infos, cook_set).refusals,
         advisories=tuple(a for a in full.advisories if a.scenario not in waiting),
     )
     return (verdict if settings is None or settings.validate_graph else waived(verdict)), shape
@@ -1144,14 +1143,10 @@ def _graph_context(node: Any) -> Any:
     return _call(node, "getPDGGraphContext")
 
 
-def _environment() -> Dict[str, str]:
-    """The process environment, with ``HIP`` taken from the saved scene when it is unset."""
-    env: Dict[str, str] = dict(os.environ)
-    if not env.get("HIP"):
-        hip: str = str(hou.hipFile.path() or "")
-        if hip:
-            env["HIP"] = os.path.dirname(_absolute(hip))
-    return env
+def _saved_hip_file() -> str:
+    """The saved ``.hip``, absolute, or ``""`` for a scene that has no file yet."""
+    hip: str = str(hou.hipFile.path() or "")
+    return _absolute(hip) if hip else ""
 
 
 # -- duck typing --------------------------------------------------------------
@@ -1207,36 +1202,43 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     """
     from deadline.client.exceptions import UserInitiatedCancel
 
-    read: Callable[[str], str] = get_setting or _workstation_setting
+    read: Callable[[str], str] = get_setting or get_workstation_setting
     # The save prompt comes first, so the artist answers it before anything else.
     try:
         prompt_to_save(node)
     except UserInitiatedCancel:
         return False
     network: Any = node.parent()
-    problem: str = _default_scheduler_problem(node, network) or _farm_problem(read)
+    problem: str = _default_scheduler_problem(node, network) or farm_problem(read)
     if problem:
-        _show(problem, error=True)
+        _show(problem)
         return False
     display: Any = network.displayNode()
-    cook_set: Optional[FrozenSet[str]] = _find_cook_set(node, display)
+    if display is None:
+        _show("The TOP network has no display node, so there is nothing to cook. Set one.")
+        return False
+    # The settings, the graph context and the cook set are read once, for every check below.
+    try:
+        settings: SchedulerSettings = read_scheduler_settings(node)
+    except CookSetupError as e:
+        _show(str(e))
+        return False
+    context: Any = _graph_context(node)
+    cook_set: Optional[FrozenSet[str]] = _find_cook_set(context, display)
     # A job shape over a quota is known from the wires, so nothing is generated for
     # it, unless the artist turned validation off.
-    early: Optional[SchedulerSettings] = _settings_or_none(node)
-    validating: bool = early is None or early.validate_graph
-    context: Any = _graph_context(node)
     shape: Verdict = check_shape_quotas(readers.node_infos(_graph_nodes(context), None, cook_set))
-    if shape.refusals and validating:
-        _show("The cook can't start.\n\n" + format_refusals(shape.refusals), error=True)
+    if shape.refusals and settings.validate_graph:
+        _show("The cook can't start.\n\n" + format_refusals(shape.refusals))
         return False
     # Generate the display node's items, so every check sees the job the cook would
     # submit, and stop at the first step that passes a task quota.
     over_quota: List[Verdict] = []
 
     def stop(verdict: Verdict) -> bool:
-        if validating:
+        if settings.validate_graph:
             over_quota.append(verdict)
-        return validating
+        return settings.validate_graph
 
     handler: Any = watch_task_counts(context, stop)
     try:
@@ -1244,7 +1246,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     finally:
         _call(context, "removeEventHandler", handler)
     if over_quota:
-        _show("The cook can't start.\n\n" + format_refusals(over_quota[0].refusals), error=True)
+        _show("The cook can't start.\n\n" + format_refusals(over_quota[0].refusals))
         return False
     # Read the items from this scheduler, as the cook does.
     scheduler: Any = _call(
@@ -1253,19 +1255,18 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     dependency_graph: Any = _call(scheduler, "dependencyGraph", True)
     checked: Verdict
     snapshot: GraphSnapshot
-    checked, snapshot = _check_network(node, cook_set, dependency_graph)
+    checked, snapshot = _check_network(node, context, settings, cook_set, dependency_graph)
     verdict: Verdict = Verdict(
         refusals=checked.refusals + _save_refusals(), advisories=checked.advisories
     )
     if verdict.refusals:
-        _show("The cook can't start.\n\n" + format_refusals(verdict.refusals), error=True)
+        _show("The cook can't start.\n\n" + format_refusals(verdict.refusals))
         return False
     try:
-        settings: SchedulerSettings = read_scheduler_settings(node)
         requirements: Optional[Dict[str, Any]] = read_host_requirements(node)
         inputs: List[Tuple[str, str]] = read_listed_inputs(node)
     except CookSetupError as e:
-        _show(str(e), error=True)
+        _show(str(e))
         return False
     counts: str = (
         f"Steps: {len(snapshot.steps)}, tasks: {snapshot.total_tasks}"
@@ -1287,32 +1288,20 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     return True
 
 
-def _find_cook_set(node: Any, display: Any) -> Optional[FrozenSet[str]]:
+def _find_cook_set(context: Any, display: Any) -> Optional[FrozenSet[str]]:
     """The PDG names of the display node and every node wired above it, or None when unknown.
 
-    A node with no PDG node keeps its own name, so the cook set check stands down for it.
+    The wires are read as the cook reads them. A display node with no PDG node keeps
+    its own name, so the cook set check stands down for it.
     """
-    if display is None:
-        return None
-    # PDG's name for each TOP node, by path.
-    context: Any = _graph_context(node)
+    graph_nodes: List[Any] = _graph_nodes(context)
     by_path: Dict[str, str] = {
-        _path_of(hom): name for name, hom in _top_nodes(_graph_nodes(context)).items() if hom
+        _path_of(hom): name for name, hom in _top_nodes(graph_nodes).items() if hom
     }
-    # Walk the input wires up from the display node.
-    names: Set[str] = set()
-    seen: Set[str] = set()
-    stack: List[Any] = [display]
-    while stack:
-        # Each node once by path, named as PDG names it.
-        current: Any = stack.pop()
-        path: str = _path_of(current)
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        names.add(by_path.get(path) or str(_call(current, "name") or path))
-        stack.extend(_call(current, "inputs") or ())
-    return frozenset(names) or None
+    infos: Tuple[NodeInfo, ...] = readers.node_infos(graph_nodes, None)
+    name: str = by_path.get(_path_of(display)) or str(_call(display, "name") or "")
+    above: Set[str] = find_ancestors_among(infos, {info.name for info in infos}).get(name, set())
+    return frozenset({name} | above if name else above) or None
 
 
 def _default_scheduler_problem(node: Any, network: Any) -> str:
@@ -1328,18 +1317,6 @@ def _default_scheduler_problem(node: Any, network: Any) -> str:
     )
 
 
-def _farm_problem(read: Callable[[str], str]) -> str:
-    """The ROP's message for a missing farm or queue, or ``""``."""
-    from ..submitter import _NO_FARM, _NO_QUEUE
-
-    # The same messages the ROP shows, so both nodes read the same.
-    if not read("defaults.farm_id"):
-        return _NO_FARM
-    if not read("defaults.queue_id"):
-        return _NO_QUEUE
-    return ""
-
-
 def _confirmed(
     node: Any,
     settings: SchedulerSettings,
@@ -1352,8 +1329,8 @@ def _confirmed(
     lines: List[str] = [
         f"Farm: {read('defaults.farm_id')}",
         f"Queue: {read('defaults.queue_id')}",
-        f"Job name: {_text_parm(node, 'name') or os.path.basename(str(hou.hipFile.path()))}",
-        f"Priority: {_text_parm(node, 'priority') or '50'}",
+        f"Job name: {_parm(node, 'name', '', as_text=True) or os.path.basename(str(hou.hipFile.path()))}",
+        f"Priority: {_parm(node, 'priority', '', as_text=True) or '50'}",
         f"Working directory: {settings.working_dir}",
         *extra,
     ]
@@ -1387,12 +1364,6 @@ def _describe(requirements: Optional[Dict[str, Any]]) -> str:
     return "Host requirements: " + ", ".join(parts)
 
 
-def _text_parm(node: Any, name: str) -> str:
-    """A parm's value as text, or ``""`` when the node lacks it."""
-    parm: Any = node.parm(name)
-    return str(parm.evalAsString()) if parm is not None else ""
-
-
 def show_error_popup(text: str) -> None:
     """Queue an error popup on the main thread, when a UI exists, and return at once.
 
@@ -1402,18 +1373,9 @@ def show_error_popup(text: str) -> None:
         return
     import hdefereval  # type: ignore[import-not-found]
 
-    hdefereval.executeDeferred(lambda: _show(text, error=True))
+    hdefereval.executeDeferred(lambda: _show(text))
 
 
-def _show(text: str, *, error: bool) -> None:
-    """Tell the artist why nothing was submitted."""
-    hou.ui.displayMessage(
-        text, title=_TITLE, severity=hou.severityType.Error if error else hou.severityType.Message
-    )
-
-
-def _workstation_setting(name: str) -> str:
-    """A Deadline Cloud workstation setting, such as ``defaults.farm_id``."""
-    from deadline.client.config import get_setting
-
-    return str(get_setting(name) or "")
+def _show(text: str) -> None:
+    """Tell the artist, in an error dialog, why nothing was submitted."""
+    hou.ui.displayMessage(text, title=_TITLE, severity=hou.severityType.Error)

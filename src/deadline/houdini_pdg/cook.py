@@ -55,6 +55,7 @@ from .validation import (
     Verdict,
     cooked_from_cache,
     check_no_farm_work,
+    environment_with_hip,
     validate,
     waived,
 )
@@ -679,20 +680,7 @@ class Cook:
         PDG's stop that follows is a cancel, so the refusal is reported then. With
         validation off, or once the snapshot is taken, it is only logged.
         """
-        # Keep the refusal as a warning when validation is off, then refuse once from CONNECTED.
-        found: Verdict = verdict if self._settings.validate_graph else waived(verdict)
-        self._log_validation_verdict(found)
-        if not found.refusals:
-            return False
-        scenarios: Tuple[RefusalScenario, ...] = tuple(
-            dict.fromkeys(refusal.scenario for refusal in found.refusals)
-        )
-        if self._state.move(CookPhase.CONNECTED, CookPhase.SNAPSHOTTING) and self._state.refuse(
-            scenarios, from_phase=CookPhase.SNAPSHOTTING
-        ):
-            self._refused_at_end = found
-            return True
-        return False
+        return self._refuse_before_any_offer(verdict)
 
     def refused_at_end(self) -> Optional[Verdict]:
         """The refusal of a cook PDG ended before offering anything, for its cache or a quota."""
@@ -714,12 +702,19 @@ class Cook:
         except Exception:
             _logger.warning("Could not read which work items PDG cooked from cache.", exc_info=True)
             return
-        # With validation off the refusal is only a warning, as it is for a snapshot.
+        self._refuse_before_any_offer(found)
+
+    def _refuse_before_any_offer(self, found: Verdict) -> bool:
+        """Refuse a cook that has offered nothing yet, and keep the refusal for ``on_stop_cook``.
+
+        With validation off the refusal is only a warning, as it is for a snapshot.
+        Returns whether the cook was refused.
+        """
         verdict: Verdict = found if self._settings.validate_graph else waived(found)
         self._log_validation_verdict(verdict)
         if not verdict.refusals:
-            return
-        # The cook moves through SNAPSHOTTING to REFUSED, so the summary records it.
+            return False
+        # The cook moves once from CONNECTED through SNAPSHOTTING to REFUSED, so the summary records it.
         scenarios: Tuple[RefusalScenario, ...] = tuple(
             dict.fromkeys(refusal.scenario for refusal in verdict.refusals)
         )
@@ -727,6 +722,8 @@ class Cook:
             scenarios, from_phase=CookPhase.SNAPSHOTTING
         ):
             self._refused_at_end = verdict
+            return True
+        return False
 
     # -- submission --
 
@@ -911,12 +908,11 @@ class Cook:
 
     def _environment(self) -> Dict[str, str]:
         """This process's environment, with ``HIP`` from the saved scene when it is unset."""
-        env: Dict[str, str] = dict(os.environ)
-        if not env.get("HIP"):
-            hip_file: str = self._host.scene_files().hip_file
-            if hip_file:
-                env["HIP"] = os.path.dirname(hip_file)
-        return env
+        return (
+            os.environ.copy()
+            if os.environ.get("HIP")
+            else environment_with_hip(self._host.scene_files().hip_file)
+        )
 
     @staticmethod
     def _log_validation_verdict(verdict: Verdict) -> None:

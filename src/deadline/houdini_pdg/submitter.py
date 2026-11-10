@@ -23,7 +23,7 @@ from deadline.client.api import (
     SubmissionContext,
     create_job_from_job_bundle,
 )
-from deadline.client.config import get_setting as _workstation_setting
+from deadline.client import config as _client_config
 from deadline.client.job_bundle.submission import AssetReferences
 from deadline.houdini_submitter.python.deadline_cloud_for_houdini._job_bundle import (
     _ADAPTOR_OVERRIDE_PARAM_NAMES,
@@ -55,6 +55,21 @@ _NO_FARM: str = "Please configure the farm ID in the AWS Deadline Cloud render n
 _NO_QUEUE: str = (
     "Please configure the queue ID in the AWS Deadline Cloud render node (ROP) settings"
 )
+
+
+def get_workstation_setting(name: str, config: Any = _client_config) -> str:
+    """A workstation setting from the client library's ``config``, such as ``defaults.farm_id``, or ``""`` when unset."""
+    return str(config.get_setting(name) or "")
+
+
+def farm_problem(get_setting: Callable[[str], str]) -> str:
+    """The ROP's message for a missing farm or queue, or ``""`` when both are set."""
+    if not get_setting("defaults.farm_id"):
+        return _NO_FARM
+    if not get_setting("defaults.queue_id"):
+        return _NO_QUEUE
+    return ""
+
 
 #: The parameters every PDG job declares. The values come from the cook.
 _PDG_PARAMETER_DEFINITIONS: List[Dict[str, Any]] = [
@@ -110,7 +125,7 @@ class PdgSubmitter(BaseSubmitter):
         file_exists: Callable[[str], bool] = os.path.isfile,
         job_attachments: Optional[Callable[[str, str], Tuple[str, str]]] = None,
         cook_id: str = "",
-        get_setting: Callable[[str], str] = _workstation_setting,
+        get_setting: Callable[[str], str] = get_workstation_setting,
         output_directories: Sequence[str] = (),
     ) -> None:
         # The host owns the scene: every read of ``node`` goes through its
@@ -240,10 +255,9 @@ class PdgSubmitter(BaseSubmitter):
         :class:`~deadline.houdini_pdg.errors.JobSubmissionError`, chained to the cause.
         """
         # Refuse before any work when the workstation names no farm or queue.
-        if not self._get_setting("defaults.farm_id"):
-            raise CookSetupError(_NO_FARM)
-        if not self._get_setting("defaults.queue_id"):
-            raise CookSetupError(_NO_QUEUE)
+        problem: str = farm_problem(self._get_setting)
+        if problem:
+            raise CookSetupError(problem)
         self._snapshot = snapshot
         try:
             # The node's queue parameters are declared in the template, and the

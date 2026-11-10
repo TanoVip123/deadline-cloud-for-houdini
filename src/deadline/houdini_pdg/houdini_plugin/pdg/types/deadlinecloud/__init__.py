@@ -42,7 +42,7 @@ from deadline.houdini_pdg.houdini.host import (
 )
 from deadline.houdini_pdg.houdini.settings import SchedulerSettings
 from deadline.houdini_pdg.ports import Clock, WorkItemHandle
-from deadline.houdini_pdg.submitter import _NO_FARM, _NO_QUEUE, PdgSubmitter
+from deadline.houdini_pdg.submitter import PdgSubmitter, farm_problem, get_workstation_setting
 from deadline.houdini_pdg.task_storage import S3TaskStorage
 from deadline.houdini_pdg.validation import Verdict
 
@@ -65,8 +65,8 @@ class _ClientFactory:
     config: Any = deadline_config
 
     def get_setting(self, name: str) -> str:
-        """A workstation setting, such as ``defaults.farm_id``."""
-        return str(self.config.get_setting(name) or "")
+        """A workstation setting, such as ``defaults.farm_id``, or ``""`` when unset."""
+        return get_workstation_setting(name, self.config)
 
     def deadline_client(self) -> Any:
         """A Deadline Cloud client with the workstation's login."""
@@ -141,12 +141,11 @@ class DeadlineCloudPDGScheduler(PyScheduler):
             host: HoudiniPdgHost = HoudiniPdgHost(self)
             # Houdini starts a generate with static False, and says so in the cook options.
             generate: bool = static or _is_generate(self.context)
+            names: Optional[FrozenSet[str]] = cook_set_names(cook_set)
             if not generate:
                 # A generate submits nothing, so only a cook is checked.
                 _refuse(
-                    PreCookChecks().run(
-                        host.scheduler_node(), interactive=False, cook_set=cook_set_names(cook_set)
-                    )
+                    PreCookChecks().run(host.scheduler_node(), interactive=False, cook_set=names)
                 )
             clock: SystemClock = SystemClock()
             clients: _ClientFactory = self._clients()
@@ -158,7 +157,7 @@ class DeadlineCloudPDGScheduler(PyScheduler):
                     settings, cook_id, host=host, clock=clock, clients=clients
                 ),
             )
-            return self._core.on_start_cook(generate, cook_set_names(cook_set))
+            return self._core.on_start_cook(generate, names)
         except Exception as error:
             self._core = None
             self._start_failed = True
@@ -278,12 +277,11 @@ def _connect(
     clients: _ClientFactory,
 ) -> CookServices:
     """The cook's farm services, for the workstation's farm and queue, from one ``GetQueue``."""
+    problem: str = farm_problem(clients.get_setting)
+    if problem:
+        raise CookSetupError(problem)
     farm_id: str = clients.get_setting("defaults.farm_id")
-    if not farm_id:
-        raise CookSetupError(_NO_FARM)
     queue_id: str = clients.get_setting("defaults.queue_id")
-    if not queue_id:
-        raise CookSetupError(_NO_QUEUE)
     # The queue gives the bucket, and its role gives the session that reaches it.
     client, queue = _read_queue(farm_id, queue_id, clients)
     bucket, root_prefix = _job_attachments(queue, queue_id)

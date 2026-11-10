@@ -499,18 +499,22 @@ def _record_outputs(
     workstation's path.
     """
     # The scan leaves out the payloads and the linked scene, which the command didn't write.
-    hip_link: str = os.path.join(item.pdg_dir, os.path.basename(item.scene_file))
-    recorded: List[OutputFile] = list(outputs) or _scan_outputs(
-        item.pdg_dir,
-        exclude=(item.pdg_temp, hip_link if item.scene_file else ""),
-        since=started,
-    )
+    recorded: List[OutputFile] = list(outputs)
+    folders: List[Tuple[str, str]] = []
+    if not outputs:
+        hip_link: str = os.path.join(item.pdg_dir, os.path.basename(item.scene_file))
+        recorded = _scan_outputs(
+            item.pdg_dir,
+            exclude=(item.pdg_temp, hip_link if item.scene_file else ""),
+            since=started,
+        )
+        folders = list(item.output_directories)
     record: List[Dict[str, str]] = [
         {"path": _tokenize(o.path, item.pdg_dir), "tag": o.tag} for o in recorded
     ]
     # A scan also covers each extra output folder, recorded by the workstation's path,
     # which is the one the scheduler and PDG know.
-    for worker, local in () if outputs else item.output_directories:
+    for worker, local in folders:
         record.extend(
             {
                 "path": local.rstrip("/\\")

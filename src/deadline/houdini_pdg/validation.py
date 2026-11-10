@@ -15,8 +15,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
-from types import ModuleType
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import AbstractSet, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .graph import (
     PDG_DIR_TOKEN,
@@ -34,6 +33,8 @@ from .scene_reads import (
     ReadVerdict,
     SceneRead,
     _depends_on_work_item,
+    _is_below,
+    job_folders,
     reads_opening,
 )
 
@@ -280,28 +281,19 @@ def _expand(path: str, env: Optional[Mapping[str, str]]) -> str:
     return _VARIABLE.sub(replace, path)
 
 
+def environment_with_hip(hip_file: str) -> Dict[str, str]:
+    """This process's environment, with ``HIP`` set to the folder of ``hip_file`` when it is unset."""
+    env: Dict[str, str] = dict(os.environ)
+    if not env.get("HIP") and hip_file:
+        env["HIP"] = os.path.dirname(hip_file)
+    return env
+
+
 def _resolve(path: str, working_dir: str, env: Optional[Mapping[str, str]]) -> str:
     """A declared or authored path as it reads on this workstation."""
     # Substitute the PDG directory token for the session's working directory, then
     # Houdini variables, then normalise.
     return os.path.normpath(_expand(path.replace(PDG_DIR_TOKEN, working_dir), env))
-
-
-def _is_below(path: str, ancestor: str, paths: ModuleType = os.path) -> bool:
-    """Whether ``path`` is ``ancestor`` or under it. ``/a/bc`` is not under ``/a/b``.
-
-    ``paths`` is ``os.path``, or ``ntpath`` in a test of Windows rules.
-    """
-    if not path or not ancestor:
-        return False
-    # Fold case where the platform ignores it, so C:\Work is under c:\work on Windows.
-    child: str = paths.normcase(path)
-    parent: str = paths.normcase(ancestor)
-    if child == parent:
-        return True
-    # Compare against the ancestor plus a separator, so a sibling whose name only
-    # starts with the ancestor's is not counted as under it.
-    return child.startswith(parent.rstrip(paths.sep) + paths.sep)
 
 
 def _undeliverable_reason(
@@ -329,11 +321,7 @@ def _undeliverable_reason(
 
 def _is_inside_job(path: str, working_dir: str, output_directories: Sequence[str]) -> bool:
     """Whether ``path`` is in the working directory or one of the extra output folders."""
-    return any(
-        _is_below(path, os.path.normpath(folder))
-        for folder in (working_dir, *output_directories)
-        if folder
-    )
+    return any(_is_below(path, folder) for folder in job_folders(working_dir, output_directories))
 
 
 # -- the graph's shape --------------------------------------------------------
@@ -451,51 +439,74 @@ def _check_quotas(ctx: ValidationContext) -> Verdict:
     The service validates the same ceilings, but only after the scene is uploaded,
     and names neither the node nor a number.
     """
-    quotas: Quotas = ctx.quotas
     steps: Tuple = ctx.snapshot.steps
+    # How many dependencies carry data decides whether the graph is untidy or
+    # inexpressible at step granularity: an ordering edge can be pruned, while
+    # dropping a data edge removes files from a session.
+    carrying: Dict[str, str] = {
+        step.name: (
+            f" {len(step.data_dependencies)} of them carry data a task reads, so they "
+            "cannot be pruned."
+        )
+        for step in steps
+        if step.data_dependencies
+    }
+    return _quota_refusals(
+        [step.name for step in steps],
+        ctx.quotas,
+        tasks={step.name: step.task_count for step in steps},
+        dependencies={step.name: step.dependencies for step in steps},
+        carrying=carrying,
+    )
+
+
+def _quota_refusals(
+    names: Sequence[str],
+    quotas: Quotas,
+    *,
+    tasks: Optional[Mapping[str, int]] = None,
+    dependencies: Optional[Mapping[str, AbstractSet[str]]] = None,
+    carrying: Optional[Mapping[str, str]] = None,
+    note: str = "",
+) -> Verdict:
+    """Refuse each quota the counts cross: the job's tasks and steps, then each step's, then consumers.
+
+    ``tasks`` and ``dependencies`` are by step name, and either may be unknown yet.
+    ``carrying`` adds a step's data dependency text, and ``note`` ends each task refusal.
+    """
     refusals: List[Refusal] = []
-
     # Job-wide ceilings: the task total across every step, and the step count.
-    total: int = ctx.snapshot.total_tasks
-    if total > quotas.max_tasks_per_job:
+    if tasks is not None and sum(tasks.values()) > quotas.max_tasks_per_job:
         refusals.append(
-            _quota_refusal(_WHOLE_COOK, total, quotas.max_tasks_per_job, _TASKS_PER_JOB)
-        )
-    if len(steps) > quotas.max_steps_per_job:
-        refusals.append(
-            _quota_refusal(_WHOLE_COOK, len(steps), quotas.max_steps_per_job, _STEPS_PER_JOB)
-        )
-
-    # Per-step ceilings: a step's own task count, and its dependency count.
-    for step in steps:
-        if step.task_count > quotas.max_tasks_per_step:
-            refusals.append(
-                _quota_refusal(
-                    step.name, step.task_count, quotas.max_tasks_per_step, _TASKS_PER_STEP
-                )
+            _quota_refusal(
+                _WHOLE_COOK, sum(tasks.values()), quotas.max_tasks_per_job, _TASKS_PER_JOB, note
             )
-        if len(step.dependencies) > quotas.max_step_dependencies:
-            # How many carry data decides whether the graph is untidy or
-            # inexpressible at step granularity: an ordering edge can be pruned,
-            # while dropping a data edge removes files from a session.
-            carrying: int = len(step.data_dependencies)
+        )
+    if dependencies is not None and len(names) > quotas.max_steps_per_job:
+        refusals.append(
+            _quota_refusal(_WHOLE_COOK, len(names), quotas.max_steps_per_job, _STEPS_PER_JOB)
+        )
+    # Per-step ceilings: a step's own task count, and its dependency count.
+    for name in names:
+        if tasks is not None and tasks[name] > quotas.max_tasks_per_step:
+            refusals.append(
+                _quota_refusal(name, tasks[name], quotas.max_tasks_per_step, _TASKS_PER_STEP, note)
+            )
+        if dependencies is not None and len(dependencies[name]) > quotas.max_step_dependencies:
             refusals.append(
                 _quota_refusal(
-                    step.name,
-                    len(step.dependencies),
+                    name,
+                    len(dependencies[name]),
                     quotas.max_step_dependencies,
                     _DEPENDENCIES_PER_STEP,
-                    extra=(
-                        f" {carrying} of them carry data a task reads, so they cannot be " "pruned."
-                        if carrying
-                        else ""
-                    ),
+                    (carrying or {}).get(name, ""),
                 )
             )
-
     # The consumer ceiling counts, for each step, how many other steps depend on
     # it, by inverting the dependency edges each step lists upstream.
-    consumers: Counter = Counter(dependency for step in steps for dependency in step.dependencies)
+    consumers: Counter = Counter(
+        dependency for deps in (dependencies or {}).values() for dependency in deps
+    )
     for name, count in sorted(consumers.items()):
         if count > quotas.max_step_consumers:
             refusals.append(
@@ -515,30 +526,9 @@ def check_shape_quotas(nodes: Sequence[NodeInfo], quotas: Quotas = Quotas()) -> 
     steps: Set[str] = {name for name in schedulable if by_name[name].in_cook_set is not False}
     # A step outside the cook has no items, so the job keeps no edge to it.
     projected: Dict[str, Set[str]] = project_steps(by_name, schedulable)
-    dependencies: Dict[str, Set[str]] = {name: projected[name] & steps for name in steps}
-    refusals: List[Refusal] = []
-    if len(steps) > quotas.max_steps_per_job:
-        refusals.append(
-            _quota_refusal(_WHOLE_COOK, len(steps), quotas.max_steps_per_job, _STEPS_PER_JOB)
-        )
-    # Each step's dependency count, then how many steps depend on each step.
-    for name in sorted(steps):
-        if len(dependencies[name]) > quotas.max_step_dependencies:
-            refusals.append(
-                _quota_refusal(
-                    name,
-                    len(dependencies[name]),
-                    quotas.max_step_dependencies,
-                    _DEPENDENCIES_PER_STEP,
-                )
-            )
-    consumers: Counter = Counter(dep for deps in dependencies.values() for dep in deps)
-    for name, count in sorted(consumers.items()):
-        if count > quotas.max_step_consumers:
-            refusals.append(
-                _quota_refusal(name, count, quotas.max_step_consumers, _CONSUMERS_PER_STEP)
-            )
-    return Verdict(refusals=tuple(refusals))
+    return _quota_refusals(
+        sorted(steps), quotas, dependencies={name: projected[name] & steps for name in steps}
+    )
 
 
 def check_generated_counts(counts: Mapping[str, int], quotas: Quotas = Quotas()) -> Verdict:
@@ -546,19 +536,16 @@ def check_generated_counts(counts: Mapping[str, int], quotas: Quotas = Quotas())
 
     PDG is still generating, so the refusal says the generation was stopped.
     """
-    # Each step over its own limit, then the total of every step generated so far.
-    stopped: str = " PDG was still generating, so the generation was stopped."
-    refusals: List[Refusal] = [
-        _quota_refusal(name, count, quotas.max_tasks_per_step, _TASKS_PER_STEP, stopped)
-        for name, count in sorted(counts.items())
-        if count > quotas.max_tasks_per_step
-    ]
-    total: int = sum(counts.values())
-    if total > quotas.max_tasks_per_job:
-        refusals.append(
-            _quota_refusal(_WHOLE_COOK, total, quotas.max_tasks_per_job, _TASKS_PER_JOB, stopped)
-        )
-    return Verdict(refusals=tuple(refusals))
+    found: Verdict = _quota_refusals(
+        sorted(counts),
+        quotas,
+        tasks=counts,
+        note=" PDG was still generating, so the generation was stopped.",
+    )
+    # The step that passed its limit is named first, since it is the one to make smaller.
+    return Verdict(
+        refusals=tuple(sorted(found.refusals, key=lambda refusal: refusal.subject == _WHOLE_COOK))
+    )
 
 
 def check_no_farm_work(ctx: ValidationContext) -> Verdict:
@@ -611,7 +598,9 @@ _NO_FARM_WORK_REMEDY: str = (
 )
 
 
-def check_cook_set_has_steps(nodes: Sequence[NodeInfo], cook_set: Optional[Set[str]]) -> Verdict:
+def check_cook_set_has_steps(
+    nodes: Sequence[NodeInfo], cook_set: Optional[AbstractSet[str]]
+) -> Verdict:
     """Refuse a cook set that names no step, before anything is generated.
 
     It stands down when the set is unknown or names a node that isn't read, since
