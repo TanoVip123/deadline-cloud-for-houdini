@@ -1478,9 +1478,11 @@ def _check_unreachable_local_files(ctx: ValidationContext) -> Verdict:
             missing.append(read)
 
     # A file nothing on disk holds and no step writes is refused: the task opens a
-    # file that is not there.
-    refusals: Tuple[Refusal, ...] = tuple(
-        Refusal(
+    # file that is not there. Two steps can walk the same node, so each parm and
+    # detail is refused once.
+    refusals: Dict[Tuple[str, str], Refusal] = {}
+    for read in missing:
+        refusal: Refusal = Refusal(
             scenario=RefusalScenario.LOCAL_FILE_UNREACHABLE,
             subject=_parm_subject(read.step, read.node_path, read.parm),
             detail=(
@@ -1493,8 +1495,7 @@ def _check_unreachable_local_files(ctx: ValidationContext) -> Verdict:
                 "before cooking so the job carries it."
             ),
         )
-        for read in missing
-    )
+        refusals.setdefault((refusal.subject, refusal.detail), refusal)
     # A file that does exist is carried in the attachments, which costs upload time
     # on every cook, so a step that reads several is advised.
     advisories: Tuple[Advisory, ...] = tuple(
@@ -1509,7 +1510,7 @@ def _check_unreachable_local_files(ctx: ValidationContext) -> Verdict:
         )
         for step, paths in sorted(attached.items())
     )
-    return Verdict(refusals=refusals, advisories=advisories)
+    return Verdict(refusals=tuple(refusals.values()), advisories=advisories)
 
 
 # Every check, with the scenario it reports. A new refusal is a new function and a

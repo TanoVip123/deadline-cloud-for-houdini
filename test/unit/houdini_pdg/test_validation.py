@@ -2505,6 +2505,38 @@ def test_a_read_outside_the_cook_that_is_not_on_disk_is_refused() -> None:
     assert _subjects(verdict, RefusalScenario.LOCAL_FILE_UNREACHABLE) == {_parm_subject(read)}
 
 
+def test_a_missing_file_two_steps_reach_through_one_node_is_refused_once() -> None:
+    """Two steps that walk the same node read its parm twice, and the artist sees one refusal.
+
+    The subject names the node and not the step, so a second copy only repeats it.
+    """
+    # Steps a and b both reach one node whose parm names a file that isn't on disk.
+    nodes: List[NodeInfo] = [_node("a"), _node("b")]
+    snapshot: GraphSnapshot = synthesize(nodes)
+    missing: str = _absolute("nonexistent", "Mandril.pic")
+    reads: List[SceneRead] = [
+        SceneRead(step=step, node_path="/obj/sparks/adjust", parm="cmap", raw=missing, path=missing)
+        for step in ("a", "b")
+    ]
+    report: ReadReport = match_reads(snapshot, reads, WORKING_DIR)
+    verdict: Verdict = validate(
+        _ctx(
+            nodes,
+            snapshot=snapshot,
+            reads=report,
+            working_dir=WORKING_DIR,
+            exists=lambda path: False,
+        )
+    )
+    # A list, not a set, so a repeated refusal shows up.
+    refused: List[Refusal] = [
+        refusal
+        for refusal in verdict.refusals
+        if refusal.scenario is RefusalScenario.LOCAL_FILE_UNREACHABLE
+    ]
+    assert [refusal.subject for refusal in refused] == ["/obj/sparks/adjust parm 'cmap'"]
+
+
 def test_a_read_outside_the_cook_that_exists_is_only_advised() -> None:
     """A read outside the cook that does exist is carried in attachments, so it is only advised."""
     nodes: List[NodeInfo] = [_node("a")]
