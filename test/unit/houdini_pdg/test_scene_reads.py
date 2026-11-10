@@ -931,12 +931,15 @@ def _extra_writers() -> GraphSnapshot:
     )
 
 
-def test_a_root_that_holds_an_extra_output_folder_matches_only_exact_directories() -> None:
+def test_a_root_that_holds_an_extra_output_directory_matches_only_exact_directories() -> None:
     """The extra folder holds every step's output, so a root at it would claim every read there."""
     # depth's outputs share only the extra folder itself as their root.
     read: SceneRead = _read("comp", f"{EXTRA}/beauty/b.3.exr")
     report: ReadReport = match_reads(
-        _extra_writers(), [read, _read("comp", f"{EXTRA}/other/z.exr")], WORK, (EXTRA,)
+        _extra_writers(),
+        [read, _read("comp", f"{EXTRA}/other/z.exr")],
+        WORK,
+        output_directories=(EXTRA,),
     )
     assert [(m.read.path, m.producer) for m in report.matches] == [
         (f"{EXTRA}/beauty/b.3.exr", "beauty"),
@@ -950,13 +953,15 @@ def test_a_root_that_holds_an_extra_output_folder_matches_only_exact_directories
 
 
 @pytest.mark.parametrize("prefix", [f"{EXTRA}/", "/renders/", EXTRA])
-def test_a_prefix_that_holds_an_extra_output_folder_matches_nothing(prefix: str) -> None:
+def test_a_prefix_that_holds_an_extra_output_directory_matches_nothing(prefix: str) -> None:
     """Such a prefix covers every step writing there, so it would add an edge to each of them."""
-    report: ReadReport = match_reads(_extra_writers(), [_wedged("comp", prefix)], WORK, (EXTRA,))
+    report: ReadReport = match_reads(
+        _extra_writers(), [_wedged("comp", prefix)], WORK, output_directories=(EXTRA,)
+    )
     assert report.matches == () and report.data_edges == {}
 
 
-def test_reads_opening_ignores_a_prefix_that_holds_an_extra_output_folder() -> None:
+def test_reads_opening_ignores_a_prefix_that_holds_an_extra_output_directory() -> None:
     """The check for in-process nodes asks which reads open a file, with the same guard as matching."""
     files: Set[str] = {f"{EXTRA}/beauty/b.1.exr"}
     assert reads_opening(files, [_wedged("comp", f"{EXTRA}/")], WORK) != ()

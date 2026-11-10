@@ -278,17 +278,17 @@ class FakeNode:
         if not ref:
             return None
         if not ref.startswith("/"):
-            return self._walk(ref.split("/"))
+            return self._find_child(ref.split("/"))
         # The fake's root is ``/obj``, so an absolute path starts with its name.
         root: FakeNode = self._root()
         parts: List[str] = ref.split("/")
-        return root._walk(parts[2:]) if parts[1:2] == [root.name()] else None
+        return root._find_child(parts[2:]) if parts[1:2] == [root.name()] else None
 
     def _root(self) -> "FakeNode":
         """The node at the top of this node's parents."""
         return self if self._parent is None else self._parent._root()
 
-    def _walk(self, parts: List[str]) -> Optional["FakeNode"]:
+    def _find_child(self, parts: List[str]) -> Optional["FakeNode"]:
         """Follow ``parts`` from this node, where ``..`` is the parent, as Houdini does."""
         if not parts:
             return self
@@ -303,7 +303,7 @@ class FakeNode:
                 else next((c for c in self._children if c.name() == head), None)
             )
         )
-        return step._walk(parts[1:]) if step is not None else None
+        return step._find_child(parts[1:]) if step is not None else None
 
     def displayNode(self) -> Optional["FakeNode"]:
         return self.display
@@ -535,7 +535,7 @@ SCHEDULER_PATH: str = "/obj/topnet1/deadlinecloudscheduler1"
 
 
 @dataclass
-class Network:
+class FakeNetwork:
     """A TOP network, its scheduler node, and PDG's view of both."""
 
     topnet: FakeNode
@@ -559,7 +559,7 @@ def build_network(
     spec: Sequence[Tuple[Any, ...]],
     *,
     scheduler_parms: Optional[Dict[str, Any]] = None,
-) -> Network:
+) -> FakeNetwork:
     """``spec`` rows are (name, command, PDG node type, input names[, cook type])."""
     obj: FakeNode = FakeNode("/obj", category="Object")
     obj.child_category = "Object"
@@ -590,7 +590,7 @@ def build_network(
     scheduler_node.context = context
     # PDG creates the graph context when a never-cooked network cooks its TOP nodes only.
     scheduler_node.cook_creates = context
-    return Network(topnet, scheduler_node, pdg_nodes, context)
+    return FakeNetwork(topnet, scheduler_node, pdg_nodes, context)
 
 
 #: cooking_example's shape: an in-process Python Script between two steps.

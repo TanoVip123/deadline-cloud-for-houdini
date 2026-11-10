@@ -26,7 +26,7 @@ from .houdini_fakes import (
     PDG,
     PYRO_BONFIRE,
     FakeHou,
-    Network,
+    FakeNetwork,
     build_network,
     install_hou,
 )
@@ -98,7 +98,7 @@ _QUEUE: Dict[str, Any] = {
 }
 
 
-class FakeCloud(REGISTRATION._ClientFactory):  # type: ignore[misc, name-defined]
+class FakeCloud(REGISTRATION._DeadlineCloudCalls):  # type: ignore[misc, name-defined]
     """Clients with a fixed farm, queue, S3 answer, and telemetry, and no waiting."""
 
     def __init__(
@@ -134,7 +134,7 @@ class FakeCloud(REGISTRATION._ClientFactory):  # type: ignore[misc, name-defined
     def needs_login(self) -> bool:
         return self.login_needed
 
-    def record_event(self) -> Callable[[str, Dict[str, Any]], Any]:
+    def telemetry_recorder(self) -> Callable[[str, Dict[str, Any]], Any]:
         return lambda event_type, details: self.events.append((event_type, details))
 
     def sleep(self, seconds: float) -> None:
@@ -153,7 +153,7 @@ def scene(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeHou:
     return state
 
 
-def _scheduler(network: Network, cloud: Optional[FakeCloud] = None) -> Any:
+def _scheduler(network: FakeNetwork, cloud: Optional[FakeCloud] = None) -> Any:
     """The registered scheduler for ``network``, using ``cloud`` for every Deadline Cloud call."""
     chosen: FakeCloud = cloud or FakeCloud()
 
@@ -167,7 +167,7 @@ def _scheduler(network: Network, cloud: Optional[FakeCloud] = None) -> Any:
     return scheduler
 
 
-def _connect(network: Network, cloud: FakeCloud, tmp_path: Path) -> CookServices:
+def _connect(network: FakeNetwork, cloud: FakeCloud, tmp_path: Path) -> CookServices:
     """The services the composition root builds for one cook."""
     host: HoudiniPdgHost = HoudiniPdgHost(_scheduler(network, cloud))
     settings: SchedulerSettings = SchedulerSettings(working_dir=str(tmp_path / "scene"))
@@ -240,7 +240,7 @@ def test_a_generate_houdini_reports_in_the_cook_options_is_not_a_farm_cook(
     scene: FakeHou, tmp_path: Path, cook_type: Any
 ) -> None:
     """Houdini starts every generate with static False, so a farm cook would need a farm to generate."""
-    network: Network = build_network(COOKING_EXAMPLE)
+    network: FakeNetwork = build_network(COOKING_EXAMPLE)
     network.context.cookOptions = types.SimpleNamespace(cookType=cook_type)
     # No farm is set, so a farm cook would fail on the missing farm ID.
     scheduler: Any = _scheduler(network, FakeCloud(settings={}))
@@ -257,7 +257,7 @@ def test_a_cook_houdini_reports_in_the_cook_options_is_checked_and_connected(
 ) -> None:
     """Only a generate skips the checks, so a cook of a refused graph still fails its start."""
     # The same refused graph, with Houdini's cook options saying it's a cook.
-    network: Network = build_network(COOKING_EXAMPLE)
+    network: FakeNetwork = build_network(COOKING_EXAMPLE)
     network.context.cookOptions = types.SimpleNamespace(cookType=cook_type)
     scheduler: Any = _scheduler(network)
     scheduler.onStartCook(False, None)
@@ -268,7 +268,7 @@ def test_a_cook_houdini_reports_in_the_cook_options_is_checked_and_connected(
 def test_a_context_without_cook_options_is_a_cook(scene: FakeHou) -> None:
     """Only a generate PDG reports may skip the checks, so unreadable options mean a cook."""
     # A refused graph whose context has no cook options must still fail its start.
-    network: Network = build_network(COOKING_EXAMPLE)
+    network: FakeNetwork = build_network(COOKING_EXAMPLE)
     network.context.cookOptions = None
     scheduler: Any = _scheduler(network)
     scheduler.onStartCook(False, None)
@@ -288,9 +288,9 @@ def test_a_cook_started_in_a_session_with_a_ui_never_opens_the_save_prompt(scene
 
 
 def test_the_scheduler_uses_the_client_library_by_default() -> None:
-    """Every cook's farm calls come from this factory, so without it no cook could connect."""
+    """Every cook's farm calls come from these calls, so without it no cook could connect."""
     scheduler: Any = REGISTRATION.DeadlineCloudPDGScheduler(None, "deadlinecloudscheduler1")
-    assert isinstance(scheduler._clients(), REGISTRATION._ClientFactory)
+    assert isinstance(scheduler._clients(), REGISTRATION._DeadlineCloudCalls)
 
 
 class FakeCore:
@@ -377,7 +377,7 @@ def test_a_cook_starts_connected_with_the_cook_set_as_names(
 ) -> None:
     """PDG gives its cook set as node objects, and the cook needs their names to know what to wait for."""
     # Start with one PDG node in the cook set, then tick and stop the open cook.
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     scheduler: Any = _scheduler(network)
     with caplog.at_level(logging.INFO):
         assert scheduler.onStartCook(False, [network.node("sim")]) is True
@@ -402,7 +402,7 @@ class _CachedItem:
 
 
 def _cooked_from_cache(
-    network: Network, tmp_path: Path, cooked: Tuple[str, ...] = ("sim", "render")
+    network: FakeNetwork, tmp_path: Path, cooked: Tuple[str, ...] = ("sim", "render")
 ) -> Any:
     """A started cook of ``render`` in which PDG took every item of sim and render from cache.
 
@@ -431,7 +431,7 @@ def test_a_cook_that_ends_with_every_item_from_cache_shows_why_on_the_node(
     The error names each step in the cook and one of its files, and no job is made.
     """
     # PDG ends the cook on its own, with nothing offered.
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     scheduler: Any = _cooked_from_cache(network, tmp_path)
     assert scheduler.onStopCook(False) is True
     (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
@@ -445,7 +445,7 @@ def test_a_cook_from_cache_names_only_the_steps_its_cook_set_names(
 ) -> None:
     """A step the cook set leaves out holds an earlier cook's cache, so it isn't this cook's to refuse."""
     # The same cook, with PDG's cook set naming only render.
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     scheduler: Any = _cooked_from_cache(network, tmp_path, ("render",))
     assert scheduler.onStopCook(False) is True
     (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
@@ -455,7 +455,7 @@ def test_a_cook_from_cache_names_only_the_steps_its_cook_set_names(
 def test_an_artists_stop_of_a_cook_from_cache_shows_nothing(scene: FakeHou, tmp_path: Path) -> None:
     """The artist stopped it, so the node shows no error for the cached items."""
     # The same cook, stopped by the artist.
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     scheduler: Any = _cooked_from_cache(network, tmp_path)
     assert scheduler.onStopCook(True) is True
     assert not [call for call in scheduler.calls if call[0] == "cookError"]
@@ -474,7 +474,7 @@ def test_a_failure_inside_a_callback_is_shown_on_the_node_and_never_raised(
     scene: FakeHou,
 ) -> None:
     """An exception reaching PDG would abort Houdini's cook without telling the artist why."""
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     scheduler: Any = _scheduler(network)
     scheduler.onStartCook(False, None)
     # A work item with no id cannot become a handle.
@@ -566,9 +566,9 @@ def test_an_opted_out_workstation_sends_no_outcome_event(
     client.event_queue = Queue()
 
     class Clients(FakeCloud):
-        record_event: Any = REGISTRATION._ClientFactory.record_event
+        telemetry_recorder: Any = REGISTRATION._DeadlineCloudCalls.telemetry_recorder
 
-    record: Any = Clients().record_event()
+    record: Any = Clients().telemetry_recorder()
     assert record.__self__ is client and record.__func__ is type(client).record_event
     services: CookServices = _connect(build_network(PYRO_BONFIRE), Clients(), tmp_path)
     services.journal.closed(CookSummary(cook_id="cook-1", final_phase=CookPhase.DONE))
@@ -647,12 +647,14 @@ def library(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, request: Any) -> No
     request.addfinalizer(invalidate_boto3_session_cache)
 
 
-def test_the_factory_reads_a_workstation_setting_and_an_unset_one_as_empty(library: None) -> None:
+def test_the_deadline_cloud_calls_reads_a_workstation_setting_and_an_unset_one_as_empty(
+    library: None,
+) -> None:
     """An unset farm ID must read as empty, or the cook can't tell the artist to set it."""
     from deadline.client import config
 
     config.set_setting("defaults.farm_id", "farm-1")
-    clients: Any = REGISTRATION._ClientFactory()
+    clients: Any = REGISTRATION._DeadlineCloudCalls()
     assert clients.get_setting("defaults.farm_id") == "farm-1"
     assert clients.get_setting("defaults.queue_id") == ""
     # A library that answers None for an unset value reads as empty too.
@@ -660,13 +662,13 @@ def test_the_factory_reads_a_workstation_setting_and_an_unset_one_as_empty(libra
     assert clients.get_setting("defaults.farm_id") == ""
 
 
-def test_the_factory_builds_a_deadline_client_and_a_queue_session_from_the_library(
+def test_the_deadline_cloud_calls_builds_a_deadline_client_and_a_queue_session_from_the_library(
     library: None,
 ) -> None:
     """Without these the cook can't read the queue, and its uploads would use the artist's own role."""
     from botocore.stub import Stubber
 
-    clients: Any = REGISTRATION._ClientFactory()
+    clients: Any = REGISTRATION._DeadlineCloudCalls()
     client: Any = clients.deadline_client()
     assert client.meta.service_model.service_name == "deadline"
     # The session's credentials come from the queue role that this client assumes for this queue.
@@ -715,14 +717,14 @@ def _statuses() -> List[Any]:
 @pytest.mark.parametrize("status", _statuses(), ids=lambda status: status.name)
 def test_only_a_status_that_needs_a_login_asks_the_artist_to_log_in(status: Any) -> None:
     """Asking for a login on any other status sends an artist with a working login the wrong way."""
-    clients: Any = REGISTRATION._ClientFactory()
+    clients: Any = REGISTRATION._DeadlineCloudCalls()
     clients.api = _AuthCheck(status)
     assert clients.needs_login() is (status.name == "NEEDS_LOGIN")
 
 
 def test_a_login_check_that_fails_does_not_ask_for_a_login() -> None:
     """A failed check shows nothing about the login, so the queue error is reported as it is."""
-    clients: Any = REGISTRATION._ClientFactory()
+    clients: Any = REGISTRATION._DeadlineCloudCalls()
     clients.api = _AuthCheck(RuntimeError("no network"))
     assert clients.needs_login() is False
 
@@ -748,7 +750,7 @@ def test_a_cook_of_only_in_process_nodes_is_refused_at_its_start_before_the_farm
     PDG still starts the cook with the wedges as its cook set, so the start refuses it.
     """
     # Start a cook of the wedge alone, then check the error and that no farm call ran.
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     cloud: FakeCloud = FakeCloud()
     scheduler: Any = _scheduler(network, cloud)
     assert scheduler.onStartCook(False, [network.node("wedge1")]) is True
@@ -759,7 +761,7 @@ def test_a_cook_of_only_in_process_nodes_is_refused_at_its_start_before_the_farm
 
 def test_a_cook_that_offered_nothing_and_had_no_step_says_so_at_its_end(scene: FakeHou) -> None:
     """When PDG gives no cook set at the start, the end of a cook that offered nothing still says why."""
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     scheduler: Any = _scheduler(network)
     assert scheduler.onStartCook(False, None) is True
     # PDG cooked the wedge in this session, so only its items are in the graph.
@@ -776,7 +778,7 @@ def test_a_step_over_the_task_quota_while_generating_is_shown_on_the_node(
     scene: FakeHou,
 ) -> None:
     """The cancel that stops generation would otherwise end the cook with no word on why."""
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     scheduler: Any = _scheduler(network)
     assert scheduler.onStartCook(False, None) is True
     # sim generates one task more than a step may have, then PDG stops the cook.
@@ -833,7 +835,7 @@ def test_each_cook_shows_one_popup_and_the_next_cook_shows_its_own(
     scene: FakeHou, ui: _Deferred
 ) -> None:
     """A dialog per offered item would bury the artist, but a later cook's refusal must still show."""
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     scheduler: Any = _scheduler(network)
     assert scheduler.onStartCook(False, [network.node("sim")]) is True
     # An offer PDG can't describe fails, twice, in the same cook.

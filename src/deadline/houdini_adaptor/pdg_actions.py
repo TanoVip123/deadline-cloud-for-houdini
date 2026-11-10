@@ -312,7 +312,7 @@ def download_pdg_work_item(
     listed: List[str] = [str(folder) for folder in run_data.get("output_directories") or ()]
     if listed:
         mapped: List[str] = WorkItemPayload({"folders": listed}).map_paths(rules).data["folders"]
-        client_args["output_directories"] = [list(pair) for pair in zip(mapped, listed)]
+        client_args["mapped_output_directories"] = [list(pair) for pair in zip(mapped, listed)]
     return client_args, outputs_file
 
 
@@ -346,7 +346,7 @@ class _DownloadedItem:
     scene_file: str
     record_outputs: bool
     #: Each extra output folder, as (this worker's path, the workstation's path).
-    output_directories: Tuple[Tuple[str, str], ...] = ()
+    mapped_output_directories: Tuple[Tuple[str, str], ...] = ()
 
 
 class PdgWorkItemRunner:
@@ -483,8 +483,9 @@ def _read_work_item(args: Mapping[str, Any]) -> _DownloadedItem:
         pdg_temp=pdg_temp,
         scene_file=str(args.get("scene_file") or ""),
         record_outputs=bool(args.get("record_outputs")),
-        output_directories=tuple(
-            (str(worker), str(local)) for worker, local in args.get("output_directories") or ()
+        mapped_output_directories=tuple(
+            (str(worker), str(local))
+            for worker, local in args.get("mapped_output_directories") or ()
         ),
     )
 
@@ -508,7 +509,7 @@ def _record_outputs(
             exclude=(item.pdg_temp, hip_link if item.scene_file else ""),
             since=started,
         )
-        folders = list(item.output_directories)
+        folders = list(item.mapped_output_directories)
     record: List[Dict[str, str]] = [
         {"path": _tokenize(o.path, item.pdg_dir), "tag": o.tag} for o in recorded
     ]

@@ -211,6 +211,7 @@ def match_reads(
     snapshot: GraphSnapshot,
     reads: Sequence[SceneRead],
     working_dir: str,
+    *,
     output_directories: Sequence[str] = (),
 ) -> ReadReport:
     """Attribute each read to the step whose outputs cover it.

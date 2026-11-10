@@ -16,7 +16,7 @@ from deadline.houdini_adaptor.HoudiniAdaptor import HoudiniAdaptor
 from .test_adaptor_pdg import PDG_RUN, FakeHoudini, FakeStorage, make_adaptor, pdg_init
 
 
-def test_the_client_gets_each_output_folder_as_this_worker_sees_it(tmp_path: Path) -> None:
+def test_the_client_gets_each_output_directory_as_this_worker_sees_it(tmp_path: Path) -> None:
     """The client scans a folder for what a task wrote, so it needs the worker's spelling and the workstation's."""
     # A session with one output folder and a rule that maps /studio to /mnt.
     init: Dict[str, Any] = pdg_init(str(tmp_path / "pdg"))
@@ -32,14 +32,16 @@ def test_the_client_gets_each_output_folder_as_this_worker_sees_it(tmp_path: Pat
     )
     with FakeHoudini(adaptor) as houdini:
         adaptor.on_run(copy.deepcopy(PDG_RUN))
-    sent: List[Any] = [(action.args or {})["output_directories"] for action in houdini.received]
+    sent: List[Any] = [
+        (action.args or {})["mapped_output_directories"] for action in houdini.received
+    ]
     assert sent == [[["/mnt/renders", "/studio/renders"]]]
 
 
 @pytest.mark.parametrize(
     "folders, valid", [(["/studio/renders"], True), ("/studio/renders", False), ([""], False)]
 )
-def test_the_init_data_schema_takes_only_a_list_of_folders(
+def test_the_init_data_schema_takes_only_a_list_of_directories(
     tmp_path: Path, folders: Any, valid: bool
 ) -> None:
     """A single string would be scanned one letter at a time, so the schema refuses it at the start."""

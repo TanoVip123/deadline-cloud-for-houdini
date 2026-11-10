@@ -73,7 +73,11 @@ _VALIDATE_GRAPH_PARM: str = "validate_graph"
 _DEBUG_LEVELS: Tuple[int, ...] = (0, 1)
 #: Wins over the parm, so a scene saved before the parm existed can still be debugged.
 _DEBUG_LEVEL_ENV: str = "DEADLINE_PDG_DEBUG_LEVEL"
+#: A whole number as text, the only form a debug level may take.
+_WHOLE_NUMBER: str = r"-?\d+"
 _AUTO_SAVE_PARM: str = "auto_save_hip"
+#: The title of every dialog the node shows.
+_TITLE: str = "Deadline Cloud"
 #: The save prompt's buttons, in the order ``hou.ui.displayMessage`` numbers them.
 _SAVE_BUTTONS: Tuple[str, ...] = ("Save", "Always Save", "Cancel")
 
@@ -142,7 +146,7 @@ class HoudiniPdgHost:
         with self._lock:
             if self._scene_files is None:
                 node: Any = self.scheduler_node()
-                self._scene_files = self.on_main_thread(lambda: _scene_files(node))
+                self._scene_files = self.on_main_thread(lambda: _collect_scene_files(node))
             return self._scene_files
 
     def serialize(self, item: WorkItemHandle) -> str:
@@ -335,10 +339,14 @@ class PreCookChecks:
         # is still judged without it.
         verdict: Verdict = on_main_thread(
             lambda: _check_network(
-                node, _graph_context(node), _settings_or_none(node), cook_set, None
+                node,
+                _get_or_create_graph_context(node),
+                _read_settings_or_none(node),
+                cook_set,
+                None,
             )[0]
         )
-        refusals: Tuple[Refusal, ...] = verdict.refusals + on_main_thread(_save_refusals)
+        refusals: Tuple[Refusal, ...] = verdict.refusals + on_main_thread(_check_saved_scene)
         return Verdict(refusals=refusals, advisories=verdict.advisories)
 
 
@@ -434,19 +442,30 @@ def read_scheduler_settings(node: Any) -> SchedulerSettings:
         working_dir=working_dir,
         debug_level=_debug_level(node),
         validate_graph=bool(_parm(node, _VALIDATE_GRAPH_PARM, 1, as_text=False)),
-        output_directories=_output_directories(node, working_dir),
+        output_directories=_read_output_directories(node, working_dir),
     )
 
 
-def _output_directories(node: Any, working_dir: str) -> Tuple[str, ...]:
+def _read_output_directories(node: Any, working_dir: str) -> Tuple[str, ...]:
     """The Job Attachments tab's output folders, absolute, each checked against the working directory.
 
-    Raises ``CookSetupError`` naming the parm of a folder that overlaps the working
-    directory, or that is a drive or home directory.
+    A node from before the tab has none. Raises ``CookSetupError`` naming the parm of a
+    folder with an unset variable, one that overlaps the working directory, or one that
+    is a drive or home directory.
     """
     folders: Dict[str, Set[str]] = {}
-    for parm, value in _listed_values(node, "output_directories", "output_dir"):
-        folders.setdefault(_absolute(value), set()).add(parm)
+    for index in range(1, int(_parm(node, "output_directories", 0, as_text=False)) + 1):
+        # Skip an empty entry, and refuse an unset variable, which no worker could resolve.
+        name: str = f"output_dir{index}"
+        value: str = str(_parm(node, name, "", as_text=True)).strip()
+        if not value:
+            continue
+        parm_path: str = _path_of(node.parm(name)) or name
+        if "$" in value:
+            raise CookSetupError(
+                f"The '{parm_path}' parm names a variable that is not set: '{value}'."
+            )
+        folders.setdefault(_absolute(value), set()).add(parm_path)
     # The working directory is already uploaded, so a folder in it or above it uploads twice.
     working: str = _absolute_key(working_dir)
     overlapping: List[str] = sorted(
@@ -463,25 +482,6 @@ def _output_directories(node: Any, working_dir: str) -> Tuple[str, ...]:
         )
     _refuse_unbounded(folders)
     return tuple(sorted(folders))
-
-
-def _listed_values(node: Any, list_parm: str, entry: str) -> List[Tuple[str, str]]:
-    """Each filled entry of one of the Job Attachments lists, as (parm path, expanded value).
-
-    A node from before the tab has no list, so it gives none. Raises ``CookSetupError``
-    for a value with a variable Houdini doesn't define.
-    """
-    listed: List[Tuple[str, str]] = []
-    for index in range(1, int(_parm(node, list_parm, 0, as_text=False)) + 1):
-        # Skip an empty entry, and refuse an unset variable, which no worker could resolve.
-        name: str = f"{entry}{index}"
-        value: str = str(_parm(node, name, "", as_text=True)).strip()
-        if not value:
-            continue
-        if "$" in value:
-            raise CookSetupError(f"The '{name}' parm names a variable that is not set: '{value}'.")
-        listed.append((_path_of(node.parm(name)) or name, value))
-    return listed
 
 
 #: Each hardware field of the tab: its parm stem, the library's field stem, and the
@@ -521,7 +521,7 @@ def read_host_requirements(node: Any) -> Optional[Dict[str, Any]]:
         ("hr_os", {"operating_systems": systems}),
         ("hr_cpu_arch", {"cpu_archs": archs}),
     ):
-        _built(lambda: OsRequirements(**chosen), parm)
+        _build_requirement(lambda: OsRequirements(**chosen), parm)
     # Each min and max pair, converted to the units the service counts.
     hardware: Dict[str, int] = {}
     for stem, field, factor in _HARDWARE_PARMS:
@@ -529,7 +529,7 @@ def read_host_requirements(node: Any) -> Optional[Dict[str, Any]]:
         for end in ("min", "max"):
             typed: int = int(_parm(node, f"hr_{stem}_{end}", _NOT_SET, as_text=False))
             pair[f"{field}_{end}"] = typed * factor if typed != _NOT_SET else _NOT_SET
-        _built(lambda: HardwareRequirements(**pair), f"hr_{stem}_min and hr_{stem}_max")
+        _build_requirement(lambda: HardwareRequirements(**pair), f"hr_{stem}_min and hr_{stem}_max")
         hardware.update(pair)
     # The custom amounts and attributes, one multiparm entry each, numbered from 1.
     amounts: List[Any] = []
@@ -538,7 +538,7 @@ def read_host_requirements(node: Any) -> Optional[Dict[str, Any]]:
             int(_parm(node, f"hr_amount_{end}{index}", _NOT_SET, as_text=False))
             for end in ("min", "max")
         ]
-        amount: Any = _built(
+        amount: Any = _build_requirement(
             lambda: CustomAmountRequirement(
                 name=str(_parm(node, f"hr_amount_name{index}", "", as_text=True)).strip(),
                 min=bounds[0] if bounds[0] != _NOT_SET else CustomAmountRequirement.DEFAULT_VALUE,
@@ -555,7 +555,7 @@ def read_host_requirements(node: Any) -> Optional[Dict[str, Any]]:
             if value.strip()
         ]
         # The library checks the values only when it serializes the entry.
-        attribute: Any = _built(
+        attribute: Any = _build_requirement(
             lambda: CustomAttributeRequirement(
                 name=str(_parm(node, f"hr_attr_name{index}", "", as_text=True)).strip(),
                 option=str(_parm(node, f"hr_attr_option{index}", "anyOf", as_text=True)),
@@ -563,7 +563,7 @@ def read_host_requirements(node: Any) -> Optional[Dict[str, Any]]:
             ),
             f"hr_attr_name{index}, hr_attr_option{index} and hr_attr_values{index}",
         )
-        _built(attribute.serialize, f"hr_attr_values{index}")
+        _build_requirement(attribute.serialize, f"hr_attr_values{index}")
         attributes.append(attribute)
     # The library writes an empty list for a group with nothing set, and the service
     # refuses an empty block, so both are dropped.
@@ -576,7 +576,7 @@ def read_host_requirements(node: Any) -> Optional[Dict[str, Any]]:
     return block or None
 
 
-def _built(build: Callable[[], T], parms: str) -> T:
+def _build_requirement(build: Callable[[], T], parms: str) -> T:
     """``build()``, with a ``ValueError`` from the library raised as ``CookSetupError`` naming ``parms``."""
     try:
         return build()
@@ -589,29 +589,21 @@ def _built(build: Callable[[], T], parms: str) -> T:
 def _debug_level(node: Any) -> int:
     """The debug level: the environment variable when it is valid, else the parm."""
     override: str = os.environ.get(_DEBUG_LEVEL_ENV, "").strip()
-    if override:
-        level: int = int(override) if re.fullmatch(r"-?\d+", override) else -1
-        if level in _DEBUG_LEVELS:
-            return level
+    level: int = int(override) if re.fullmatch(_WHOLE_NUMBER, override) else -1
+    if override and level not in _DEBUG_LEVELS:
         _logger.warning(
             "Ignoring %s=%r: it must be 0 or 1.",
             _DEBUG_LEVEL_ENV,
             override,
         )
-    # The parm holds a menu index, so anything else is a damaged scene.
-    value: Any = _parm(node, _DEBUG_LEVEL_PARM, 0, as_text=False)
-    parm_level: int = _as_level(value)
-    if parm_level not in _DEBUG_LEVELS:
-        raise CookSetupError(f"The '{_DEBUG_LEVEL_PARM}' parm must be 0 or 1, not {value!r}.")
-    return parm_level
-
-
-def _as_level(value: Any) -> int:
-    """``value`` as a whole number, or -1 when it is not one."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return -1
+    if level not in _DEBUG_LEVELS:
+        # The parm holds a menu index, so anything else is a damaged scene.
+        value: Any = _parm(node, _DEBUG_LEVEL_PARM, 0, as_text=False)
+        text: str = str(value).strip()
+        level = int(text) if re.fullmatch(_WHOLE_NUMBER, text) else -1
+        if level not in _DEBUG_LEVELS:
+            raise CookSetupError(f"The '{_DEBUG_LEVEL_PARM}' parm must be 0 or 1, not {value!r}.")
+    return level
 
 
 def _parm(node: Any, name: str, default: Any, *, as_text: bool) -> Any:
@@ -664,28 +656,25 @@ def _without(found: Iterable[str], drop: Iterable[str], paths: ModuleType = os.p
 def _scheduler_node(scheduler: Any) -> Any:
     """The scheduler's TOP node: PDG's own link first, then the only node of this type by name."""
     node: Any = _call(scheduler, "topNode")
-    if node is not None:
-        return node
-    # PDG gave no link, so match the node by the scheduler's name.
-    name: str = _name(scheduler)
-    instances: List[Any] = _type_instances()
-    named: List[Any] = [n for n in instances if _call(n, "name") == name]
-    # The only node of the type is used even when its name differs.
-    matches: List[Any] = named or (instances if len(instances) == 1 else [])
-    if len(matches) == 1:
-        return matches[0]
-    raise CookSetupError(
-        f"Cannot find the node of scheduler '{name}' in the scene, so its settings cannot be "
-        "read. Recreate the scheduler node."
-    )
-
-
-def _type_instances() -> List[Any]:
-    """Every node of the scheduler's type in the scene, or none when they can't be listed."""
-    try:
-        return list(hou.nodeType(hou.topNodeTypeCategory(), _NODE_TYPE).instances())
-    except Exception:
-        return []
+    if node is None:
+        # PDG gave no link, so match the node by the scheduler's name among this type's nodes.
+        name: str = _name(scheduler)
+        try:
+            instances: List[Any] = list(
+                hou.nodeType(hou.topNodeTypeCategory(), _NODE_TYPE).instances()
+            )
+        except Exception:
+            instances = []
+        named: List[Any] = [n for n in instances if _call(n, "name") == name]
+        # The only node of the type is used even when its name differs.
+        matches: List[Any] = named or (instances if len(instances) == 1 else [])
+        if len(matches) != 1:
+            raise CookSetupError(
+                f"Cannot find the node of scheduler '{name}' in the scene, so its settings "
+                "cannot be read. Recreate the scheduler node."
+            )
+        node = matches[0]
+    return node
 
 
 # A PDG log line's leading "[HH:MM:SS.fff] " stamp.
@@ -817,13 +806,13 @@ def _top_nodes(graph_nodes: Iterable[Any]) -> Dict[str, Any]:
 # -- scene files --------------------------------------------------------------
 
 
-def _scene_files(node: Any) -> SceneFiles:
+def _collect_scene_files(node: Any) -> SceneFiles:
     """The saved ``.hip``, the scene's assets, and the node's listed inputs.
 
     Raises ``CookSetupError`` for an unbounded path, or a listed one that doesn't exist.
     """
     hip_file: str = _saved_hip_file()
-    found: Dict[str, Set[str]] = _scene_assets(node)
+    found: Dict[str, Set[str]] = _scan_scene_assets(node)
     scanned: Set[str] = set(found)
     # The artist's own files and folders join the scan, each owned by its parm.
     for path, parm in read_listed_inputs(node):
@@ -870,7 +859,7 @@ def read_listed_inputs(node: Any) -> List[Tuple[str, str]]:
             existing: List[str] = [path for path in matched if kind(path)]
             if not existing:
                 raise CookSetupError(
-                    f"The '{entry}{index}' parm names '{raw}', which is not on disk as a "
+                    f"The '{owner}' parm names '{raw}', which is not on disk as a "
                     f"{'file' if kind is os.path.isfile else 'folder'}. Fix the path, or "
                     "remove the entry."
                 )
@@ -905,7 +894,7 @@ def _integration_libraries() -> Set[str]:
     return libraries
 
 
-def _scene_assets(node: Any) -> Dict[str, Set[str]]:
+def _scan_scene_assets(node: Any) -> Dict[str, Set[str]]:
     """The ROP's scene scan, as absolute paths that exist, each with the parms that name it.
 
     The scan returns references as authored, with ``$HIP`` and ``$F`` intact. A
@@ -1019,7 +1008,7 @@ def prompt_to_save(node: Any) -> None:
     if not (parm is not None and parm.eval()):
         choice: int = hou.ui.displayMessage(
             "The scene has unsaved changes. The farm cooks the saved scene, so save it first.",
-            title="Deadline Cloud",
+            title=_TITLE,
             buttons=_SAVE_BUTTONS,
             default_choice=0,
             close_choice=_SAVE_BUTTONS.index("Cancel"),
@@ -1034,7 +1023,7 @@ def prompt_to_save(node: Any) -> None:
     hou.hipFile.save()
 
 
-def _save_refusals() -> Tuple[Refusal, ...]:
+def _check_saved_scene() -> Tuple[Refusal, ...]:
     """A refusal when the ``.hip`` was never saved, or, with a UI, has unsaved changes."""
     path: str = str(hou.hipFile.path() or "")
     # hython reports unsaved changes even right after a save, and a session with no
@@ -1093,7 +1082,9 @@ def _check_network(
     # The reads are matched as the cook matches them. Before generation there are
     # no declared outputs, so every read would look external and the matches are dropped.
     reads: Optional[ReadReport] = (
-        match_reads(snapshot, scene.reads, working_dir, folders) if scene.available else None
+        match_reads(snapshot, scene.reads, working_dir, output_directories=folders)
+        if scene.available
+        else None
     )
     generated: bool = dependency_graph is not None
     shape: GraphSnapshot = snapshot
@@ -1125,7 +1116,7 @@ def _check_network(
     return (verdict if settings is None or settings.validate_graph else waived(verdict)), shape
 
 
-def _settings_or_none(node: Any) -> Optional[SchedulerSettings]:
+def _read_settings_or_none(node: Any) -> Optional[SchedulerSettings]:
     """The node's settings, or None when a parm is wrong."""
     try:
         return read_scheduler_settings(node)
@@ -1133,7 +1124,7 @@ def _settings_or_none(node: Any) -> Optional[SchedulerSettings]:
         return None
 
 
-def _graph_context(node: Any) -> Any:
+def _get_or_create_graph_context(node: Any) -> Any:
     """The node's PDG graph context, creating the PDG nodes first when there is none."""
     context: Any = _call(node, "getPDGGraphContext")
     if context is not None:
@@ -1189,7 +1180,6 @@ def _path_of(node: Any) -> str:
 
 # -- the node's Submit button ------------------------------------------------
 
-_TITLE: str = "Deadline Cloud"
 _CONFIRM_BUTTONS: Tuple[str, ...] = ("Submit", "Cancel")
 
 
@@ -1223,7 +1213,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     except CookSetupError as e:
         _show(str(e))
         return False
-    context: Any = _graph_context(node)
+    context: Any = _get_or_create_graph_context(node)
     cook_set: Optional[FrozenSet[str]] = _find_cook_set(context, display)
     # A job shape over a quota is known from the wires, so nothing is generated for
     # it, unless the artist turned validation off.
@@ -1257,7 +1247,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     snapshot: GraphSnapshot
     checked, snapshot = _check_network(node, context, settings, cook_set, dependency_graph)
     verdict: Verdict = Verdict(
-        refusals=checked.refusals + _save_refusals(), advisories=checked.advisories
+        refusals=checked.refusals + _check_saved_scene(), advisories=checked.advisories
     )
     if verdict.refusals:
         _show("The cook can't start.\n\n" + format_refusals(verdict.refusals))
@@ -1281,7 +1271,9 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         if inputs or settings.output_directories
         else "Extra attachments: none"
     )
-    if not _confirmed(node, settings, verdict, read, [counts, _describe(requirements), attached]):
+    if not _ask_to_confirm(
+        node, settings, verdict, read, [counts, _describe_host_requirements(requirements), attached]
+    ):
         return False
     # The display node is what the network's own Cook button cooks.
     display.cookWorkItems(block=False)
@@ -1317,7 +1309,7 @@ def _default_scheduler_problem(node: Any, network: Any) -> str:
     )
 
 
-def _confirmed(
+def _ask_to_confirm(
     node: Any,
     settings: SchedulerSettings,
     verdict: Verdict,
@@ -1346,7 +1338,7 @@ def _confirmed(
     return choice == 0
 
 
-def _describe(requirements: Optional[Dict[str, Any]]) -> str:
+def _describe_host_requirements(requirements: Optional[Dict[str, Any]]) -> str:
     """The host requirements as one confirmation line, such as ``amount.worker.gpu min 1``."""
     if not requirements:
         return "Host requirements: any worker"

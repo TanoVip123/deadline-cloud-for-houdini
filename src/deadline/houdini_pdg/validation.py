@@ -231,21 +231,21 @@ def _skipped() -> Verdict:
 #: ``$NAME`` or ``${NAME}``.
 _VARIABLE: "re.Pattern[str]" = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 
-_OUTSIDE_WORKING_DIR: str = "outside the working directory"
+_OUTSIDE_JOB_FOLDERS: str = "outside the working directory and every output folder"
 _UNEXPANDED_VARIABLE: str = "unexpanded variable"
 
 # How the artist's message describes each reason, so it reads after "are".
 _UNDELIVERABLE_PHRASES: Dict[str, str] = {
-    _OUTSIDE_WORKING_DIR: _OUTSIDE_WORKING_DIR,
+    _OUTSIDE_JOB_FOLDERS: _OUTSIDE_JOB_FOLDERS,
     _UNEXPANDED_VARIABLE: "left with an unexpanded variable",
 }
 
 # The remedy for each reason an output cannot be delivered. An unexpanded
 # variable needs a different fix than a path outside the delivered tree.
 _UNDELIVERABLE_REMEDIES: Dict[str, str] = {
-    _OUTSIDE_WORKING_DIR: (
-        "Point the working directory at the tree these nodes write to, which is usually "
-        "$HIP, or change the nodes to write under it."
+    _OUTSIDE_JOB_FOLDERS: (
+        "Point the working directory, or an output folder on the Job Attachments tab, at the "
+        "tree these nodes write to, which is usually $HIP, or change the nodes to write under one."
     ),
     _UNEXPANDED_VARIABLE: (
         "Give the variable a real path instead of another variable, or use $HIP."
@@ -316,7 +316,7 @@ def _undeliverable_reason(
         return ""
     if _is_inside_job(resolved, working_dir, output_directories):
         return ""
-    return _OUTSIDE_WORKING_DIR
+    return _OUTSIDE_JOB_FOLDERS
 
 
 def _is_inside_job(path: str, working_dir: str, output_directories: Sequence[str]) -> bool:
@@ -1096,13 +1096,13 @@ def _check_cached_outputs(ctx: ValidationContext) -> Verdict:
         )
     # A step refused for its files is named once.
     refused: Set[str] = {refusal.subject for refusal in refusals}
-    from_cache: Tuple[Refusal, ...] = cooked_from_cache(ctx).refusals
+    from_cache: Tuple[Refusal, ...] = check_cooked_from_cache(ctx).refusals
     return Verdict(
         refusals=tuple(refusals) + tuple(r for r in from_cache if r.subject not in refused)
     )
 
 
-def cooked_from_cache(ctx: ValidationContext, *, offered_nothing: bool = False) -> Verdict:
+def check_cooked_from_cache(ctx: ValidationContext, *, offered_nothing: bool = False) -> Verdict:
     """Refuse each step in this cook that has an item PDG cooked from cache, naming one of its files.
 
     ``offered_nothing`` is for a cook that ended before PDG offered any work item,
@@ -1305,10 +1305,10 @@ def _check_scene_directory(ctx: ValidationContext) -> Verdict:
                 subject=scene,
                 detail=(
                     f"The scene is in '{scene}' and the working directory is '{root}'. The "
-                    "working directory is the only tree the job carries, so any node writing "
-                    "a path relative to $HIP writes outside it and its files cannot reach a "
-                    "step below. Set the working directory to $HIP unless every node already "
-                    "declares session-relative outputs."
+                    "working directory and the output folders are the only trees the job "
+                    "carries, so any node writing a path relative to $HIP writes outside them "
+                    "and its files cannot reach a step below. Set the working directory to $HIP "
+                    "unless every node already declares session-relative outputs."
                 ),
             ),
         )

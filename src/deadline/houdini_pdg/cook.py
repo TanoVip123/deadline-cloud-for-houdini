@@ -53,7 +53,7 @@ from .validation import (
     RefusalScenario,
     ValidationContext,
     Verdict,
-    cooked_from_cache,
+    check_cooked_from_cache,
     check_no_farm_work,
     environment_with_hip,
     validate,
@@ -623,7 +623,7 @@ class Cook:
         try:
             # PDG offered nothing, so no check has run. Items it took from cache say why.
             if not cancel and self._state.phase() is CookPhase.CONNECTED:
-                self._judge_cache_at_end()
+                self._refuse_cook_that_offered_nothing()
             # Find what can never be released, and log it.
             resolving: bool = not cancel and self._state.phase() is CookPhase.RESOLVING
             never_offered: List[WorkItemSpec] = []
@@ -686,7 +686,7 @@ class Cook:
         """The refusal of a cook PDG ended before offering anything, for its cache or a quota."""
         return self._refused_at_end
 
-    def _judge_cache_at_end(self) -> None:
+    def _refuse_cook_that_offered_nothing(self) -> None:
         """Refuse a cook PDG ended with no item offered, when a step was cooked from cache or there was no step."""
         try:
             nodes: Tuple[NodeInfo, ...] = tuple(self._host.read_graph())
@@ -697,7 +697,7 @@ class Cook:
                 env=self._environment(),
             )
             # Items from cache say why, and a cook with no step at all says why too.
-            cached: Verdict = cooked_from_cache(ctx, offered_nothing=True)
+            cached: Verdict = check_cooked_from_cache(ctx, offered_nothing=True)
             found: Verdict = cached if cached.refusals else check_no_farm_work(ctx)
         except Exception:
             _logger.warning("Could not read which work items PDG cooked from cache.", exc_info=True)
@@ -902,7 +902,10 @@ class Cook:
             _logger.warning("The scene walk did not finish, so no data edges are added.")
             return provisional, None
         report: ReadReport = match_reads(
-            provisional, scene.reads, self._settings.working_dir, self._settings.output_directories
+            provisional,
+            scene.reads,
+            self._settings.working_dir,
+            output_directories=self._settings.output_directories,
         )
         return synthesize(nodes, data_edges=report.data_edges), report
 

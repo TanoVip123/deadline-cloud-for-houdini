@@ -28,7 +28,7 @@ from .houdini_fakes import (
     FakeNode,
     FakePdgNode,
     FakePyScheduler,
-    Network,
+    FakeNetwork,
     build_network,
     install_hou,
     main_thread_runner,
@@ -74,7 +74,7 @@ def handle(item_id: int = 7, native: Any = None) -> WorkItemHandle:
     )
 
 
-class NativeItem:
+class FakeNativeItem:
     """A ``pdg.WorkItem`` that counts ``clearOutputFiles`` calls, or raises from it."""
 
     def __init__(self, raises: bool = False) -> None:
@@ -100,7 +100,7 @@ def test_a_started_item_has_its_earlier_outputs_cleared_before_it_starts(scene: 
     it, so a consumer would see each file twice.
     """
     order: List[str] = []
-    native: NativeItem = NativeItem()
+    native: FakeNativeItem = FakeNativeItem()
     scheduler: FakePyScheduler = build_network(PYRO_BONFIRE).scheduler()
     # Record the clear and the start in one list, so their order is checked.
     native.clearOutputFiles = lambda: order.append("clear")  # type: ignore[method-assign]
@@ -111,7 +111,7 @@ def test_a_started_item_has_its_earlier_outputs_cleared_before_it_starts(scene: 
     assert order == ["clear", "start(7, -1, True)"]
 
 
-@pytest.mark.parametrize("native", [None, NativeItem(raises=True)])
+@pytest.mark.parametrize("native", [None, FakeNativeItem(raises=True)])
 def test_an_item_that_cannot_be_cleared_still_starts_cooking(scene: FakeHou, native: Any) -> None:
     """A record left behind repeats an old duplicate, while raising would lose the task."""
     scheduler: FakePyScheduler = build_network(PYRO_BONFIRE).scheduler()
@@ -126,7 +126,7 @@ def test_only_a_started_item_is_cleared(scene: FakeHou) -> None:
         ItemOutcome(ItemState.SUCCEEDED, (OutputFile("/proj/b.exr", ""),)),
         ItemOutcome(ItemState.FAILED),
     ):
-        native: NativeItem = NativeItem()
+        native: FakeNativeItem = FakeNativeItem()
         host.notify(handle(native=native), outcome)
         assert native.cleared == 0
 
@@ -162,14 +162,14 @@ sys.modules["pdg"] = types.ModuleType("pdg")
 from deadline.houdini_pdg.houdini.host import HoudiniPdgHost
 from deadline.houdini_pdg.ports import ItemOutcome, ItemState, OutputFile, WorkItemHandle
 
-class Scheduler:
+class FakeScheduler:
     calls = []
     def onWorkItemAddOutput(self, *args):
         self.calls.append(list(args))
     def onWorkItemSucceeded(self, *args):
         pass
 
-scheduler = Scheduler()
+scheduler = FakeScheduler()
 outputs = tuple(OutputFile(path, tag) for path, tag in json.loads(sys.argv[1]))
 HoudiniPdgHost(scheduler).notify(
     WorkItemHandle(item_id=1, index=0, name="a", node_name="n"),
@@ -204,7 +204,7 @@ def test_the_output_checksum_is_the_same_in_every_process() -> None:
 
 def _host_with_item_log(log: Any) -> HoudiniPdgHost:
     """A host whose PDG graph holds work item 7, with ``log`` as its log."""
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.context.items[7] = types.SimpleNamespace(logMessages=log)
     return HoudiniPdgHost(network.scheduler())
 
@@ -245,7 +245,7 @@ def test_a_failure_reason_is_empty_when_pdg_has_no_log_or_no_item(scene: FakeHou
 def test_serialize_returns_the_json_pdg_writes_for_a_job(scene: FakeHou) -> None:
     """The payload is PDG's own JSON, with the global attributes a worker needs."""
     host: HoudiniPdgHost = HoudiniPdgHost(build_network(PYRO_BONFIRE).scheduler())
-    assert json.loads(host.serialize(handle(native=NativeItem()))) == {
+    assert json.loads(host.serialize(handle(native=FakeNativeItem()))) == {
         "name": "render_3",
         "global": True,
     }
@@ -268,9 +268,9 @@ def test_the_working_directory_is_both_local_and_remote(scene: FakeHou) -> None:
 # -- generation ---------------------------------------------------------------
 
 
-def _watching(cook_set: Any = None) -> Tuple[HoudiniPdgHost, Network]:
+def _start_watching_host(cook_set: Any = None) -> Tuple[HoudiniPdgHost, FakeNetwork]:
     """A host watching the generation of a Pyro Bonfire network."""
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     host: HoudiniPdgHost = HoudiniPdgHost(network.scheduler())
     host.watch_generation(cook_set)
     return host, network
@@ -278,7 +278,7 @@ def _watching(cook_set: Any = None) -> Tuple[HoudiniPdgHost, Network]:
 
 def test_generation_is_pending_until_each_step_announces_it(scene: FakeHou) -> None:
     """The cook waits for every step, so a snapshot taken early does not miss the wedges' items."""
-    host, network = _watching()
+    host, network = _start_watching_host()
     assert host.pending_generation() == ("montage", "render", "sim")
     # The wedge is not a step, so its announcement changes nothing.
     network.context.emit("NodeGenerated", "sim")
@@ -289,9 +289,9 @@ def test_generation_is_pending_until_each_step_announces_it(scene: FakeHou) -> N
     assert host.pending_generation() == ()
 
 
-def _counting() -> Tuple[HoudiniPdgHost, Network, List[Verdict]]:
+def _start_counting_host() -> Tuple[HoudiniPdgHost, FakeNetwork, List[Verdict]]:
     """A host watching generation, recording each quota report and agreeing to stop."""
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     host: HoudiniPdgHost = HoudiniPdgHost(network.scheduler())
     reports: List[Verdict] = []
 
@@ -305,7 +305,7 @@ def _counting() -> Tuple[HoudiniPdgHost, Network, List[Verdict]]:
 
 def test_a_step_over_the_task_quota_stops_generation_and_names_its_count(scene: FakeHou) -> None:
     """Without the stop, PDG generated every item of a huge wedge before anything was refused."""
-    host, network, reports = _counting()
+    host, network, reports = _start_counting_host()
     # sim generates one task more than a step may have.
     network.node("sim").workItems = [None] * 10_001
     network.context.emit("NodeGenerated", "sim")
@@ -322,7 +322,7 @@ def test_a_step_over_the_task_quota_stops_generation_and_names_its_count(scene: 
 def test_the_job_total_across_steps_stops_generation(scene: FakeHou) -> None:
     """Two steps can each fit the per-step limit and still pass the per-job limit together."""
     # Each step alone fits, and the second one takes the total over the job's limit.
-    host, network, reports = _counting()
+    host, network, reports = _start_counting_host()
     network.node("sim").workItems = [None] * 6_000
     network.node("render").workItems = [None] * 6_000
     network.context.emit("NodeGenerated", "sim")
@@ -335,7 +335,7 @@ def test_the_job_total_across_steps_stops_generation(scene: FakeHou) -> None:
 def test_items_of_a_node_that_is_not_a_step_are_not_counted(scene: FakeHou) -> None:
     """A wedge's items cook here and are never tasks, so they can't pass a task quota."""
     # A wedge with twice the job's limit, which isn't a step.
-    host, network, reports = _counting()
+    host, network, reports = _start_counting_host()
     network.node("wedge1").workItems = [None] * 20_000
     network.context.emit("NodeGenerated", "wedge1")
     assert reports == [] and not network.context.canceled.is_set()
@@ -344,7 +344,7 @@ def test_items_of_a_node_that_is_not_a_step_are_not_counted(scene: FakeHou) -> N
 def test_a_stop_the_cook_declines_leaves_generation_running(scene: FakeHou) -> None:
     """With validation off the cook keeps the report as a warning, so nothing is canceled."""
     # The cook declines the stop, and a step goes over its limit.
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     host: HoudiniPdgHost = HoudiniPdgHost(network.scheduler())
     host.watch_generation(None, lambda verdict: False)
     network.node("sim").workItems = [None] * 10_001
@@ -354,14 +354,14 @@ def test_a_stop_the_cook_declines_leaves_generation_running(scene: FakeHou) -> N
 
 def test_stopping_the_watch_removes_the_quota_count_too(scene: FakeHou) -> None:
     """A handler left behind would count the next cook's items against this one."""
-    host, network, reports = _counting()
+    host, network, reports = _start_counting_host()
     host.stop_watching_generation()
     assert network.context.handlers == []
 
 
 def test_only_the_steps_pdg_asked_for_are_awaited(scene: FakeHou) -> None:
     """A step outside the cook set never generates, so waiting for it would stall the cook."""
-    host, network = _watching(frozenset({"wedge1", "sim"}))
+    host, network = _start_watching_host(frozenset({"wedge1", "sim"}))
     assert host.pending_generation() == ("sim",)
     network.context.emit("NodeGenerated", "sim")
     assert host.pending_generation() == ()
@@ -369,7 +369,7 @@ def test_only_the_steps_pdg_asked_for_are_awaited(scene: FakeHou) -> None:
 
 def test_a_step_with_a_queued_item_has_generated_without_announcing_it(scene: FakeHou) -> None:
     """A step generated before this cook may not announce itself again, but a queued item shows it is done."""
-    host, network = _watching()
+    host, network = _start_watching_host()
     queued: Any = types.SimpleNamespace(state=types.SimpleNamespace(name="Waiting"))
     stale: Any = types.SimpleNamespace(state=types.SimpleNamespace(name="Uncooked"))
     network.node("sim").workItems = [stale, queued]
@@ -392,7 +392,7 @@ def test_a_step_pdg_reports_dynamic_is_not_awaited(
 
     So the cook would stall until the timeout. PDG flags the steps below one as dynamic too.
     """
-    host, network = _watching()
+    host, network = _start_watching_host()
     for name in dynamic:
         network.node(name).isDynamic = True
     assert host.pending_generation() == pending
@@ -400,7 +400,7 @@ def test_a_step_pdg_reports_dynamic_is_not_awaited(
 
 def test_stopping_removes_the_handler_and_is_safe_twice(scene: FakeHou) -> None:
     """A stop after a failed start, or a second stop, must not raise or leave a handler."""
-    host, network = _watching()
+    host, network = _start_watching_host()
     assert len(network.context.handlers) == 1
     host.stop_watching_generation()
     host.stop_watching_generation()
@@ -413,7 +413,7 @@ def test_stopping_removes_the_handler_and_is_safe_twice(scene: FakeHou) -> None:
 def test_read_graph_reads_the_dependency_graph_once_and_keeps_the_cook_set(scene: FakeHou) -> None:
     """One read gives a consistent snapshot, and a node outside the cook set is marked so."""
     # The cook set names two of the five nodes.
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.context.cookSet = [network.node("sim"), network.node("render")]
     scheduler: FakePyScheduler = network.scheduler()
     infos: Sequence[NodeInfo] = HoudiniPdgHost(scheduler).read_graph()
@@ -431,7 +431,7 @@ def test_read_graph_uses_the_cook_set_from_the_start_when_pdg_no_longer_gives_on
 
     Without it, a cook whose every item came from cache would place no step in the cook.
     """
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     host: HoudiniPdgHost = HoudiniPdgHost(network.scheduler())
     host.watch_generation(frozenset({"render"}))
     network.context.cookSet = None
@@ -460,7 +460,7 @@ def test_read_graph_leaves_out_the_items_this_cook_will_not_schedule(scene: Fake
     def item(index: int, state: str) -> Any:
         return Item(index, state)
 
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     scheduler: FakePyScheduler = network.scheduler()
     scheduler.dependency_graph = ({item(0, "Waiting"): [], item(1, "Uncooked"): []}, {}, [])
     infos: Sequence[NodeInfo] = HoudiniPdgHost(scheduler).read_graph()
@@ -476,7 +476,7 @@ def test_a_pdg_node_whose_job_script_cannot_be_read_is_not_a_step(scene: FakeHou
         def scriptInfo(self) -> Any:
             raise RuntimeError("deleted")
 
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.pdg_nodes.append(Deleted(name="gone", command="hython x.py"))
     host: HoudiniPdgHost = HoudiniPdgHost(network.scheduler())
     host.watch_generation(None)
@@ -485,7 +485,7 @@ def test_a_pdg_node_whose_job_script_cannot_be_read_is_not_a_step(scene: FakeHou
 
 def test_an_override_naming_this_scheduler_is_cleared_and_another_is_kept(scene: FakeHou) -> None:
     """An override that names this scheduler changes nothing, so only another scheduler is refused."""
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.node("sim").hom.set_parm("topscheduler", "../deadlinecloudscheduler1")
     network.node("render").hom.set_parm("topscheduler", "localscheduler")
     network.node("render").scheduler_name = "localscheduler"
@@ -510,7 +510,7 @@ def test_a_reads_static_prefix_has_its_variables_expanded(
 
     An unknown variable expands to nothing in Houdini, which would shorten the path, so it gives no prefix.
     """
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     hom: Any = network.node("render").hom
     hom.set_parm("file", "$HIP/geo/`@pdg_index`.bgeo", kind="FileReference")
     hom.set_parm("other", "${NO_SUCH_VARIABLE_X}/geo/`@pdg_index`.bgeo", kind="FileReference")
@@ -525,7 +525,7 @@ def test_read_scene_walks_every_top_node_including_those_that_are_not_steps(
     scene: FakeHou,
 ) -> None:
     """A node that is not a step can read a step's file, so its file parms are read too."""
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.node("wedge1").hom.set_parm("file", "$HIP/wedge.json", kind="FileReference")
     network.node("sim").hom.set_parm("file", "$HIP/sim.bgeo", kind="FileReference")
     reads: SceneReads = HoudiniPdgHost(network.scheduler()).read_scene()
@@ -557,7 +557,7 @@ def test_scene_files_are_the_saved_hip_and_the_expanded_assets_that_exist(
         _touch(folder, name)
     os.makedirs(os.path.join(folder, "caches"))
     _touch(folder, "lib.hda")
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     sop: FakeNode = network.topnet.add(FakeNode("/obj/geo1/file1", category="Sop"))
     _reference(sop, "tex", "$HIP/tex.exr", scene)
     _reference(sop, "seq", "$HIP/frame.$F4.exr", scene)
@@ -596,7 +596,7 @@ def test_work_item_expressions_and_relative_paths_are_not_globbed(
     (cwd / "Library").mkdir(parents=True)
     (cwd / "frame.0001.exr").write_text("")
     monkeypatch.chdir(cwd)
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     sop: FakeNode = network.topnet.add(FakeNode("/obj/geo1/file1", category="Sop"))
     # The scan keeps a reference only when it evaluates to a file, so each one does.
     for index, value in enumerate(
@@ -635,7 +635,7 @@ def test_an_item_file_token_with_a_fake_home_is_not_attached(
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     sop: FakeNode = network.topnet.add(FakeNode("/obj/geo1/file1", category="Sop"))
     parm: Any = sop.set_parm("dir", "`@pdg_input`", kind="FileReference")
     parm.evalAsString = lambda: str(home)
@@ -696,14 +696,14 @@ def _home_scene(
     open(hip, "w").close()
     monkeypatch.setenv("HIP", home)
     scene: FakeHou = install_hou(monkeypatch, hip)
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     sop: FakeNode = network.topnet.add(FakeNode("/obj/geo1/file1", category="Sop"))
     _reference(sop, "cachedir", parm_value, scene)
     return HoudiniPdgHost(network.scheduler()), home
 
 
 @pytest.mark.parametrize("parm_value", ["$HIP", "$HOME"])
-def test_a_folder_parm_that_expands_to_home_is_refused_naming_it_and_the_parm(
+def test_a_directory_parm_that_expands_to_home_is_refused_naming_it_and_the_parm(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, parm_value: str
 ) -> None:
     """Attaching the home directory would hash all of it before submitting, so the cook would hang.
@@ -717,7 +717,7 @@ def test_a_folder_parm_that_expands_to_home_is_refused_naming_it_and_the_parm(
     assert "/obj/geo1/file1/cachedir" in str(raised.value)
 
 
-def test_a_folder_parm_that_holds_home_or_is_the_root_is_refused(
+def test_a_directory_parm_that_holds_home_or_is_the_root_is_refused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A folder above home, or a filesystem root, holds the home directory too."""
@@ -729,7 +729,9 @@ def test_a_folder_parm_that_holds_home_or_is_the_root_is_refused(
             host.scene_files()
 
 
-def test_a_folder_below_home_is_attached(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_a_directory_below_home_is_attached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Only home and above are refused. A project folder inside home is what most scenes use."""
     host, home = _home_scene(monkeypatch, tmp_path, "$HIP/caches")
     os.makedirs(os.path.join(home, "caches"))
@@ -853,7 +855,7 @@ def test_the_debug_level_environment_variable_wins_when_valid(
 
 def test_the_host_reads_the_settings_from_its_scheduler_node(scene: FakeHou) -> None:
     """The cook reads its settings through the host, from the node PDG links to the scheduler."""
-    network: Network = build_network(
+    network: FakeNetwork = build_network(
         PYRO_BONFIRE, scheduler_parms={"working_dir": "/proj/out", "validate_graph": 0}
     )
     settings: SchedulerSettings = HoudiniPdgHost(network.scheduler()).read_settings()
@@ -886,7 +888,7 @@ def test_the_houdini_version_and_queue_values_come_from_the_scheduler_node(
 ) -> None:
     """The Conda packages are pinned to the running Houdini, and the queue values are the node's own."""
     # A queue parameter is a spare parm with the shared prefix, as the ROP makes it.
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     spare: Any = network.scheduler_node.set_parm(
         "queue_env_do_not_use_CondaChannels", "deadline-cloud"
     )
@@ -941,7 +943,7 @@ def test_without_a_ui_scene_reads_run_on_the_calling_thread(
 # -- pre-cook checks ----------------------------------------------------------
 
 
-def _verdict(network: Network, interactive: bool = False) -> Verdict:
+def _verdict(network: FakeNetwork, interactive: bool = False) -> Verdict:
     """The pre-cook verdict for the network's scheduler node."""
     return PreCookChecks().run(network.scheduler_node, interactive=interactive)
 
@@ -961,7 +963,7 @@ def test_a_cooking_example_network_is_refused_before_generation(scene: FakeHou) 
 def test_with_validation_off_the_pre_cook_refusal_becomes_a_warning(scene: FakeHou) -> None:
     """The Cook button accepts the same graph the cook submits when the artist turns validation off."""
     # The refusal is kept as an advisory that says validation is off.
-    network: Network = build_network(
+    network: FakeNetwork = build_network(
         COOKING_EXAMPLE, scheduler_parms={"working_dir": "$HIP", "validate_graph": 0}
     )
     verdict: Verdict = _verdict(network)
@@ -975,7 +977,7 @@ def test_with_validation_off_the_pre_cook_refusal_becomes_a_warning(scene: FakeH
 
 def test_with_validation_off_an_unsaved_scene_is_still_refused(scene: FakeHou) -> None:
     """Validation off waives the graph checks only. Workers can't load a scene that was never saved."""
-    network: Network = build_network(
+    network: FakeNetwork = build_network(
         COOKING_EXAMPLE, scheduler_parms={"working_dir": "$HIP", "validate_graph": 0}
     )
     scene.hip_file.new = True
@@ -1001,7 +1003,7 @@ def test_before_generation_a_read_of_a_file_a_step_will_write_is_not_refused(
     scene: FakeHou,
 ) -> None:
     """No step has declared its outputs yet, so every read would look like a missing file."""
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.node("render").hom.set_parm("file", "/elsewhere/sim/out.bgeo.sc", kind="FileReference")
     assert RefusalScenario.LOCAL_FILE_UNREACHABLE not in {
         r.scenario for r in _verdict(network).refusals
@@ -1025,7 +1027,7 @@ def test_a_dynamic_node_and_a_foreign_scheduler_are_refused_before_generation(
     scene: FakeHou,
 ) -> None:
     """Both are known from the topology, so the artist hears before anything is uploaded."""
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.node("render").isDynamic = True
     network.node("montage").hom.set_parm("topscheduler", "localscheduler")
     network.node("montage").scheduler_name = "localscheduler"
@@ -1040,7 +1042,7 @@ def test_a_new_override_to_another_scheduler_is_refused_while_pdg_still_names_th
 ) -> None:
     """PDG keeps a node's old scheduler until the next cook, so Submit would start a cook that fails."""
     # The parm names a real Local Scheduler, while PDG still reports this scheduler.
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.topnet.add(FakeNode("/obj/topnet1/localscheduler"))
     network.node("render").hom.set_parm("topscheduler", "../localscheduler")
     assert network.node("render").scheduler_name == "deadlinecloudscheduler1"
@@ -1054,7 +1056,7 @@ def test_an_override_naming_a_sibling_scheduler_by_its_bare_name_is_not_refused(
 ) -> None:
     """PDG resolves an override from the step, so a bare sibling name falls back to this scheduler."""
     # The parm names a sibling Local Scheduler by name, and PDG reports this scheduler.
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.topnet.add(FakeNode("/obj/topnet1/localscheduler"))
     network.node("render").hom.set_parm("topscheduler", "localscheduler")
     assert network.node("render").scheduler_name == "deadlinecloudscheduler1"
@@ -1066,7 +1068,7 @@ def test_an_override_that_now_names_this_scheduler_is_cleared_while_pdg_names_th
 ) -> None:
     """The authored parm is what the next cook uses, so it decides over PDG's stale answer."""
     # The parm now names this scheduler, while PDG still reports the Local Scheduler.
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.node("render").hom.set_parm("topscheduler", "../deadlinecloudscheduler1")
     network.node("render").scheduler_name = "localscheduler"
     assert _verdict(network).accepted()
@@ -1075,7 +1077,7 @@ def test_an_override_that_now_names_this_scheduler_is_cleared_while_pdg_names_th
 def test_an_override_that_names_no_node_falls_back_to_pdgs_answer(scene: FakeHou) -> None:
     """A parm whose value can't be resolved, such as a deleted node, is judged by what PDG reports."""
     # The parm names no node, so PDG's answer decides, first this scheduler, then another.
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.node("render").hom.set_parm("topscheduler", "../renamed_scheduler")
     assert _verdict(network).accepted()
     network.node("render").scheduler_name = "localscheduler"
@@ -1086,7 +1088,7 @@ def test_an_override_naming_this_scheduler_is_not_refused_before_generation(
     scene: FakeHou,
 ) -> None:
     """A node that names this scheduler as its override uses this scheduler, so it is accepted."""
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.node("montage").hom.set_parm("topscheduler", SCHEDULER_PATH)
     assert _verdict(network).accepted()
 
@@ -1096,7 +1098,7 @@ def test_an_override_naming_this_scheduler_by_name_is_not_refused(
     scene: FakeHou, override: str
 ) -> None:
     """An override may name the scheduler node by its name or its PDG name, as well as its path."""
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.scheduler_node.pdg_name = "dc_pdg_name"
     network.node("montage").hom.set_parm("topscheduler", override)
     # PDG's own answer names no scheduler, so only the override's text decides.
@@ -1106,7 +1108,7 @@ def test_an_override_naming_this_scheduler_by_name_is_not_refused(
 
 def test_python_code_that_opens_a_file_is_advised_before_generation(scene: FakeHou) -> None:
     """Code is too open to judge, so a node between steps whose code opens a file gets a warning."""
-    network: Network = build_network(ROUTED_EXAMPLE)
+    network: FakeNetwork = build_network(ROUTED_EXAMPLE)
     network.node("merge").hom.set_parm(
         "pythoncode", "open(work_item.inputFiles[0].path)", tags={"editorlang": "python"}
     )
@@ -1119,7 +1121,7 @@ def test_python_code_that_opens_a_file_is_advised_before_generation(scene: FakeH
 
 def test_a_step_set_to_in_process_is_refused_before_generation(scene: FakeHou) -> None:
     """PDG never offers such a step's items, so its tasks would never run, and it is named first."""
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.node("render").cookType = 1
     assert _refused(_verdict(network)) == [(RefusalScenario.IN_PROCESS_STEP, "render")]
 
@@ -1128,7 +1130,7 @@ def test_a_non_step_writing_a_file_a_step_reads_is_refused_before_generation(
     scene: FakeHou,
 ) -> None:
     """A node between steps that writes a file on this machine never delivers it to the step that reads it."""
-    network: Network = build_network(
+    network: FakeNetwork = build_network(
         [
             ("sim", "hython sim.py", "Processor", []),
             ("textoutput1", "", "Processor", ["sim"]),
@@ -1180,7 +1182,7 @@ def test_a_never_saved_scene_is_refused_with_no_ui(scene: FakeHou) -> None:
 _BUTTONS: Tuple[str, ...] = ("Save", "Always Save", "Cancel")
 
 
-def _auto_save_network(auto_save: int) -> Network:
+def _auto_save_network(auto_save: int) -> FakeNetwork:
     """A Pyro Bonfire network whose scheduler node has the auto-save toggle set to ``auto_save``."""
     return build_network(
         PYRO_BONFIRE,
@@ -1191,7 +1193,7 @@ def _auto_save_network(auto_save: int) -> Network:
 def test_save_at_the_prompt_saves_and_leaves_nothing_to_refuse(scene: FakeHou) -> None:
     """The prompt comes before the checks, so a save there clears the unsaved-scene refusal."""
     scene.hip_file.unsaved = True
-    network: Network = _auto_save_network(0)
+    network: FakeNetwork = _auto_save_network(0)
     assert _verdict(network, interactive=True).accepted()
     assert scene.hip_file.saves == 1
     assert [buttons for _, buttons in scene.messages.calls] == [_BUTTONS]
@@ -1204,7 +1206,7 @@ def test_always_save_saves_and_turns_auto_save_on_so_the_next_submit_does_not_as
     """The artist answers once. The toggle is the one parm written, because its value changed."""
     scene.hip_file.unsaved = True
     scene.messages.choice = 1
-    network: Network = _auto_save_network(0)
+    network: FakeNetwork = _auto_save_network(0)
     assert _verdict(network, interactive=True).accepted()
     assert scene.hip_file.saves == 1
     assert network.scheduler_node.parm("auto_save_hip").sets == [1]  # type: ignore[union-attr]
@@ -1219,7 +1221,7 @@ def test_cancel_at_the_save_prompt_raises_user_initiated_cancel(scene: FakeHou) 
     for choice in (2, None):
         scene.messages.choice = choice
         scene.hip_file.unsaved = True
-        network: Network = _auto_save_network(0)
+        network: FakeNetwork = _auto_save_network(0)
         with pytest.raises(UserInitiatedCancel):
             _verdict(network, interactive=True)
         assert scene.hip_file.saves == 0
@@ -1258,7 +1260,7 @@ def test_without_a_ui_the_interactive_check_does_not_prompt(scene: FakeHou) -> N
 
 def test_a_network_without_a_pdg_graph_creates_its_nodes_first(scene: FakeHou) -> None:
     """A network never cooked has no PDG graph, so its nodes are created, without cooking, and judged."""
-    network: Network = build_network(COOKING_EXAMPLE)
+    network: FakeNetwork = build_network(COOKING_EXAMPLE)
     network.scheduler_node.context = None
     verdict: Verdict = _verdict(network)
     assert network.scheduler_node.cook_calls == [{"block": True, "tops_only": True}]
@@ -1269,7 +1271,7 @@ def test_a_network_whose_pdg_graph_cannot_be_made_is_checked_when_it_cooks(
     scene: FakeHou, caplog: Any
 ) -> None:
     """Without a graph nothing can be judged yet, so the cook runs the checks when it starts."""
-    network: Network = build_network(COOKING_EXAMPLE)
+    network: FakeNetwork = build_network(COOKING_EXAMPLE)
     network.scheduler_node.context = None
     network.scheduler_node.cook_creates = None
     with caplog.at_level(logging.WARNING):
@@ -1279,7 +1281,7 @@ def test_a_network_whose_pdg_graph_cannot_be_made_is_checked_when_it_cooks(
 
 def test_a_working_directory_setting_problem_does_not_hide_the_topology(scene: FakeHou) -> None:
     """The cook reports the setting when it starts, so the checks still judge the graph."""
-    network: Network = build_network(COOKING_EXAMPLE, scheduler_parms={"working_dir": ""})
+    network: FakeNetwork = build_network(COOKING_EXAMPLE, scheduler_parms={"working_dir": ""})
     assert [r.scenario for r in _verdict(network).refusals] == [RefusalScenario.IN_PROCESS_NODE]
 
 
@@ -1408,14 +1410,14 @@ def test_a_value_the_library_refuses_names_the_parm(
 # -- the node's Job Attachments tab -------------------------------------------
 
 
-def _listed(node: FakeNode, list_parm: str, entry: str, values: Sequence[str]) -> None:
+def _set_list_parm(node: FakeNode, list_parm: str, entry: str, values: Sequence[str]) -> None:
     """Fill one of the tab's lists, as Houdini numbers a multiparm's entries from 1."""
     node.set_parm(list_parm, len(values))
     for index, value in enumerate(values, start=1):
         node.set_parm(f"{entry}{index}", value, kind="FileReference")
 
 
-def test_listed_files_and_folders_join_the_scenes_own(scene: FakeHou, tmp_path: Path) -> None:
+def test_listed_files_and_directories_join_the_scenes_own(scene: FakeHou, tmp_path: Path) -> None:
     """They join the scan and never replace it, so the scene's own textures still travel."""
     # A scene texture, a listed file outside the scene, a listed frame sequence and a listed folder.
     folder: str = str(tmp_path / "scene")
@@ -1423,13 +1425,15 @@ def test_listed_files_and_folders_join_the_scenes_own(scene: FakeHou, tmp_path: 
     extra: str = _touch(str(tmp_path), "extra", "lut.cube")
     frames: List[str] = [_touch(folder, f"plate.000{i}.exr") for i in (1, 2)]
     os.makedirs(str(tmp_path / "library"))
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     sop: FakeNode = network.topnet.add(FakeNode("/obj/geo1/file1", category="Sop"))
     _reference(sop, "tex", "$HIP/tex.exr", scene)
-    _listed(
+    _set_list_parm(
         network.scheduler_node, "input_filenames", "input_filenames", [extra, "$HIP/plate.$F4.exr"]
     )
-    _listed(network.scheduler_node, "input_directories", "input_dir", [str(tmp_path / "library")])
+    _set_list_parm(
+        network.scheduler_node, "input_directories", "input_dir", [str(tmp_path / "library")]
+    )
     files: SceneFiles = HoudiniPdgHost(network.scheduler()).scene_files()
     assert files.assets == tuple(sorted([tex, extra, *frames]))
     assert files.directories == (str(tmp_path / "library"),)
@@ -1443,15 +1447,16 @@ def test_a_listed_path_that_does_not_exist_names_its_parm(
 ) -> None:
     """The artist typed the path, so a quiet skip would hide a typo until the worker failed."""
     # List a path that isn't on disk, then read the scene files.
-    network: Network = build_network(PYRO_BONFIRE)
-    _listed(network.scheduler_node, list_parm, entry, [str(tmp_path / "nowhere")])
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
+    _set_list_parm(network.scheduler_node, list_parm, entry, [str(tmp_path / "nowhere")])
     with pytest.raises(CookSetupError) as raised:
         HoudiniPdgHost(network.scheduler()).scene_files()
     kind: str = "file" if entry == "input_filenames" else "folder"
-    assert f"'{entry}1'" in str(raised.value) and f"not on disk as a {kind}" in str(raised.value)
+    parm_path: str = f"{network.scheduler_node.path()}/{entry}1"
+    assert f"'{parm_path}'" in str(raised.value) and f"not on disk as a {kind}" in str(raised.value)
 
 
-def test_a_listed_home_folder_is_refused_naming_its_parm(
+def test_a_listed_home_directory_is_refused_naming_its_parm(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Listing home by hand would hash all of it, the same as a scene parm that expands to it."""
@@ -1459,17 +1464,19 @@ def test_a_listed_home_folder_is_refused_naming_its_parm(
     host, home = _home_scene(monkeypatch, tmp_path, "$HIP/caches")
     os.makedirs(os.path.join(home, "caches"))
     node: Any = host.scheduler_node()
-    _listed(node, "input_directories", "input_dir", ["$HOME"])
+    _set_list_parm(node, "input_directories", "input_dir", ["$HOME"])
     with pytest.raises(CookSetupError, match=f"{re.escape(node.path())}/input_dir1"):
         host.scene_files()
 
 
-def test_an_output_folder_is_never_attached_as_an_input(scene: FakeHou, tmp_path: Path) -> None:
+def test_an_output_directory_is_never_attached_as_an_input(scene: FakeHou, tmp_path: Path) -> None:
     """Attaching it would upload an earlier cook's renders before every job."""
     # An output folder that the file reference scan also reports, as Houdini does for a directory parm.
     os.makedirs(str(tmp_path / "renders"))
-    network: Network = build_network(PYRO_BONFIRE)
-    _listed(network.scheduler_node, "output_directories", "output_dir", [str(tmp_path / "renders")])
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
+    _set_list_parm(
+        network.scheduler_node, "output_directories", "output_dir", [str(tmp_path / "renders")]
+    )
     scene.file_references.append(
         (network.scheduler_node.parm("output_dir1"), str(tmp_path / "renders"))
     )
@@ -1477,43 +1484,45 @@ def test_an_output_folder_is_never_attached_as_an_input(scene: FakeHou, tmp_path
     assert files.directories == () and files.assets == ()
 
 
-def test_the_output_folders_are_read_into_the_cooks_settings(
+def test_the_output_directories_are_read_into_the_cooks_settings(
     scene: FakeHou, tmp_path: Path
 ) -> None:
     """Every check that asks whether a file reaches the next step needs the whole list."""
     node: FakeNode = _settings_node(working_dir="$HIP")
-    _listed(node, "output_directories", "output_dir", [str(tmp_path / "renders") + "/./", ""])
+    _set_list_parm(
+        node, "output_directories", "output_dir", [str(tmp_path / "renders") + "/./", ""]
+    )
     assert read_scheduler_settings(node).output_directories == (str(tmp_path / "renders"),)
 
 
 @pytest.mark.parametrize("relative", ["", "sub", ".."])
-def test_an_output_folder_that_overlaps_the_working_directory_is_refused(
+def test_an_output_directory_that_overlaps_the_working_directory_is_refused(
     scene: FakeHou, relative: str
 ) -> None:
     """The working directory is already uploaded, so an overlap would upload one file twice."""
     node: FakeNode = _settings_node(working_dir="$HIP")
-    _listed(node, "output_directories", "output_dir", [os.path.join("$HIP", relative)])
+    _set_list_parm(node, "output_directories", "output_dir", [os.path.join("$HIP", relative)])
     with pytest.raises(CookSetupError, match=f"{SCHEDULER_PATH}/output_dir1 .*working directory"):
         read_scheduler_settings(node)
 
 
-def test_an_output_folder_beside_the_working_directory_is_accepted(
+def test_an_output_directory_beside_the_working_directory_is_accepted(
     scene: FakeHou, tmp_path: Path
 ) -> None:
     """A sibling whose name starts like the working directory doesn't overlap it."""
     node: FakeNode = _settings_node(working_dir="$HIP")
-    _listed(node, "output_directories", "output_dir", [str(tmp_path / "scene") + "_renders"])
+    _set_list_parm(node, "output_directories", "output_dir", [str(tmp_path / "scene") + "_renders"])
     assert read_scheduler_settings(node).output_directories == (str(tmp_path / "scene_renders"),)
 
 
-def test_an_output_folder_at_home_is_refused_naming_its_parm(
+def test_an_output_directory_at_home_is_refused_naming_its_parm(
     scene: FakeHou, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Each task would upload everything it finds there, which is the whole home directory."""
     # Home is the only output folder on the tab.
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     node: FakeNode = _settings_node(working_dir="$HIP")
-    _listed(node, "output_directories", "output_dir", [str(tmp_path / "home")])
+    _set_list_parm(node, "output_directories", "output_dir", [str(tmp_path / "home")])
     with pytest.raises(CookSetupError, match="output_dir1"):
         read_scheduler_settings(node)
 
@@ -1521,7 +1530,7 @@ def test_an_output_folder_at_home_is_refused_naming_its_parm(
 def test_the_host_reads_the_requirements_from_its_scheduler_node(scene: FakeHou) -> None:
     """The submitter asks the host, so the host must read the node the cook runs on."""
     # Copy a tab asking for one GPU onto the network's own scheduler node.
-    network: Network = build_network(PYRO_BONFIRE)
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
     node: FakeNode = _requirements_node(hr_mode="custom", hr_gpu_min=1)
     for parm in node.parms():
         network.scheduler_node.set_parm(parm.name(), parm.value, menu=parm.menu)

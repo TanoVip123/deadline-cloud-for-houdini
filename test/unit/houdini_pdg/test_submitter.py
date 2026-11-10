@@ -1411,7 +1411,9 @@ def test_a_queue_without_job_attachments_cannot_cook(
         submitter_module._queue_job_attachments(FARM, QUEUE, client=FakeDeadline(attachments))
 
 
-def test_the_nodes_output_folders_join_the_working_directory_in_the_bundle(tmp_path: Path) -> None:
+def test_the_nodes_output_directories_join_the_working_directory_in_the_bundle(
+    tmp_path: Path,
+) -> None:
     """Each task uploads what it writes there only if the job lists the folder as an output."""
     create: FakeCreateJob = FakeCreateJob()
     sub: PdgSubmitter = make_submitter(create_job=create, output_directories=("/renders/shot",))
@@ -1428,7 +1430,7 @@ def test_the_nodes_output_folders_join_the_working_directory_in_the_bundle(tmp_p
     decode_job_template(template=bundle["template"])
 
 
-def test_without_output_folders_the_init_data_is_as_before(tmp_path: Path) -> None:
+def test_without_output_directories_the_init_data_is_as_before(tmp_path: Path) -> None:
     """A job from a node with an empty tab must read the same on an adaptor that doesn't know the field."""
     # Submit with no output folders, then read the session's init data.
     sub: PdgSubmitter = make_submitter()

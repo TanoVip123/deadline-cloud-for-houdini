@@ -1321,7 +1321,9 @@ def test_a_scene_that_fails_to_load_is_left_to_the_job_script(
 # -- the node's extra output folders -------------------------------------------
 
 
-def test_downloading_maps_each_output_folder_to_this_worker(pdg_dir: str, tmp_path: Path) -> None:
+def test_downloading_maps_each_output_directory_to_this_worker(
+    pdg_dir: str, tmp_path: Path
+) -> None:
     """The workstation's folder doesn't exist here, so the client scans the folder the rules map it to."""
     # Download an item for a session with one output folder and a rule for it.
     worker: str = str(tmp_path / "mnt" / "renders")
@@ -1332,18 +1334,18 @@ def test_downloading_maps_each_output_folder_to_this_worker(pdg_dir: str, tmp_pa
         args(pdg_dir, output_directories=["/studio/renders"]),
         rules,
     )[0]
-    assert client_args["output_directories"] == [[worker, "/studio/renders"]]
+    assert client_args["mapped_output_directories"] == [[worker, "/studio/renders"]]
 
 
-def test_without_output_folders_the_clients_arguments_are_as_before(pdg_dir: str) -> None:
+def test_without_output_directories_the_clients_arguments_are_as_before(pdg_dir: str) -> None:
     """A session from an older submitter sends no list, and the client must get what it got before."""
     client_args: Dict[str, Any] = download_pdg_work_item(
         FakeStorage(payload()), ADDRESS, args(pdg_dir), []
     )[0]
-    assert "output_directories" not in client_args
+    assert "mapped_output_directories" not in client_args
 
 
-def test_a_silent_command_reports_what_it_wrote_in_an_output_folder(
+def test_a_silent_command_reports_what_it_wrote_in_an_output_directory(
     pdg_dir: str, tmp_path: Path, scripts: Path
 ) -> None:
     """Without the scan, a file written there was uploaded but never reached the step below.

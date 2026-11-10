@@ -1427,7 +1427,7 @@ def _reason_model(path: str, working_dir: str, env: Mapping[str, str]) -> str:
     root: str = os.path.normpath(working_dir)
     if resolved == root or resolved.startswith(root + os.sep):
         return ""
-    return "outside the working directory"
+    return "outside the working directory and every output folder"
 
 
 @given(
@@ -1747,7 +1747,7 @@ def test_cooked_from_cache_names_each_step_in_the_cook_and_one_file() -> None:
         _node("down", ["up"], count=0, in_cook_set=False, cached_items=(cached("down", 1),)),
         _node("plain", count=0, in_cook_set=False),
     ]
-    verdict: Verdict = validation.cooked_from_cache(
+    verdict: Verdict = validation.check_cooked_from_cache(
         _ctx(nodes, working_dir=WORKING_DIR, env={}, exists=lambda path: path == first),
         offered_nothing=True,
     )
@@ -1851,7 +1851,10 @@ def test_a_step_with_both_undeliverable_reasons_gets_both_remedies() -> None:
     verdict: Verdict = validate(_ctx(nodes, working_dir=WORKING_DIR, env={"DATA": "$HIP"}))
     # One refusal for the step, naming both reasons in a sentence and both remedies.
     (refusal,) = [r for r in verdict.refusals if r.scenario is RefusalScenario.OUTPUT_OUTSIDE_COOK]
-    assert "are outside the working directory or left with an unexpanded variable" in refusal.detail
+    assert (
+        "are outside the working directory and every output folder or left with an unexpanded variable"
+        in refusal.detail
+    )
     assert "another variable" in refusal.remedy
     assert "Point the working directory" in refusal.remedy
 
@@ -2503,7 +2506,7 @@ EXTRA: str = os.path.normpath("/renders/shot")
     under=st.sampled_from([WORKING_DIR, EXTRA, os.path.normpath("/elsewhere")]),
     listed=st.booleans(),
 )
-def test_an_output_in_an_extra_output_folder_reaches_the_steps_below(
+def test_an_output_in_an_extra_output_directory_reaches_the_steps_below(
     under: str, listed: bool
 ) -> None:
     """Each task uploads what it writes in a listed folder, so only an unlisted folder starves the next step."""
@@ -2521,7 +2524,7 @@ def test_an_output_in_an_extra_output_folder_reaches_the_steps_below(
     )
 
 
-def test_an_undeliverable_refusal_names_every_job_folder() -> None:
+def test_an_undeliverable_refusal_names_every_job_directory() -> None:
     """The artist must see every folder a step may write to, not only the working directory."""
     # A consumed step writes outside every folder of the job.
     outside: str = os.path.normpath("/elsewhere/a.exr")
@@ -2534,13 +2537,13 @@ def test_an_undeliverable_refusal_names_every_job_folder() -> None:
     assert f"'{WORKING_DIR}', '{EXTRA}'" in refusal.detail
 
 
-def test_a_missing_read_in_an_extra_output_folder_is_left_to_the_job() -> None:
+def test_a_missing_read_in_an_extra_output_directory_is_left_to_the_job() -> None:
     """A read there is judged as one in the working directory, so it isn't called unreachable."""
     # A step reads a missing file in the listed folder.
     nodes: List[NodeInfo] = [_node("a")]
     snapshot: GraphSnapshot = synthesize(nodes)
     read: SceneRead = _read("a", os.path.join(EXTRA, "t.png"), parm="file", is_output=False)
-    report: ReadReport = match_reads(snapshot, [read], WORKING_DIR, (EXTRA,))
+    report: ReadReport = match_reads(snapshot, [read], WORKING_DIR, output_directories=(EXTRA,))
     verdict: Verdict = validate(
         _ctx(
             nodes,
@@ -2554,7 +2557,7 @@ def test_a_missing_read_in_an_extra_output_folder_is_left_to_the_job() -> None:
     assert not _subjects(verdict, RefusalScenario.LOCAL_FILE_UNREACHABLE)
 
 
-def test_a_scene_in_an_extra_output_folder_is_not_advised() -> None:
+def test_a_scene_in_an_extra_output_directory_is_not_advised() -> None:
     """$HIP writes there are uploaded, so the advice to move the working directory would be wrong."""
     verdict: Verdict = validate(
         _ctx(

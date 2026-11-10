@@ -33,13 +33,13 @@ from deadline.houdini_pdg.cook import CookServices, PdgScheduler, ScheduleResult
 from deadline.houdini_pdg.diagnostics import CookJournal
 from deadline.houdini_pdg.errors import CookSetupError, GraphRefusedError, artist_message
 from deadline.houdini_pdg.farm_job import DeadlineFarmJob
-from deadline.houdini_pdg.graph import DeclaredFile
 from deadline.houdini_pdg.houdini.host import (
     HoudiniPdgHost,
     PreCookChecks,
     cook_set_names,
     show_error_popup,
 )
+from deadline.houdini_pdg.houdini.readers import declared_files
 from deadline.houdini_pdg.houdini.settings import SchedulerSettings
 from deadline.houdini_pdg.ports import Clock, WorkItemHandle
 from deadline.houdini_pdg.submitter import PdgSubmitter, farm_problem, get_workstation_setting
@@ -54,7 +54,7 @@ _SCHEDULE_RESULTS: Dict[ScheduleResult, Any] = {
 }
 
 
-class _ClientFactory:
+class _DeadlineCloudCalls:
     """Builds the client library's clients and sessions for a cook, and reads its settings.
 
     A test replaces these calls by subclassing, or replaces ``api`` with a stand-in.
@@ -87,7 +87,7 @@ class _ClientFactory:
         except Exception:
             return False
 
-    def record_event(self) -> Callable[[str, Dict[str, Any]], Any]:
+    def telemetry_recorder(self) -> Callable[[str, Dict[str, Any]], Any]:
         """The telemetry client's ``record_event``, which honors the workstation's opt-out."""
         try:
             record: Callable[[str, Dict[str, Any]], Any] = (
@@ -148,7 +148,7 @@ class DeadlineCloudPDGScheduler(PyScheduler):
                     PreCookChecks().run(host.scheduler_node(), interactive=False, cook_set=names)
                 )
             clock: SystemClock = SystemClock()
-            clients: _ClientFactory = self._clients()
+            clients: _DeadlineCloudCalls = self._clients()
             self._core = PdgScheduler(
                 host=host,
                 clock=clock,
@@ -170,7 +170,7 @@ class DeadlineCloudPDGScheduler(PyScheduler):
         try:
             if self._start_failed or self._core is None:
                 return pdg.scheduleResult.CookFailed
-            result: ScheduleResult = self._core.on_schedule(_handle(work_item))
+            result: ScheduleResult = self._core.on_schedule(_to_work_item_handle(work_item))
         except Exception as error:
             self._fail("onSchedule", error)
             return pdg.scheduleResult.CookFailed
@@ -199,9 +199,9 @@ class DeadlineCloudPDGScheduler(PyScheduler):
         finally:
             self._remove_scratch_working_dir()
 
-    def _clients(self) -> _ClientFactory:
-        """The factory for the clients this scheduler's cooks use."""
-        return _ClientFactory()
+    def _clients(self) -> _DeadlineCloudCalls:
+        """The Deadline Cloud calls this scheduler's cooks use."""
+        return _DeadlineCloudCalls()
 
     def _use_scratch_working_dir(self) -> None:
         # PDG copies its job scripts into the working directory before it
@@ -274,7 +274,7 @@ def _connect(
     *,
     host: HoudiniPdgHost,
     clock: Clock,
-    clients: _ClientFactory,
+    clients: _DeadlineCloudCalls,
 ) -> CookServices:
     """The cook's farm services, for the workstation's farm and queue, from one ``GetQueue``."""
     problem: str = farm_problem(clients.get_setting)
@@ -284,8 +284,8 @@ def _connect(
     queue_id: str = clients.get_setting("defaults.queue_id")
     # The queue gives the bucket, and its role gives the session that reaches it.
     client, queue = _read_queue(farm_id, queue_id, clients)
-    bucket, root_prefix = _job_attachments(queue, queue_id)
-    s3_client: Any = _queue_s3(client, queue, farm_id, queue_id, clients)
+    bucket, root_prefix = _read_job_attachments_bucket(queue, queue_id)
+    s3_client: Any = _open_queue_s3_client(client, queue, farm_id, queue_id, clients)
     _check_bucket_listing(s3_client, bucket, root_prefix, queue.get("displayName") or queue_id)
     return CookServices(
         submitter=PdgSubmitter(
@@ -313,12 +313,12 @@ def _connect(
             cook_id=cook_id,
             started_at=clock.now(),
             debug_level=settings.debug_level,
-            record_event=clients.record_event(),
+            record_event=clients.telemetry_recorder(),
         ),
     )
 
 
-def _read_queue(farm_id: str, queue_id: str, clients: _ClientFactory) -> Tuple[Any, Any]:
+def _read_queue(farm_id: str, queue_id: str, clients: _DeadlineCloudCalls) -> Tuple[Any, Any]:
     """A Deadline Cloud client and the queue it reads. Raises ``CookSetupError`` naming the cause."""
     try:
         client: Any = clients.deadline_client()
@@ -327,7 +327,9 @@ def _read_queue(farm_id: str, queue_id: str, clients: _ClientFactory) -> Tuple[A
         raise _queue_error(e, farm_id, queue_id, clients) from e
 
 
-def _queue_s3(client: Any, queue: Any, farm_id: str, queue_id: str, clients: _ClientFactory) -> Any:
+def _open_queue_s3_client(
+    client: Any, queue: Any, farm_id: str, queue_id: str, clients: _DeadlineCloudCalls
+) -> Any:
     """An S3 client with the queue role's credentials. Raises ``CookSetupError`` naming the cause."""
     try:
         session: Any = clients.queue_session(
@@ -362,7 +364,7 @@ def _check_bucket_listing(s3_client: Any, bucket: str, root_prefix: str, queue: 
     _logger.warning("The access check found an object at %s in bucket %s.", key, bucket)
 
 
-def _handle(work_item: Any) -> WorkItemHandle:
+def _to_work_item_handle(work_item: Any) -> WorkItemHandle:
     """The cook's view of a PDG work item."""
     node: Any = getattr(work_item, "node", None)
     return WorkItemHandle(
@@ -370,21 +372,13 @@ def _handle(work_item: Any) -> WorkItemHandle:
         index=int(work_item.index),
         name=str(work_item.name),
         node_name=str(getattr(node, "name", "") or ""),
-        declared_outputs=_declared_outputs(work_item),
+        # The item's expected outputs now, because PDG can change them after generation.
+        declared_outputs=declared_files(getattr(work_item, "expectedOutputFiles", None)),
         native=work_item,
     )
 
 
-def _declared_outputs(work_item: Any) -> Tuple[DeclaredFile, ...]:
-    """The item's expected outputs now. PDG can change them after generation."""
-    return tuple(
-        DeclaredFile(path=str(entry.path), tag=str(getattr(entry, "tag", "") or ""))
-        for entry in getattr(work_item, "expectedOutputFiles", None) or ()
-        if getattr(entry, "path", "")
-    )
-
-
-def _job_attachments(queue: Any, queue_id: str) -> Tuple[str, str]:
+def _read_job_attachments_bucket(queue: Any, queue_id: str) -> Tuple[str, str]:
     """The queue's job attachments bucket and root prefix. Raises ``CookSetupError`` without them."""
     # Both the bucket and the root prefix are needed to name a task's keys.
     settings: Dict[str, str] = queue.get("jobAttachmentSettings") or {}
@@ -416,7 +410,7 @@ _LOGIN_ERRORS: Tuple[str, ...] = (
 _LOGIN_RETRY_DELAYS: Tuple[float, ...] = (2.0, 4.0, 8.0, 16.0)
 
 
-def _get_queue(client: Any, farm_id: str, queue_id: str, clients: _ClientFactory) -> Any:
+def _get_queue(client: Any, farm_id: str, queue_id: str, clients: _DeadlineCloudCalls) -> Any:
     """The queue, retried while the login is expired, so a renewal in progress can finish."""
     for delay in _LOGIN_RETRY_DELAYS:
         try:
@@ -438,7 +432,7 @@ def _error_code(error: Exception) -> str:
 
 
 def _queue_error(
-    error: Exception, farm_id: str, queue_id: str, clients: _ClientFactory
+    error: Exception, farm_id: str, queue_id: str, clients: _DeadlineCloudCalls
 ) -> CookSetupError:
     """The setup error for a failed queue read, with the remedy for its cause."""
     # Match the error by its class name and its service code, from the most specific cause.

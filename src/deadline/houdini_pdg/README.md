@@ -56,7 +56,7 @@ Each cook writes a folder under `<working directory>/pdg_debug/`. It holds the l
 
 ## Getting the results
 
-The scheduler does not download outputs to your workstation. Steps hand files to each other on the farm. To fetch a cook's results, use Deadline Cloud Monitor or `deadline job download-output`.
+The scheduler does not download outputs to your workstation. Steps hand files to each other on the farm, through the working directory and the output directories listed on the node's Job Attachments tab. The node's messages call an output directory an output folder. To fetch a cook's results, use Deadline Cloud Monitor or `deadline job download-output`.
 
 ## Known issues
 

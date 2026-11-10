@@ -2136,7 +2136,7 @@ def test_a_cook_pdg_ends_with_every_item_from_cache_is_refused_naming_each_step(
 
 
 @pytest.mark.parametrize("listed, refused_", [((), True), (("/renders",), False)])
-def test_a_step_writing_to_a_listed_output_folder_feeds_the_step_below(
+def test_a_step_writing_to_a_listed_output_directory_feeds_the_step_below(
     listed: Tuple[str, ...], refused_: bool
 ) -> None:
     """The cook judges outputs against the node's folders, or a listed folder would still be refused."""
