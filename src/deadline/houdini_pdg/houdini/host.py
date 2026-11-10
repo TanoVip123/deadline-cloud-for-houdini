@@ -192,7 +192,9 @@ class HoudiniPdgHost:
         """
         # Wait for every step, or only those in the cook set, and listen for each to finish.
         context: Any = self._scheduler.context
-        steps: Set[str] = set(_step_top_nodes(_graph_nodes(context)))
+        steps: Set[str] = {
+            _name(node) for node in _graph_nodes(context) if _name(node) and _is_step(node)
+        }
         with self._generation_lock:
             self._waiting_for = steps & set(cook_set) if cook_set else steps
             self._generated = set()
@@ -746,8 +748,9 @@ def _own_overrides_cleared(
         name: str = _name(node)
         if not name:
             continue
+        # PDG resolves the override's path from the step, so a bare sibling name names no node.
         hom: Any = _call(node, "topNode")
-        target: str = _override_target(hom)
+        target: str = _path_of(_call(hom, "node", readers._scheduler_override(hom)))
         if target:
             authored[name] = target
         scheduler: str = _name(_attr(node, "scheduler"))
@@ -762,13 +765,6 @@ def _own_overrides_cleared(
         )
         for info in infos
     )
-
-
-def _override_target(hom: Any) -> str:
-    """The path of the node a step's override names, or ``""`` when it names none."""
-    value: str = readers._scheduler_override(hom)
-    # PDG resolves the path from the step, so a bare sibling name names no node.
-    return _path_of(_call(hom, "node", value))
 
 
 def _names_own(
@@ -787,15 +783,6 @@ def _is_step(node: Any) -> bool:
         return bool(node.scriptInfo.command)
     except Exception:
         return False
-
-
-def _step_top_nodes(graph_nodes: Iterable[Any]) -> Dict[str, Any]:
-    """Each step's ``hou.TopNode``, by PDG node name."""
-    return {
-        _name(node): _call(node, "topNode")
-        for node in graph_nodes
-        if _name(node) and _is_step(node)
-    }
 
 
 def _top_nodes(graph_nodes: Iterable[Any]) -> Dict[str, Any]:
@@ -1130,7 +1117,7 @@ def _get_or_create_graph_context(node: Any) -> Any:
     if context is not None:
         return context
     # Creates the PDG nodes without generating or cooking anything.
-    _call_kwargs(node, "cookWorkItems", block=True, tops_only=True)
+    _call(node, "cookWorkItems", block=True, tops_only=True)
     return _call(node, "getPDGGraphContext")
 
 
@@ -1151,18 +1138,10 @@ def _attr(obj: Any, name: str) -> Any:
         return None
 
 
-def _call(obj: Any, name: str, *args: Any) -> Any:
-    """``obj.name(*args)``, or None when it is absent or raises."""
+def _call(obj: Any, name: str, *args: Any, **kwargs: Any) -> Any:
+    """``obj.name(*args, **kwargs)``, or None when it is absent or raises, which is logged."""
     try:
-        return getattr(obj, name)(*args)
-    except Exception:
-        return None
-
-
-def _call_kwargs(obj: Any, name: str, **kwargs: Any) -> Any:
-    """``obj.name(**kwargs)``, or None when it is absent or raises, which is logged."""
-    try:
-        return getattr(obj, name)(**kwargs)
+        return getattr(obj, name)(*args, **kwargs)
     except Exception:
         _logger.debug("%s failed", name, exc_info=True)
         return None

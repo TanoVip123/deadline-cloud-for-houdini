@@ -87,10 +87,6 @@ def node_infos(
             items[name] = kept
     wiring: Optional[Dict[str, Set[str]]] = _hom_wiring(pdg_nodes)
 
-    def upstream_of(name: str) -> Set[str]:
-        """The node's upstream nodes, from the network's wires when they could be read."""
-        return wiring.get(name, set()) if wiring is not None else item_upstream.get(name, set())
-
     def in_cook(name: str) -> Optional[bool]:
         """Whether the node is in the cook, or None when the cook set is unknown."""
         if name in outside:
@@ -105,7 +101,9 @@ def node_infos(
     for name in sorted(pdg_nodes):
         pdg_node: Any = pdg_nodes[name]
         hom: Any = _call(pdg_node, "topNode")
-        upstream: Set[str] = upstream_of(name)
+        upstream: Set[str] = (
+            wiring.get(name, set()) if wiring is not None else item_upstream.get(name, set())
+        )
         # A step's own parms are judged by the scene walk, so only a node with no
         # job script has its expressions, file parms and Python code read.
         job_script: bool = _has_job_script(pdg_node)

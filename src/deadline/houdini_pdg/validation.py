@@ -1086,12 +1086,14 @@ def _check_cached_outputs(ctx: ValidationContext) -> Verdict:
         if not present_files:
             continue
         refusals.append(
-            _cached_refusal(
-                step.name,
-                f"{len(present_files)} of this step's {step.task_count} work item(s) declare "
+            Refusal(
+                scenario=RefusalScenario.CACHED_OUTPUTS,
+                subject=step.name,
+                detail=f"{len(present_files)} of this step's {step.task_count} work item(s) declare "
                 f"outputs that already exist, for example '{present_files[0]}'. With Cache "
                 "Mode Automatic or Read Files, PDG cooks such an item from cache and never "
                 "offers it to this scheduler, so its task would not run on the farm.",
+                remedy=_CACHED_OUTPUTS_REMEDY,
             )
         )
     # A step refused for its files is named once.
@@ -1122,26 +1124,21 @@ def check_cooked_from_cache(ctx: ValidationContext, *, offered_nothing: bool = F
             "tasks out and the steps below would read the local results."
         )
         refusals.append(
-            _cached_refusal(
-                node.name,
-                f"PDG cooked {len(node.cached_items)} of this step's work item(s) from files "
+            Refusal(
+                scenario=RefusalScenario.CACHED_OUTPUTS,
+                subject=node.name,
+                detail=f"PDG cooked {len(node.cached_items)} of this step's work item(s) from files "
                 f"already on this machine, for example '{example}', {outcome}",
+                remedy=_CACHED_OUTPUTS_REMEDY,
             )
         )
     return Verdict(refusals=tuple(refusals))
 
 
-def _cached_refusal(step: str, detail: str) -> Refusal:
-    """A CACHED_OUTPUTS refusal for ``step``, with the shared remedy."""
-    return Refusal(
-        scenario=RefusalScenario.CACHED_OUTPUTS,
-        subject=step,
-        detail=detail,
-        remedy=(
-            "Set the node's Cache Mode (pdg_cachemode) to Write Files, or delete its "
-            "results before cooking (Delete Selected Node Results From Disk)."
-        ),
-    )
+_CACHED_OUTPUTS_REMEDY: str = (
+    "Set the node's Cache Mode (pdg_cachemode) to Write Files, or delete its "
+    "results before cooking (Delete Selected Node Results From Disk)."
+)
 
 
 def _cached_example(items: Sequence[RawItem], ctx: ValidationContext) -> str:

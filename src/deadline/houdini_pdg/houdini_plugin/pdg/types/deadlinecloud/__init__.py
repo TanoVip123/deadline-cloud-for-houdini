@@ -318,15 +318,6 @@ def _connect(
     )
 
 
-def _read_queue(farm_id: str, queue_id: str, clients: _DeadlineCloudCalls) -> Tuple[Any, Any]:
-    """A Deadline Cloud client and the queue it reads. Raises ``CookSetupError`` naming the cause."""
-    try:
-        client: Any = clients.deadline_client()
-        return client, _get_queue(client, farm_id, queue_id, clients)
-    except Exception as e:
-        raise _queue_error(e, farm_id, queue_id, clients) from e
-
-
 def _open_queue_s3_client(
     client: Any, queue: Any, farm_id: str, queue_id: str, clients: _DeadlineCloudCalls
 ) -> Any:
@@ -410,17 +401,25 @@ _LOGIN_ERRORS: Tuple[str, ...] = (
 _LOGIN_RETRY_DELAYS: Tuple[float, ...] = (2.0, 4.0, 8.0, 16.0)
 
 
-def _get_queue(client: Any, farm_id: str, queue_id: str, clients: _DeadlineCloudCalls) -> Any:
-    """The queue, retried while the login is expired, so a renewal in progress can finish."""
-    for delay in _LOGIN_RETRY_DELAYS:
-        try:
-            return client.get_queue(farmId=farm_id, queueId=queue_id)
-        except Exception as e:
-            if not {type(e).__name__, _error_code(e)} & set(_LOGIN_ERRORS):
-                raise
-            _logger.info("The login was refused (%s); retrying in %s s", e, delay)
-            clients.sleep(delay)
-    return client.get_queue(farmId=farm_id, queueId=queue_id)
+def _read_queue(farm_id: str, queue_id: str, clients: _DeadlineCloudCalls) -> Tuple[Any, Any]:
+    """A Deadline Cloud client and the queue it reads. Raises ``CookSetupError`` naming the cause.
+
+    The read is retried while the login is expired, so a renewal in progress can finish.
+    """
+    try:
+        client: Any = clients.deadline_client()
+        for delay in _LOGIN_RETRY_DELAYS:
+            # Only a login error is worth waiting for. Any other error is raised at once.
+            try:
+                return client, client.get_queue(farmId=farm_id, queueId=queue_id)
+            except Exception as e:
+                if not {type(e).__name__, _error_code(e)} & set(_LOGIN_ERRORS):
+                    raise
+                _logger.info("The login was refused (%s); retrying in %s s", e, delay)
+                clients.sleep(delay)
+        return client, client.get_queue(farmId=farm_id, queueId=queue_id)
+    except Exception as e:
+        raise _queue_error(e, farm_id, queue_id, clients) from e
 
 
 def _error_code(error: Exception) -> str:
