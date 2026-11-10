@@ -868,6 +868,7 @@ def test_a_quota_stop_during_the_display_generate_leaves_the_scheduler_node_alon
         # PDG's generate ends when the cancel lands.
         network.context.canceled.wait(5)
 
+    # Submit dirties, its generate stops at the quota, and the popup names the step.
     display.on_generate = generate
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     assert "sim: 10,001 tasks per step" in scene.messages.calls[0][0]
