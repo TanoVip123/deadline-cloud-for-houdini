@@ -1370,6 +1370,17 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             _call(context, "removeEventHandler", handler)
         if over_quota:
             raise GraphRefusedError(over_quota[0])
+        # A canceled or failed generate still returns, and leaves an error on the node that
+        # stopped and each node below it. Part of a graph can't be judged, so Submit stops.
+        if any(
+            _call(hom, "errors")
+            for name, hom in _top_nodes(graph_nodes).items()
+            if cook_set is None or name in cook_set
+        ):
+            raise CookSetupError(
+                "The generate didn't finish, so Submit can't check the graph. "
+                "Fix the node errors, then submit again."
+            )
         # Read the items from this scheduler, as the cook does, and check them all.
         scheduler = _call(context, "schedulerForName", scheduler_name)
         dependency_graph: Any = _call(scheduler, "dependencyGraph", True)

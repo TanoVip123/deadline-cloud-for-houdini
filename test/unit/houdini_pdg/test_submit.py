@@ -663,3 +663,44 @@ def test_submits_advisories_go_on_the_warning_tab_before_the_confirmation(
     assert [c for c in tab.scheduler.calls if c[0] == "cookWarning"] == [("cookWarning", details)]
     assert tab.events == ["dirty", "cookWarning", "popup"] + ["update"] * has_ui
     assert ("Warning tab." if has_ui else "Warning tab, which may update late") in caplog.text
+
+
+def test_a_generate_that_did_not_finish_stops_submit_with_only_a_popup(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """PDG's blocking generate returns normally when it is canceled or a node fails to generate.
+
+    The nodes keep the error, so Submit must stop rather than judge and submit part of the graph.
+    The stop is popup only, because no refusal on the generated items was found.
+    """
+    # PDG has the scheduler, and wedge1's generate fails during Submit's display generate.
+    network: FakeNetwork = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    tab: _ErrorTab = _ErrorTab(network, scene)
+    display: Any = network.topnet.displayNode()
+
+    def generate() -> None:
+        network.node("wedge1").hom.node_errors = ["Unable to evaluate expression (Bracing error)."]
+
+    # Submit stops with the popup only: no cook, no cookError and no UI update.
+    display.on_generate = generate
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    ((text, buttons),) = scene.messages.calls
+    assert text == (
+        "The generate didn't finish, so Submit can't check the graph. "
+        "Fix the node errors, then submit again."
+    )
+    assert buttons == () and _cooks(network) == []
+    assert tab.scheduler.calls == [] and scene.updates == 0 and "error tab" in caplog.text
+
+
+def test_an_error_on_a_node_the_display_node_does_not_cook_does_not_stop_submit(
+    scene: FakeHou,
+) -> None:
+    """Submit generates only the display node and the nodes above it, so only their errors count."""
+    # Display render, so montage below it is outside the cook, and give montage an error.
+    network: FakeNetwork = _network()
+    network.topnet.display = network.node("render").hom
+    _generated(network, {"sim": 1, "render": 1})
+    network.node("montage").hom.node_errors = ["An error from an earlier cook."]
+    assert submit(network.scheduler_node, get_setting=_workstation) is True

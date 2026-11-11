@@ -212,6 +212,8 @@ class FakeNode:
         self.on_generate: Optional[Callable[[], None]] = None
         #: Each dirty and generate on the node's work items, in order, with its argument.
         self.work_item_calls: List[Tuple[str, bool]] = []
+        #: The node's errors, as ``errors()`` reports them.
+        self.node_errors: List[str] = []
 
     def path(self) -> str:
         return self._path
@@ -321,6 +323,9 @@ class FakeNode:
 
     def isInsideLockedHDA(self) -> bool:
         return False
+
+    def errors(self) -> List[str]:
+        return list(self.node_errors)
 
     def getPDGNode(self) -> Any:
         return self.pdg_node
