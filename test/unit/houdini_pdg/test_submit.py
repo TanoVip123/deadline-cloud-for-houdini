@@ -376,49 +376,44 @@ def test_submit_dirties_the_items_keeping_files_before_it_generates(scene: FakeH
 
 
 class _ErrorTab:
-    """The scheduler node's error tab, as Houdini 21.0's UI showed it.
+    """The scheduler node's error and Warning tabs, as a refused cook start leaves them.
 
-    A ``cookError`` shows once ``hou.ui.triggerUpdate`` runs, and Submit's dirty of the
-    display node's items clears what shows. ``events`` keeps the order of those calls and the popups.
+    The scheduler's ``onStartCook`` sends Submit's stop inside that cook, and Submit's dirty of
+    the display node's items clears both tabs. ``events`` keeps the order of those and the popups.
     """
 
     def __init__(self, network: FakeNetwork, scene: FakeHou) -> None:
         self.shown: List[str] = []
+        self.warned: List[str] = []
         self.events: List[str] = []
-        self.scheduler: Any = network.context.schedulers["deadlinecloudscheduler1"]
-        self._read: int = 0
+        self.scheduler: Any = network.context.schedulers.get("deadlinecloudscheduler1")
         scene.messages.on_show = lambda: self.events.append("popup")
-        scene.on_update = self._update
-        # Record the dirty, which clears the tab, and each cookError and cookWarning, in order.
+        # Record the dirty, which clears the tabs, and each refused cook start, which sets them.
         display: Any = network.topnet.displayNode()
         dirty: Any = display.dirtyAllWorkItems
-        cook_error: Any = self.scheduler.cookError
-        cook_warning: Any = self.scheduler.cookWarning
+        cook: Any = display.cookWorkItems
+        stops: List[Dict[str, Tuple[str, str]]] = display.stop_cooks
 
         def dirty_and_clear(remove_outputs: bool) -> None:
             dirty(remove_outputs)
             self.events.append("dirty")
             self.shown.clear()
+            self.warned.clear()
 
-        def record_cook_error(message: str) -> None:
-            cook_error(message)
-            self.events.append("cookError")
-
-        def record_cook_warning(message: str) -> None:
-            cook_warning(message)
-            self.events.append("cookWarning")
+        def cook_and_show(**kwargs: Any) -> None:
+            taken: int = len(stops)
+            try:
+                cook(**kwargs)
+            finally:
+                # Each cook start the scheduler refused replaces what the tabs show.
+                for stop in stops[taken:]:
+                    for error, advisories in stop.values():
+                        self.events.append("stop")
+                        self.shown[:] = [error] if error else []
+                        self.warned[:] = [advisories] if advisories else []
 
         display.dirtyAllWorkItems = dirty_and_clear
-        self.scheduler.cookError = record_cook_error
-        self.scheduler.cookWarning = record_cook_warning
-
-    def _update(self) -> None:
-        """Show every cookError made since the last update, as Houdini's UI update does."""
-        # Record the update, then show the cookErrors after the last one this model showed.
-        self.events.append("update")
-        calls: List[Tuple[Any, ...]] = self.scheduler.calls
-        self.shown.extend(c[1] for c in calls[self._read :] if c[0] == "cookError")
-        self._read = len(calls)
+        display.cookWorkItems = cook_and_show
 
 
 def _refused_on_the_tab(scene: FakeHou) -> Tuple[FakeNetwork, _ErrorTab, str]:
@@ -437,8 +432,8 @@ def test_a_refusal_stays_on_the_error_tab_until_the_fixed_scenes_next_submit(
 ) -> None:
     """The popup closes, so the artist needs the text on the node while fixing the scene.
 
-    The text must show at once, through Houdini's UI update after ``cookError``, and
-    Submit's next dirty must clear it, so a fixed scene shows no stale error.
+    The text goes on the tab through a cook start the scheduler refuses, and Submit's next
+    dirty must clear it, so a fixed scene shows no stale error.
     """
     # The first Submit is refused, and its popup text shows on the tab.
     network: FakeNetwork
@@ -452,8 +447,9 @@ def test_a_refusal_stays_on_the_error_tab_until_the_fixed_scenes_next_submit(
     # Fix render and Submit again.
     network.node("render").hom.remove_parm("pdg_cooktype")
     assert submit(network.scheduler_node, get_setting=_workstation) is True
-    # With no advisory, the fixed Submit sends no warning and asks for no UI update.
-    assert tab.shown == [] and scene.updates == 1
+    # The fixed Submit's only cook is the real one, so the tab stays clear.
+    assert tab.shown == [] and len(display.stop_cooks) == 1
+    assert _cooks(network) == [{"block": False}]
 
 
 def test_a_cancel_at_the_save_prompt_leaves_the_error_tab_as_it_was(scene: FakeHou) -> None:
@@ -466,17 +462,13 @@ def test_a_cancel_at_the_save_prompt_leaves_the_error_tab_as_it_was(scene: FakeH
     scene.hip_file.unsaved = True
     scene.messages.answers = [2]
     assert submit(network.scheduler_node, get_setting=_workstation) is False
-    assert tab.shown == [text]
-    assert [call for call in tab.scheduler.calls if call[0] == "cookError"] == [("cookError", text)]
+    assert tab.shown == [text] and tab.events.count("stop") == 1
 
 
-def test_a_stop_before_the_dirty_leaves_the_scheduler_node_alone(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_a_stop_before_the_dirty_goes_on_the_error_tab_with_no_generate(scene: FakeHou) -> None:
     """A bad tab value stops Submit before it dirties or generates the display node's items.
 
-    Only the refusals found on the generated items go on the error tab, so only the popup
-    shows, with a log line, even though PDG has the scheduler.
+    The network has a PDG graph, so the stop still goes on the tab, through a refused cook start.
     """
     # PDG has the scheduler from an earlier generate, and the GPU minimum is above its maximum.
     network: FakeNetwork = _network()
@@ -484,9 +476,10 @@ def test_a_stop_before_the_dirty_leaves_the_scheduler_node_alone(
     tab: _ErrorTab = _ErrorTab(network, scene)
     _with_requirements(network, hr_gpu_min=4, hr_gpu_max=2)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
-    assert "hr_gpu_min" in scene.messages.calls[0][0]
+    text: str = scene.messages.calls[0][0]
+    assert "hr_gpu_min" in text and tab.shown == [text] and tab.events == ["stop", "popup"]
     assert network.scheduler_node.generate_calls == [] and tab.scheduler.calls == []
-    assert scene.updates == 0 and "error tab" in caplog.text
+    assert scene.updates == 0
 
 
 def test_a_service_node_is_refused_from_its_cook_type_parm_and_replaces_the_tabs_text(
@@ -495,7 +488,7 @@ def test_a_service_node_is_refused_from_its_cook_type_parm_and_replaces_the_tabs
     """The display node's generate starts PDG's service processes for a Service node, and was slow to refuse.
 
     PDG keeps the last generate's cook type, so the parm must decide. Neither node may generate,
-    and the dirty must come before the cookError, or the tab keeps the earlier Submit's text.
+    and the dirty must come before the cook start, or the tab keeps the earlier Submit's text.
     """
     # An earlier Submit put an In-Process refusal on the tab.
     network: FakeNetwork
@@ -514,19 +507,16 @@ def test_a_service_node_is_refused_from_its_cook_type_parm_and_replaces_the_tabs
         "with another scheduler."
     )
     # Only the new text shows, and this Submit only dirtied the display node's items.
-    assert tab.shown == [text] and tab.events == ["dirty", "cookError", "popup", "update"]
+    assert tab.shown == [text] and tab.events == ["dirty", "stop", "popup"]
     display: Any = network.topnet.displayNode()
     assert display.work_item_calls[2:] == [("dirty", False)]
     assert network.scheduler_node.generate_calls == []
 
 
-def test_a_quota_stop_during_the_display_generate_leaves_the_scheduler_node_alone(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_a_quota_stop_during_the_display_generate_goes_on_the_error_tab(scene: FakeHou) -> None:
     """A task quota cancels the display node's generate after Submit's dirty.
 
-    A quota stop goes only in the popup, so Submit must leave the tab alone and log why it
-    is empty.
+    The stop goes on the tab through a refused cook start, with no generate of the scheduler node.
     """
     # PDG has the scheduler, and sim generates one task more than a step may have.
     network: FakeNetwork = _network()
@@ -543,10 +533,11 @@ def test_a_quota_stop_during_the_display_generate_leaves_the_scheduler_node_alon
     # Submit dirties, its generate stops at the quota, and the popup names the step.
     display.on_generate = generate
     assert submit(network.scheduler_node, get_setting=_workstation) is False
-    assert "sim: 10,001 tasks per step" in scene.messages.calls[0][0]
+    text: str = scene.messages.calls[0][0]
+    assert "sim: 10,001 tasks per step" in text and tab.shown == [text]
     assert display.work_item_calls[0] == ("dirty", False)
     assert network.scheduler_node.generate_calls == [] and tab.scheduler.calls == []
-    assert scene.updates == 0 and "error tab" in caplog.text
+    assert scene.updates == 0
 
 
 @pytest.mark.parametrize(
@@ -554,46 +545,41 @@ def test_a_quota_stop_during_the_display_generate_leaves_the_scheduler_node_alon
     [(1, [("dirty", False), ("generate", True)]), (3, [("dirty", False)])],
     ids=["in-process", "service"],
 )
-def test_with_no_scheduler_only_the_popup_shows(
+def test_with_no_scheduler_the_stop_still_goes_on_the_error_tab(
     scene: FakeHou,
-    caplog: pytest.LogCaptureFixture,
     cook_type: int,
     work_item_calls: List[Tuple[str, bool]],
 ) -> None:
     """PDG names no scheduler in a fresh session, and may name none even after a generate.
 
-    Only the popup can show then, so the log must say why the tab is empty, with no UI update.
+    The cook start creates the scheduler, so the stop still goes on the tab.
     """
     # PDG names no scheduler, and render is an In-Process step or a Service node.
     network: FakeNetwork = _network()
+    tab: _ErrorTab = _ErrorTab(network, scene)
     network.node("render").hom.set_parm("pdg_cooktype", cook_type)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
-    assert "The cook can't start." in scene.messages.calls[0][0]
+    text: str = scene.messages.calls[0][0]
+    assert "The cook can't start." in text and tab.shown == [text]
     display: Any = network.topnet.displayNode()
     assert display.work_item_calls == work_item_calls
     assert network.scheduler_node.generate_calls == [] and scene.updates == 0
-    assert "Could not put the error on" in caplog.text
 
 
-def test_in_the_ui_each_refused_submit_shows_its_own_text_on_the_error_tab(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture
-) -> None:
-    """In Houdini's UI a cookError shows on the tab only once the UI updates.
+def test_each_refused_submit_shows_its_own_text_on_the_error_tab(scene: FakeHou) -> None:
+    """A cookError sent outside a cook didn't stay on the tab in Houdini's UI.
 
-    A generate on the scheduler node made that update, but it can start PDG's processes, so
-    Submit asks the UI to update after the popup. Without it the tab showed the previous text.
+    Each refused Submit starts its own cook start, so each sends its text again, before the popup.
     """
     # PDG has the scheduler, and render is an In-Process step, which is refused after the generate.
-    caplog.set_level("INFO")
     network: FakeNetwork = _network()
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
     tab: _ErrorTab = _ErrorTab(network, scene)
     network.node("render").hom.set_parm("pdg_cooktype", 1)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     first: str = scene.messages.calls[-1][0]
-    assert tab.shown == [first] and tab.events[-2:] == ["popup", "update"]
-    assert network.scheduler_node.generate_calls == []
-    assert "Sent Submit's error to /obj/topnet1/deadlinecloudscheduler1's error tab." in caplog.text
+    assert tab.shown == [first] and tab.events[-2:] == ["stop", "popup"]
+    assert network.scheduler_node.generate_calls == [] and scene.updates == 0
     # A second refusal with different text replaces the first on the tab.
     network.node("montage").hom.set_parm("pdg_cooktype", 1)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
@@ -602,6 +588,7 @@ def test_in_the_ui_each_refused_submit_shows_its_own_text_on_the_error_tab(
     assert network.scheduler_node.generate_calls == []
 
 
+@pytest.mark.skip(reason="Submit no longer asks the UI to update, so hython and the UI match.")
 @pytest.mark.parametrize("cook_type", [1, 3], ids=["in-process", "service"])
 def test_in_hython_the_error_is_sent_to_the_tab_with_no_ui_update(
     scene: FakeHou, caplog: pytest.LogCaptureFixture, cook_type: int
@@ -620,6 +607,7 @@ def test_in_hython_the_error_is_sent_to_the_tab_with_no_ui_update(
     assert "error tab, which may update late with no UI." in caplog.text
 
 
+@pytest.mark.skip(reason="Submit no longer asks the UI to update.")
 def test_a_failed_ui_update_does_not_make_submit_raise(scene: FakeHou) -> None:
     """The update only redraws the tab, so a raise from it must not escape the Submit button."""
     # render is an In-Process step, which is refused, and Houdini's UI update raises.
@@ -636,15 +624,13 @@ def test_a_failed_ui_update_does_not_make_submit_raise(scene: FakeHou) -> None:
     assert tab.events == ["dirty", "cookError", "popup"] and scene.updates == 1
 
 
-def test_in_the_ui_a_stop_before_the_display_generate_finishes_skips_the_error_tab(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture
+def test_a_stop_before_or_during_the_display_generate_goes_on_the_error_tab(
+    scene: FakeHou,
 ) -> None:
-    """Only the refusals found on the generated items go on the error tab.
+    """A stop before the dirty, or a quota stop during the generate, goes on the tab too.
 
-    Moving cookError before the popup must not move it ahead of that guard, so a stop before
-    the dirty, or a quota stop during the generate, makes no cookError and no UI update.
+    Submit itself sends no cookError and asks for no UI update, because the cook start does it.
     """
-    caplog.set_level("INFO")
     network: FakeNetwork = _network()
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
     tab: _ErrorTab = _ErrorTab(network, scene)
@@ -652,7 +638,8 @@ def test_in_the_ui_a_stop_before_the_display_generate_finishes_skips_the_error_t
     # First, a bad tab value stops Submit before the dirty.
     _with_requirements(network, hr_gpu_min=4, hr_gpu_max=2)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
-    assert "hr_gpu_min" in scene.messages.calls[-1][0] and display.work_item_calls == []
+    first: str = scene.messages.calls[-1][0]
+    assert "hr_gpu_min" in first and display.work_item_calls == [] and tab.shown == [first]
 
     # Second, with the tab fixed, sim passes the task quota during the display generate.
     def generate() -> None:
@@ -663,61 +650,46 @@ def test_in_the_ui_a_stop_before_the_display_generate_finishes_skips_the_error_t
     _with_requirements(network, hr_gpu_min=-1, hr_gpu_max=-1)
     display.on_generate = generate
     assert submit(network.scheduler_node, get_setting=_workstation) is False
-    assert "sim: 10,001 tasks per step" in scene.messages.calls[-1][0]
-    # Neither stop touched the scheduler node, and each logged the skip and not the set.
+    second: str = scene.messages.calls[-1][0]
+    assert "sim: 10,001 tasks per step" in second and tab.shown == [second]
+    # Neither stop generated the scheduler node or sent anything to it from Submit.
     assert network.scheduler_node.generate_calls == [] and tab.scheduler.calls == []
-    assert scene.updates == 0 and tab.shown == []
-    assert caplog.text.count("Could not put the error on") == 2
-    assert "Sent Submit's error to" not in caplog.text
+    assert scene.updates == 0
 
 
-@pytest.mark.parametrize("has_ui", [True, False], ids=["ui", "hython"])
 @pytest.mark.parametrize("confirmed", [True, False], ids=["submit", "cancel"])
-def test_submits_advisories_go_on_the_warning_tab_once(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture, has_ui: bool, confirmed: bool
-) -> None:
+def test_submits_advisories_go_on_the_warning_tab_once(scene: FakeHou, confirmed: bool) -> None:
     """An advisory showed only under Show Details, so it was gone once the confirmation closed.
 
-    A confirmed cook sends the same advisories from its snapshot, so Submit sending them too
-    showed each twice. A cancel starts no cook, so Submit sends them after the confirmation.
+    A confirmed cook sends the same advisories from its snapshot, so Submit sends none then. A
+    cancel starts no cook, so Submit sends them through a cook start the scheduler refuses.
     """
     # Validation is off, so an In-Process render step is an advisory, found after the generate.
-    caplog.set_level("INFO")
-    scene.ui = has_ui
     scene.messages.choice = 0 if confirmed else 1
     network: FakeNetwork = _network()
     network.scheduler_node.set_parm("validate_graph", 0)
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
     tab: _ErrorTab = _ErrorTab(network, scene)
     network.node("render").hom.set_parm("pdg_cooktype", 1)
-    # The cook's snapshot sends the confirmation's advisories, as Houdini 21.0 showed.
-    display: Any = network.topnet.displayNode()
-    cook: Any = display.cookWorkItems
-    display.cookWorkItems = lambda **kwargs: (
-        tab.scheduler.cookWarning(scene.messages.options[-1]["details"]),
-        cook(**kwargs),
-    )
     assert submit(network.scheduler_node, get_setting=_workstation) is confirmed
     details: str = scene.messages.options[-1]["details"]
     assert details.startswith("render: ")
-    assert [c for c in tab.scheduler.calls if c[0] == "cookWarning"] == [("cookWarning", details)]
+    sent: List[Any] = [c for c in tab.scheduler.calls if c[0] in ("cookError", "cookWarning")]
+    assert sent == [] and scene.updates == 0
     if confirmed:
-        assert tab.events == ["dirty", "popup", "cookWarning"]
+        assert tab.events == ["dirty", "popup"] and _cooks(network) == [{"block": False}]
     else:
-        assert tab.events == ["dirty", "popup", "cookWarning"] + ["update"] * has_ui
-        assert ("Warning tab." if has_ui else "Warning tab, which may update late") in caplog.text
+        assert tab.events == ["dirty", "popup", "stop"] and _cooks(network) == []
+        assert tab.warned == [details] and tab.shown == []
 
 
-def test_a_refused_submit_sends_its_advisories_to_the_warning_tab(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_a_refused_submit_sends_its_advisories_to_the_warning_tab(scene: FakeHou) -> None:
     """A refused Submit showed only its refusals, so the advisory naming their cause was lost.
 
     With the working directory away from the scene, sim's $HIP output is refused, and the
-    scene-directory advisory must go on the Warning tab with one UI update for both tabs.
+    scene-directory advisory must go on the Warning tab in the same cook start as the error.
     """
     # The working directory is not the scene's folder, and sim writes under $HIP.
-    caplog.set_level("INFO")
     network: FakeNetwork = _network()
     network.scheduler_node.set_parm("working_dir", "/tmp/elsewhere")
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
@@ -728,11 +700,10 @@ def test_a_refused_submit_sends_its_advisories_to_the_warning_tab(
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     text: str = scene.messages.calls[-1][0]
     assert "sim:" in text and "outside the working directory" in text
-    (warning,) = [c[1] for c in tab.scheduler.calls if c[0] == "cookWarning"]
+    (warning,) = tab.warned
     assert warning.startswith(f"{os.environ['HIP']}: The scene is in ")
     assert "'/tmp/elsewhere'" in warning
-    assert tab.events == ["dirty", "cookError", "cookWarning", "popup", "update"]
-    assert "Sent Submit's error and advisories to" in caplog.text
+    assert tab.shown == [text] and tab.events == ["dirty", "stop", "popup"]
 
 
 _ALL: Tuple[str, ...] = ("wedge1", "sim", "render", "partition", "montage")
@@ -792,7 +763,7 @@ def test_a_generate_that_did_not_finish_stops_submit_on_the_popup_and_the_error_
     0.7 s after the generate returned, so with no error the empty items alone must stop it:
     every static step empty, or an empty step below an empty node, as a cancel leaves it. With
     no error the steps may also make nothing, so the popup names them and both causes. The
-    text also goes on the error tab, or the log says why not when PDG has no scheduler.
+    text also goes on the error tab, even when PDG has no scheduler, because the cook start makes one.
     """
     # The generate leaves the steps empty, and may set wedge1's error or lose the scheduler.
     network: FakeNetwork = _network()
@@ -821,13 +792,8 @@ def test_a_generate_that_did_not_finish_stops_submit_on_the_popup_and_the_error_
     assert text == expected
     assert buttons == () and _cooks(network) == []
     assert network.scheduler_node.generate_calls == []
-    # With the scheduler, the same text is on the tab. Without it, only the popup and the log.
-    if found:
-        assert tab.events == ["dirty", "cookError", "popup", "update"] and tab.shown == [text]
-        assert "Sent Submit's error to" in caplog.text
-    else:
-        assert tab.scheduler.calls == [] and scene.updates == 0
-        assert "Could not put the error on" in caplog.text
+    # With or without the scheduler, the same text is on the tab.
+    assert tab.events == ["dirty", "stop", "popup"] and tab.shown == [text]
 
 
 def test_an_error_on_a_node_the_display_node_does_not_cook_does_not_stop_submit(

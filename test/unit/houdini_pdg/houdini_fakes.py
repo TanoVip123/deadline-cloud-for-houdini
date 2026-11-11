@@ -211,6 +211,8 @@ class FakeNode:
         self.context: Any = None
         self.child_category: str = "Top"
         self.cook_calls: List[Dict[str, Any]] = []
+        #: The Submit stops each refused cook start took, by scheduler node path.
+        self.stop_cooks: List[Dict[str, Tuple[str, str]]] = []
         self.spare: List[FakeParm] = []
         self.display: Optional[FakeNode] = None
         self.cook_creates: Any = None
@@ -356,9 +358,20 @@ class FakeNode:
         self.work_item_calls.append(("dirty", remove_outputs))
 
     def cookWorkItems(self, **kwargs: Any) -> None:
+        # A waiting Submit stop is taken and the cook refused, as the scheduler's onStartCook does.
+        from deadline.houdini_pdg.houdini.host import submit_stops
+
+        if submit_stops:
+            self.stop_cooks.append(dict(submit_stops))
+            submit_stops.clear()
+            raise OperationFailed("Failed to start scheduler")
         self.cook_calls.append(kwargs)
         if self.cook_creates is not None and kwargs.get("tops_only"):
             self.context = self.cook_creates
+
+
+class OperationFailed(Exception):
+    """``hou.OperationFailed``, which a refused cook start raises."""
 
 
 class FakeHipFile:
@@ -464,6 +477,7 @@ def install_hou(monkeypatch: pytest.MonkeyPatch, hip_file: str) -> FakeHou:
             displayMessage=state.messages, triggerUpdate=state.trigger_update
         ),
         "isUIAvailable": lambda: state.ui,
+        "OperationFailed": OperationFailed,
         "fileReferences": lambda: list(state.file_references),
         "getenv": lambda name: os.environ.get(name),
         "nodeType": node_type,

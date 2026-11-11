@@ -1299,6 +1299,10 @@ def rebuild_layout_from_definition(node: Any) -> None:
 
 _CONFIRM_BUTTONS: Tuple[str, ...] = ("Submit", "Cancel")
 
+#: Submit's stop for each scheduler node by path, as (error, advisories), until the scheduler's
+#: ``onStartCook`` takes it. A module dict, so storing it doesn't mark the scene unsaved.
+submit_stops: Dict[str, Tuple[str, str]] = {}
+
 
 def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> bool:
     """Run the node's Submit. Return True when the cook started.
@@ -1306,39 +1310,44 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     First the unsaved-scene check, then the network's default scheduler, the farm,
     the node's tabs and any Service node, then a generate and every check on its items,
     then one confirmation, then a cook of the display node. Each step raises the problem
-    it finds, and one place shows it in a popup and on the node's error tab.
+    it finds, and one place shows it in a popup and, once the network has a PDG graph, on the
+    node's error tab.
     """
     from deadline.client.exceptions import UserInitiatedCancel
 
     read: Callable[[str], str] = get_setting or get_workstation_setting
-    # Set only for a Service refusal, after its dirty, or once the display node's generate
-    # finishes, because only those refusals go on the error tab. The others are popup only.
-    scheduler: Any = None
+    # Set once the network has a PDG graph, and from then on a stop goes on the node's tabs
+    # through a cook start. Before that, a cook could run on another scheduler or build the graph.
+    display: Any = None
+    context: Any = None
     try:
         # The save prompt comes first, so the artist answers it before anything else.
         prompt_to_save(node)
         network: Any = node.parent()
-        problem: str = _default_scheduler_problem(node, network) or farm_problem(read)
+        problem: str = _default_scheduler_problem(node, network)
         if problem:
             raise CookSetupError(problem)
-        display: Any = network.displayNode()
+        display = network.displayNode()
         if display is None:
             raise CookSetupError(
                 "The TOP network has no display node, so there is nothing to cook. Set one."
             )
-        # The node's tabs are read first, so a bad value is shown before anything is generated.
-        settings: SchedulerSettings = read_scheduler_settings(node)
-        requirements: Optional[Dict[str, Any]] = read_host_requirements(node)
-        inputs: List[Tuple[str, str]] = read_listed_inputs(node)
         # The graph context and the cook set for the quota check and the generate. The final
         # check reads the context and settings again, the same unless the generate changed them.
-        context: Any = _get_or_create_graph_context(node)
+        context = _get_or_create_graph_context(node)
         # Every check below reads the graph, so a network without one can't be judged.
         if context is None:
             raise CookSetupError(
                 "The TOP network has no PDG graph yet, so Submit can't check it. "
                 "Cook the network's TOP nodes once, then submit again."
             )
+        problem = farm_problem(read)
+        if problem:
+            raise CookSetupError(problem)
+        # The node's tabs are read next, so a bad value is shown before anything is generated.
+        settings: SchedulerSettings = read_scheduler_settings(node)
+        requirements: Optional[Dict[str, Any]] = read_host_requirements(node)
+        inputs: List[Tuple[str, str]] = read_listed_inputs(node)
         cook_set: Optional[FrozenSet[str]] = _find_cook_set(context, display)
         scheduler_name: str = _call(node, "getPDGNodeName") or node.name()
         graph_nodes: List[Any] = _graph_nodes(context)
@@ -1351,11 +1360,10 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             refusals=check_shape_quotas(infos).refusals + services.refusals
         )
         if before_generate.refusals and settings.validate_graph:
-            # A Service refusal also goes on the error tab. The dirty clears an earlier
-            # Submit's text from it, and unlike a generate it starts no PDG process.
+            # The dirty clears an earlier Submit's text from the tabs, and unlike a generate
+            # it starts no PDG process.
             if services.refusals:
                 display.dirtyAllWorkItems(False)
-                scheduler = _call(context, "schedulerForName", scheduler_name)
             raise GraphRefusedError(before_generate)
         # Generate the display node's items, so every check sees the job the cook would
         # submit, and stop at the first step that passes a task quota.
@@ -1376,8 +1384,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             _call(context, "removeEventHandler", handler)
         if over_quota:
             raise GraphRefusedError(over_quota[0])
-        # From here every stop goes on the error tab too, which the dirty above cleared.
-        scheduler = _call(context, "schedulerForName", scheduler_name)
+        scheduler: Any = _call(context, "schedulerForName", scheduler_name)
         # A canceled or failed generate still returns. Part of a graph can't be judged, so Submit stops.
         unfinished: str = _explain_unfinished_generate(graph_nodes, infos, cook_set)
         if unfinished:
@@ -1405,23 +1412,11 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             if isinstance(stopped, GraphRefusedError)
             else ""
         )
-        # The error tab keeps the text after the popup closes. The cookError comes first, so
-        # Houdini's UI handles the node's update while the popup is open.
-        if scheduler is not None:
-            _call(scheduler, "cookError", text)
-            if advisories:
-                _call(scheduler, "cookWarning", advisories)
+        # The tabs keep the text after the popup closes. The cook start comes first, because
+        # the popup waits for the artist.
+        if context is not None:
+            _show_on_node_tabs(node, display, text, advisories)
         _show(text)
-        if scheduler is None:
-            _logger.warning(
-                "Could not put the error on %s's error tab, because Submit stopped before "
-                "the display node's generate finished, or PDG has no scheduler for the node.",
-                node.path(),
-            )
-        elif advisories:
-            _update_node_tabs(node, "Submit's error and advisories", "error and Warning tabs")
-        else:
-            _update_node_tabs(node, "Submit's error", "error tab")
         return False
     counts: str = (
         f"Steps: {len(snapshot.steps)}, tasks: {snapshot.total_tasks}"
@@ -1441,9 +1436,8 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     confirmed: bool = _ask_to_confirm(node, settings, details, read, lines)
     if not confirmed:
         # The cook sends its own advisories to the Warning tab, so only a cancel sends them here.
-        if details and scheduler is not None:
-            _call(scheduler, "cookWarning", details)
-            _update_node_tabs(node, "Submit's advisories", "Warning tab")
+        if details:
+            _show_on_node_tabs(node, display, "", details)
         return False
     # The display node is what the network's own Cook button cooks.
     display.cookWorkItems(block=False)
@@ -1529,20 +1523,24 @@ def _default_scheduler_problem(node: Any, network: Any) -> str:
     )
 
 
-def _update_node_tabs(node: Any, sent: str, tab: str) -> None:
-    """Ask Houdini's UI to update, so the node shows what Submit sent to its ``tab``.
+def _show_on_node_tabs(node: Any, display: Any, error: str, advisories: str) -> None:
+    """Put Submit's stop on the scheduler node's error and Warning tabs.
 
-    PDG shows a ``cookError`` or ``cookWarning`` only once the UI updates. A generate would
-    also show it, but it can start PDG's processes. hython has no UI to update.
+    PDG keeps a message sent inside a cook, so Submit starts a cook of the display node, and
+    the scheduler's ``onStartCook`` sends ``error`` and ``advisories`` and refuses the cook.
     """
-    if hou.isUIAvailable():
-        # A failed update only delays the tab, so it's logged and Submit goes on.
-        _call(hou.ui, "triggerUpdate")
-        _logger.info("Sent %s to %s's %s.", sent, node.path(), tab)
-    else:
-        _logger.info(
-            "Sent %s to %s's %s, which may update late with no UI.", sent, node.path(), tab
-        )
+    submit_stops[node.path()] = (error, advisories)
+    try:
+        display.cookWorkItems(block=False)
+    except hou.OperationFailed:
+        # PDG raises this at once when onStartCook refuses the cook, as it does here.
+        pass
+    finally:
+        # A stop left here would refuse the artist's next TOP Cook, so it goes either way.
+        if submit_stops.pop(node.path(), None) is not None:
+            _logger.warning(
+                "The scheduler didn't take Submit's stop, so %s's tabs don't show it.", node.path()
+            )
 
 
 def _ask_to_confirm(

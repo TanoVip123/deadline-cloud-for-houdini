@@ -43,6 +43,7 @@ from deadline.houdini_pdg.houdini.host import (
     cook_set_names,
     run_pre_cook_checks,
     show_error_popup,
+    submit_stops,
 )
 from deadline.houdini_pdg.houdini.readers import declared_files
 from deadline.houdini_pdg.houdini.settings import SchedulerSettings
@@ -144,6 +145,16 @@ class DeadlineCloudPDGScheduler(PyScheduler):
         try:
             # One host per cook, so the scene files are scanned once per cook.
             host: HoudiniPdgHost = HoudiniPdgHost(self)
+            # A stopped Submit starts this cook only to put its stop on the node's tabs, because
+            # PDG keeps a message sent inside a cook. Submit shows the popup itself.
+            stop: Optional[Tuple[str, str]] = submit_stops.pop(host.scheduler_node().path(), None)
+            if stop is not None:
+                error, advisories = stop
+                if error:
+                    self.cookError(error)
+                if advisories:
+                    host.show_warning(advisories)
+                return False
             # Houdini starts a generate with static False, and says so in the cook options.
             generate: bool = static or _is_generate(self.context)
             names: Optional[FrozenSet[str]] = cook_set_names(cook_set)
