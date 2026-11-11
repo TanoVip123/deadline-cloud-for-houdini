@@ -196,6 +196,9 @@ class FakeHost:
     def failure_reason(self, item_id: int) -> Tuple[str, str]:
         raise AssertionError("The submitter does not read work item logs.")
 
+    def show_warning(self, text: str) -> None:
+        raise AssertionError("The submitter does not warn on the node.")
+
 
 class FakeCreateJob:
     """Records each call, then returns ``result`` or raises ``error``."""

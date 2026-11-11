@@ -374,10 +374,11 @@ class _ErrorTab:
         self._read: int = 0
         scene.messages.on_show = lambda: self.events.append("popup")
         scene.on_update = self._update
-        # Record the dirty, which clears the tab, and each cookError, in the order they run.
+        # Record the dirty, which clears the tab, and each cookError and cookWarning, in order.
         display: Any = network.topnet.displayNode()
         dirty: Any = display.dirtyAllWorkItems
         cook_error: Any = self.scheduler.cookError
+        cook_warning: Any = self.scheduler.cookWarning
 
         def dirty_and_clear(remove_outputs: bool) -> None:
             dirty(remove_outputs)
@@ -388,8 +389,13 @@ class _ErrorTab:
             cook_error(message)
             self.events.append("cookError")
 
+        def record_cook_warning(message: str) -> None:
+            cook_warning(message)
+            self.events.append("cookWarning")
+
         display.dirtyAllWorkItems = dirty_and_clear
         self.scheduler.cookError = record_cook_error
+        self.scheduler.cookWarning = record_cook_warning
 
     def _update(self) -> None:
         """Show every cookError made since the last update, as Houdini's UI update does."""
@@ -431,7 +437,8 @@ def test_a_refusal_stays_on_the_error_tab_until_the_fixed_scenes_next_submit(
     # Fix render and Submit again.
     network.node("render").hom.remove_parm("pdg_cooktype")
     assert submit(network.scheduler_node, get_setting=_workstation) is True
-    assert tab.shown == []
+    # With no advisory, the fixed Submit sends no warning and asks for no UI update.
+    assert tab.shown == [] and scene.updates == 1
 
 
 def test_a_cancel_at_the_save_prompt_leaves_the_error_tab_as_it_was(scene: FakeHou) -> None:
@@ -631,3 +638,28 @@ def test_in_the_ui_a_stop_before_the_display_generate_finishes_skips_the_error_t
     assert scene.updates == 0 and tab.shown == []
     assert caplog.text.count("Could not put the error on") == 2
     assert "Sent Submit's error to" not in caplog.text
+
+
+@pytest.mark.parametrize("has_ui", [True, False], ids=["ui", "hython"])
+def test_submits_advisories_go_on_the_warning_tab_before_the_confirmation(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture, has_ui: bool
+) -> None:
+    """An advisory showed only under Show Details, so it was gone once the confirmation closed.
+
+    One cookWarning with the details' text comes before the confirmation, and the UI update
+    after it shows the warning. hython has no UI, so the log says the tab may update late.
+    """
+    # Validation is off, so an In-Process render step is an advisory, found after the generate.
+    caplog.set_level("INFO")
+    scene.ui = has_ui
+    network: FakeNetwork = _network()
+    network.scheduler_node.set_parm("validate_graph", 0)
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    tab: _ErrorTab = _ErrorTab(network, scene)
+    network.node("render").hom.set_parm("pdg_cooktype", 1)
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    details: str = scene.messages.options[-1]["details"]
+    assert details.startswith("render: ")
+    assert [c for c in tab.scheduler.calls if c[0] == "cookWarning"] == [("cookWarning", details)]
+    assert tab.events == ["dirty", "cookWarning", "popup"] + ["update"] * has_ui
+    assert ("Warning tab." if has_ui else "Warning tab, which may update late") in caplog.text

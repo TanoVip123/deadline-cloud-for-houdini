@@ -298,6 +298,9 @@ class FakeHost:
     def host_requirements(self) -> Optional[Dict[str, Any]]:
         return None
 
+    def show_warning(self, text: str) -> None:
+        self.events("show_warning", text)
+
     def pending_generation(self) -> Sequence[str]:
         # Each queued answer is used once: names, or an error to raise.
         self.events("pending_generation")
@@ -1177,7 +1180,10 @@ def test_a_refused_graph_uploads_nothing_and_creates_no_job(found: Set[str], lat
 def test_with_validation_off_a_refused_graph_is_submitted_and_each_refusal_is_logged(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """An artist who turns validation off still sees what each check found, as a warning."""
+    """An artist who turns validation off still sees what each check found, as a warning.
+
+    The log alone was easy to miss, so the node's Warning tab gets every advisory in one message.
+    """
     # Two refusals, with validation turned off.
     h: Harness = Harness(nodes=refused("dynamic", "other scheduler"), validate_graph=False)
     with caplog.at_level(logging.WARNING, logger=PACKAGE_LOGGER):
@@ -1185,6 +1191,9 @@ def test_with_validation_off_a_refused_graph_is_submitted_and_each_refusal_is_lo
     assert h.events.count("submit") == 1
     assert "a (dynamic_node): Not refused, because graph validation is off." in caplog.text
     assert "b (multiple_schedulers): Not refused" in caplog.text
+    (warning,) = h.events.details("show_warning")
+    assert warning.startswith("a: Not refused, because graph validation is off.")
+    assert "\n\nb: Not refused" in warning
     assert "Refused," not in caplog.text
     h.scheduler.on_stop_cook(False)
     assert h.summary().refusals == ()

@@ -33,7 +33,8 @@ check that fails starts nothing and creates no job.
   The scheduler refuses the cook if the scene has never been saved or has
   unsaved changes, or if a node's Cook Type is Service. A Service node is
   refused before PDG starts its service processes, and PDG then says "Failed to
-  start scheduler", with the reason on this node's error tab. The cook uses
+  start scheduler", with the reason on this node's error tab. Any warning the
+  checks find goes on this node's Warning tab. The cook uses
   the work items PDG already has, so after you change a parm on a SOP outside
   the TOP network, dirty the network or click __Generate__ before you cook, or
   use __Submit__, which does that itself.
@@ -46,8 +47,9 @@ check that fails starts nothing and creates no job.
   stops generating as soon as a step or the job has more tasks than Deadline
   Cloud allows. Then it shows the job's farm, queue, name, priority, working
   directory, step and task counts, host requirements, and extra attachments,
-  and any warnings. Click __Submit__ there, and the TOP network's
-  display node cooks in the background. The job uses the settings on this
+  and any warnings, which also go on this node's Warning tab. Click
+  __Submit__ there, and the TOP network's display node cooks in the
+  background. The job uses the settings on this
   node, and Submit doesn't change them, except that Always Save turns on
   automatic saving. When a check fails, Submit shows why in a popup. When the
   check that fails runs on the work items Submit generated, Submit also puts

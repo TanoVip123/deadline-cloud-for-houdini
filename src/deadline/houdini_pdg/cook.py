@@ -21,7 +21,7 @@ from types import MappingProxyType
 from typing import AbstractSet, Callable, Dict, FrozenSet, List, Mapping, Optional, Set, Tuple
 
 from .diagnostics import CookJournal
-from .errors import GraphRefusedError, QuotaExceededError
+from .errors import GraphRefusedError, QuotaExceededError, format_advisories
 from .graph import (
     PDG_DIR_TOKEN,
     DeclaredFile,
@@ -909,12 +909,14 @@ class Cook:
             else environment_with_hip(self._host.scene_files().hip_file)
         )
 
-    @staticmethod
-    def _log_validation_verdict(verdict: Verdict) -> None:
+    def _log_validation_verdict(self, verdict: Verdict) -> None:
+        # Each advisory is logged, and all of them go on the node's Warning tab as one message.
         for advisory in verdict.advisories:
             _logger.warning(
                 "%s (%s): %s", advisory.subject, advisory.scenario.value, advisory.detail
             )
+        if verdict.advisories:
+            self._host.show_warning(format_advisories(verdict.advisories))
         for refusal in verdict.refusals:
             _logger.error(
                 "Refused, %s (%s): %s %s",

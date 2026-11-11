@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import List, Sequence
 
-from .validation import Refusal, Verdict
+from .validation import Advisory, Refusal, Verdict
 
 
 class PDGSchedulerError(Exception):
@@ -39,6 +39,11 @@ def format_refusals(refusals: Sequence[Refusal]) -> str:
     """The refusals as one header line, then one "- subject: detail remedy" line each."""
     lines: List[str] = [f"- {r.subject}: {r.detail} {r.remedy}" for r in refusals]
     return "\n".join([f"The graph was refused ({len(lines)} refusal(s)):"] + lines)
+
+
+def format_advisories(advisories: Sequence[Advisory]) -> str:
+    """The advisories as "subject: detail" paragraphs, or ``""`` when there are none."""
+    return "\n\n".join(f"{a.subject}: {a.detail}" for a in advisories)
 
 
 class TaskMapIncompleteError(PDGSchedulerError):

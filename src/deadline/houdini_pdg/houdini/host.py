@@ -33,7 +33,13 @@ from typing import (
 import hou  # type: ignore[import-not-found]
 import pdg  # type: ignore[import-not-found]
 
-from ..errors import CookSetupError, GraphRefusedError, PayloadTransferError, format_refusals
+from ..errors import (
+    CookSetupError,
+    GraphRefusedError,
+    PayloadTransferError,
+    format_advisories,
+    format_refusals,
+)
 from ..graph import GraphSnapshot, NodeInfo, find_ancestors_among, synthesize
 from ..ports import ItemOutcome, ItemState, SceneFiles, T, WorkItemHandle
 from ..submitter import farm_problem, get_workstation_setting
@@ -281,6 +287,10 @@ class HoudiniPdgHost:
         """The node's Host Requirements tab as the job's block, or None for any worker."""
         node: Any = self.scheduler_node()
         return self.on_main_thread(lambda: read_host_requirements(node))
+
+    def show_warning(self, text: str) -> None:
+        """Add ``text`` to the scheduler node's Warning tab with PDG's ``cookWarning``."""
+        _call(self._scheduler, "cookWarning", text)
 
     def read_settings(self) -> SchedulerSettings:
         """The cook's settings, from the scheduler node's parms."""
@@ -1383,22 +1393,14 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         if scheduler is not None:
             _call(scheduler, "cookError", text)
         _show(text)
-        # PDG shows a cookError only once Houdini's UI updates, so Submit asks for that update
-        # rather than a generate, which can start PDG's processes. hython has no UI to update.
         if scheduler is None:
             _logger.warning(
                 "Could not put the error on %s's error tab, because Submit stopped before "
                 "the display node's generate finished, or PDG has no scheduler for the node.",
                 node.path(),
             )
-        elif hou.isUIAvailable():
-            hou.ui.triggerUpdate()
-            _logger.info("Sent Submit's error to %s's error tab.", node.path())
         else:
-            _logger.info(
-                "Sent Submit's error to %s's error tab, which may update late with no UI.",
-                node.path(),
-            )
+            _update_node_tabs(node, "Submit's error", "error tab")
         return False
     counts: str = (
         f"Steps: {len(snapshot.steps)}, tasks: {snapshot.total_tasks}"
@@ -1414,7 +1416,14 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         else "Extra attachments: none"
     )
     lines: List[str] = [counts, _describe_host_requirements(requirements), attached]
-    if not _ask_to_confirm(node, settings, verdict, read, lines):
+    # The advisories also go on the Warning tab, which keeps them after the confirmation closes.
+    details: str = format_advisories(verdict.advisories)
+    if details and scheduler is not None:
+        _call(scheduler, "cookWarning", details)
+    confirmed: bool = _ask_to_confirm(node, settings, details, read, lines)
+    if details and scheduler is not None:
+        _update_node_tabs(node, "Submit's advisories", "Warning tab")
+    if not confirmed:
         return False
     # The display node is what the network's own Cook button cooks.
     display.cookWorkItems(block=False)
@@ -1455,14 +1464,29 @@ def _default_scheduler_problem(node: Any, network: Any) -> str:
     )
 
 
+def _update_node_tabs(node: Any, sent: str, tab: str) -> None:
+    """Ask Houdini's UI to update, so the node shows what Submit sent to its ``tab``.
+
+    PDG shows a ``cookError`` or ``cookWarning`` only once the UI updates. A generate would
+    also show it, but it can start PDG's processes. hython has no UI to update.
+    """
+    if hou.isUIAvailable():
+        hou.ui.triggerUpdate()
+        _logger.info("Sent %s to %s's %s.", sent, node.path(), tab)
+    else:
+        _logger.info(
+            "Sent %s to %s's %s, which may update late with no UI.", sent, node.path(), tab
+        )
+
+
 def _ask_to_confirm(
     node: Any,
     settings: SchedulerSettings,
-    verdict: Verdict,
+    details: str,
     read: Callable[[str], str],
     extra: List[str],
 ) -> bool:
-    """Show what will be submitted, with any advisory, and return whether the artist chose Submit."""
+    """Show what will be submitted, with the advisories in ``details``, and return whether the artist chose Submit."""
     # The job as it will be submitted, then any warnings in the details.
     lines: List[str] = [
         f"Farm: {read('defaults.farm_id')}",
@@ -1472,7 +1496,6 @@ def _ask_to_confirm(
         f"Working directory: {settings.working_dir}",
         *extra,
     ]
-    details: str = "\n\n".join(f"{a.subject}: {a.detail}" for a in verdict.advisories)
     choice: int = hou.ui.displayMessage(
         "Submit this TOP network to Deadline Cloud?\n\n" + "\n".join(lines),
         title=_TITLE,

@@ -146,6 +146,13 @@ def test_a_failed_item_is_reported_failed(scene: FakeHou) -> None:
     assert scheduler.calls == [("onWorkItemFailed", 7, -1)]
 
 
+def test_a_warning_goes_to_pdg_as_one_cook_warning(scene: FakeHou) -> None:
+    """The cook's advisories reach the node's Warning tab only through PDG's cookWarning."""
+    scheduler: FakePyScheduler = build_network(PYRO_BONFIRE).scheduler()
+    HoudiniPdgHost(scheduler).show_warning("render: advisory")
+    assert scheduler.calls == [("cookWarning", "render: advisory")]
+
+
 def _host_with_item_log(log: Any) -> HoudiniPdgHost:
     """A host whose PDG graph holds work item 7, with ``log`` as its log."""
     network: FakeNetwork = build_network(PYRO_BONFIRE)

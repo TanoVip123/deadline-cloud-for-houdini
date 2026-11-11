@@ -70,6 +70,9 @@ class FakePyScheduler:
     def cookError(self, message: str) -> None:
         self.calls.append(("cookError", message))
 
+    def cookWarning(self, message: str) -> None:
+        self.calls.append(("cookWarning", message))
+
     def onWorkItemStartCook(self, *args: Any) -> None:
         self.calls.append(("onWorkItemStartCook",) + args)
 

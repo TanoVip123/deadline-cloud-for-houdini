@@ -285,6 +285,10 @@ class PdgHost(Protocol):
         """The job's host requirements block, or None when any worker may run it."""
         ...
 
+    def show_warning(self, text: str) -> None:
+        """Add ``text`` to the scheduler node's Warning tab. Never raises."""
+        ...
+
     def on_main_thread(self, read: Callable[[], T]) -> T:
         """Run ``read`` where it may use ``hou``, and return its result or raise its error."""
         ...
