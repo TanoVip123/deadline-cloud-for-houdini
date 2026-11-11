@@ -160,8 +160,8 @@ class DeadlineCloudPDGScheduler(PyScheduler):
                     time.monotonic() - stop[0],
                 )
                 stop = None
-            # Send the stop to the node's tabs and refuse the cook. Submit already showed the popup.
             if stop is not None:
+                # Send the stop to the node's tabs and refuse the cook. Submit showed the popup.
                 _logger.info("Took Submit's stop for %s in onStartCook", path)
                 _, error, advisories = stop
                 if error:
