@@ -56,7 +56,9 @@ check that fails starts nothing and creates no job.
   automatic saving. When a check fails, Submit shows why in a popup. When the
   check that fails runs on the work items Submit generated, Submit also puts
   the same text on this node's error tab, and any warnings on its Warning
-  tab, so you can read them again while you fix the scene. A node whose Cook Type is Service is refused before that
+  tab, so you can read them again while you fix the scene. The red error
+  badge appears at your next click in the network editor. A node whose Cook
+  Type is Service is refused before that
   generate, because the generate would start its service processes. Its text
   also goes on the error tab once PDG has this scheduler from an earlier
   generate in the session. Any other problem found before that generate

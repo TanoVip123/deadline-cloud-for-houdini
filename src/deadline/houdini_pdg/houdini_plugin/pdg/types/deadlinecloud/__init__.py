@@ -42,7 +42,6 @@ from deadline.houdini_pdg.houdini.host import (
     SUBMIT_STOP_MAX_AGE,
     HoudiniPdgHost,
     cook_set_names,
-    redraw_network_editors,
     run_pre_cook_checks,
     show_error_popup,
     submit_stops,
@@ -168,10 +167,6 @@ class DeadlineCloudPDGScheduler(PyScheduler):
                     self.cookError(error)
                 if advisories:
                     host.show_warning(advisories)
-                # Queued, so it runs once PDG's events from this refusal have reached the node.
-                import hdefereval  # type: ignore[import-not-found]
-
-                hdefereval.executeDeferred(lambda: redraw_network_editors(path))
                 _logger.info("Refused the cook start to show Submit's stop on %s's tabs", path)
                 return False
             # Houdini starts a generate with static False, and says so in the cook options.

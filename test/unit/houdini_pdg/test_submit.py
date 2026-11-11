@@ -596,42 +596,6 @@ def test_each_refused_submit_shows_its_own_text_on_the_error_tab(scene: FakeHou)
     assert network.scheduler_node.generate_calls == []
 
 
-@pytest.mark.skip(reason="Submit no longer asks the UI to update, so hython and the UI match.")
-@pytest.mark.parametrize("cook_type", [1, 3], ids=["in-process", "service"])
-def test_in_hython_the_error_is_sent_to_the_tab_with_no_ui_update(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture, cook_type: int
-) -> None:
-    """hython has no ``hou.ui`` to update, so the update is skipped and the log says why."""
-    # PDG has the scheduler, and render is an In-Process step or a Service node.
-    caplog.set_level("INFO")
-    scene.ui = False
-    network: FakeNetwork = _network()
-    _generated(network, {"sim": 1, "render": 1, "montage": 1})
-    tab: _ErrorTab = _ErrorTab(network, scene)
-    network.node("render").hom.set_parm("pdg_cooktype", cook_type)
-    assert submit(network.scheduler_node, get_setting=_workstation) is False
-    assert "cookError" in tab.events and scene.updates == 0
-    assert network.scheduler_node.generate_calls == []
-    assert "error tab, which may update late with no UI." in caplog.text
-
-
-@pytest.mark.skip(reason="Submit no longer asks the UI to update.")
-def test_a_failed_ui_update_does_not_make_submit_raise(scene: FakeHou) -> None:
-    """The update only redraws the tab, so a raise from it must not escape the Submit button."""
-    # render is an In-Process step, which is refused, and Houdini's UI update raises.
-    network: FakeNetwork = _network()
-    _generated(network, {"sim": 1, "render": 1, "montage": 1})
-    tab: _ErrorTab = _ErrorTab(network, scene)
-    network.node("render").hom.set_parm("pdg_cooktype", 1)
-
-    def fail() -> None:
-        raise RuntimeError("The UI is closing.")
-
-    scene.on_update = fail
-    assert submit(network.scheduler_node, get_setting=_workstation) is False
-    assert tab.events == ["dirty", "cookError", "popup"] and scene.updates == 1
-
-
 def test_a_stop_before_or_during_the_display_generate_goes_on_the_error_tab(
     scene: FakeHou,
 ) -> None:
