@@ -753,6 +753,39 @@ def test_scene_reads_from_a_pdg_thread_run_on_the_main_thread(
     assert len(ran_on) >= 4 and set(ran_on) == {"pdg"}
 
 
+def test_the_generation_wait_reads_generate_when_on_the_main_thread(
+    scene: FakeHou, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without PDG's dynamic flag, as on Houdini 19.5, the wait reads each node's parms.
+
+    That read from PDG's thread would crash Houdini while its UI runs.
+    """
+    # An ``hdefereval.executeInMainThreadWithResult`` that records the thread it was called from.
+    ran_on: List[str] = []
+
+    def record_thread(function: Callable[..., Any], *args: Any) -> Any:
+        ran_on.append(threading.current_thread().name)
+        return function(*args)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "hdefereval",
+        types.SimpleNamespace(executeInMainThreadWithResult=record_thread),
+    )
+    # Hide the flag on every node, then ask for the pending steps from a PDG thread.
+    host, network = _start_watching_host()
+    for node in network.pdg_nodes:
+        node.__class__ = _PdgNodeWithoutDynamicFlag
+    pending: List[Sequence[str]] = []
+    worker: threading.Thread = threading.Thread(
+        target=lambda: pending.append(host.pending_generation()), name="pdg"
+    )
+    worker.start()
+    worker.join()
+    assert pending == [("montage", "render", "sim")]
+    assert ran_on == ["pdg"]
+
+
 # -- pre-cook checks ----------------------------------------------------------
 
 

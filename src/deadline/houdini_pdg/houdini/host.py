@@ -221,11 +221,11 @@ class HoudiniPdgHost:
         # A node generated before this cook may not announce itself again. Once
         # PDG queues one of its items, its generation is done.
         # A dynamic node generates only once its upstream items cook, which the
-        # wait holds back. PDG flags the nodes below one as dynamic too.
+        # wait holds back. Without PDG's flag this reads ``hou``, so on the main thread.
         nodes: Dict[str, Any] = {
             _name(node): node for node in _graph_nodes(self._scheduler.context)
         }
-        dynamic: Set[str] = readers._find_dynamic_nodes(nodes)
+        dynamic: Set[str] = self.on_main_thread(lambda: readers._find_dynamic_nodes(nodes))
         started: Set[str] = {
             name
             for name, node in nodes.items()
