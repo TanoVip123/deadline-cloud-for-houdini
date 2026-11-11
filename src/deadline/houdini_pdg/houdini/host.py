@@ -1345,9 +1345,9 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
                 "The TOP network has no PDG graph yet, so Submit can't check it. "
                 "Cook the network's TOP nodes once, then submit again."
             )
-        problem = farm_problem(read)
-        if problem:
-            raise CookSetupError(problem)
+        farm: str = farm_problem(read)
+        if farm:
+            raise CookSetupError(farm)
         # The node's tabs are read next, so a bad value is shown before anything is generated.
         settings: SchedulerSettings = read_scheduler_settings(node)
         requirements: Optional[Dict[str, Any]] = read_host_requirements(node)
