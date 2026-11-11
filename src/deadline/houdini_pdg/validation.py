@@ -967,7 +967,7 @@ def _is_command_server(node: NodeInfo) -> bool:
     return node.node_type_name in _COMMAND_SERVERS
 
 
-def _check_service_nodes(ctx: ValidationContext) -> Verdict:
+def check_service_nodes(ctx: ValidationContext) -> Verdict:
     """Refuse a Service node, and a command server whatever its cook type says.
 
     A command server left on Out-of-Process still becomes a step whose task holds
@@ -1523,7 +1523,7 @@ _CHECKS: Tuple[Tuple[RefusalScenario, Callable[[ValidationContext], Verdict]], .
     (RefusalScenario.STEP_WITHOUT_ITEMS, _check_steps_without_items),
     (RefusalScenario.IN_PROCESS_STEP, _check_in_process_steps),
     (RefusalScenario.IN_PROCESS_NODE, _check_non_step_file_use),
-    (RefusalScenario.SERVICE_NODE, _check_service_nodes),
+    (RefusalScenario.SERVICE_NODE, check_service_nodes),
     (RefusalScenario.MULTIPLE_SCHEDULERS, _check_schedulers),
     (RefusalScenario.OUTPUT_OUTSIDE_COOK, _check_undeliverable_outputs),
     (RefusalScenario.OUTPUT_OUTSIDE_COOK, _check_unportable_paths),

@@ -793,12 +793,12 @@ class _ErrorTab:
 
 
 def _refused_on_the_tab(scene: FakeHou) -> Tuple[FakeNetwork, _ErrorTab, str]:
-    """Submit a network whose render step is a Service step, which is refused, and return its popup text."""
-    # PDG has the scheduler from an earlier generate, and render becomes a Service step.
+    """Submit a network whose render step is an In-Process step, which is refused, and return its popup text."""
+    # PDG has the scheduler from an earlier generate, and render becomes an In-Process step.
     network: FakeNetwork = _network()
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
     tab: _ErrorTab = _ErrorTab(network)
-    network.node("render").hom.set_parm("pdg_cooktype", 3)
+    network.node("render").hom.set_parm("pdg_cooktype", 1)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     return network, tab, scene.messages.calls[-1][0]
 
@@ -859,6 +859,32 @@ def test_a_stop_before_the_dirty_leaves_the_scheduler_node_alone(
     assert tab.hung is False and "error tab" in caplog.text
 
 
+def test_a_service_node_is_refused_before_the_dirty_from_its_cook_type_parm(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The display node's generate starts PDG's service processes for a Service node, and was slow to refuse.
+
+    PDG keeps the last generate's cook type, so the parm must decide. Only the popup shows.
+    """
+    # PDG still says Out-of-Process from an earlier generate, and the artist sets render to Service.
+    network: FakeNetwork = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    tab: _ErrorTab = _ErrorTab(network)
+    network.node("render").cookType = "OutOfProcess"
+    network.node("render").hom.set_parm("pdg_cooktype", 3)
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert scene.messages.calls[-1][0] == (
+        "The cook can't start.\n\nThe graph was refused (1 refusal(s)):\n- render: This node's "
+        "work items cook in a long-running service process, which this scheduler does not "
+        "start. Set the node's 'pdg_cooktype' parm to Out Of Process, or cook this network "
+        "with another scheduler."
+    )
+    # Nothing was dirtied or generated, and the scheduler node was left alone.
+    display: Any = network.topnet.displayNode()
+    assert display.work_item_calls == [] and network.scheduler_node.generate_calls == []
+    assert tab.scheduler.calls == [] and "Could not put the error on" in caplog.text
+
+
 def test_a_quota_stop_during_the_display_generate_leaves_the_scheduler_node_alone(
     scene: FakeHou, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -895,9 +921,9 @@ def test_with_no_scheduler_after_the_generate_only_the_popup_shows(
 
     The log must say why the tab is empty, and nothing is generated on the scheduler node.
     """
-    # PDG names no scheduler, and render is a Service step, which is refused after the generate.
+    # PDG names no scheduler, and render is an In-Process step, which is refused after the generate.
     network: FakeNetwork = _network()
-    network.node("render").hom.set_parm("pdg_cooktype", 3)
+    network.node("render").hom.set_parm("pdg_cooktype", 1)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     assert "The cook can't start." in scene.messages.calls[0][0]
     display: Any = network.topnet.displayNode()
@@ -914,18 +940,18 @@ def test_in_the_ui_each_refused_submit_shows_its_own_text_on_the_error_tab(
     Submit runs on the main thread, so the popup is its one chance to do that. A cookError
     made after the popup left the tab empty, and the next Submit showed the previous text.
     """
-    # PDG has the scheduler, and render is a Service step, which is refused after the generate.
+    # PDG has the scheduler, and render is an In-Process step, which is refused after the generate.
     caplog.set_level("INFO")
     network: FakeNetwork = _network()
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
     tab: _ErrorTab = _ErrorTab(network, gui=scene)
-    network.node("render").hom.set_parm("pdg_cooktype", 3)
+    network.node("render").hom.set_parm("pdg_cooktype", 1)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     first: str = scene.messages.calls[-1][0]
     assert tab.shown == [first] and tab.hung is False
-    assert "Put Submit's error on /obj/topnet1/deadlinecloudscheduler1's error tab." in caplog.text
+    assert "Sent Submit's error to /obj/topnet1/deadlinecloudscheduler1's error tab." in caplog.text
     # A second refusal with different text replaces the first on the tab.
-    network.node("montage").hom.set_parm("pdg_cooktype", 3)
+    network.node("montage").hom.set_parm("pdg_cooktype", 1)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     second: str = scene.messages.calls[-1][0]
     assert second != first and tab.shown == [second] and tab.hung is False
@@ -963,4 +989,4 @@ def test_in_the_ui_a_stop_before_the_display_generate_finishes_skips_the_error_t
     assert network.scheduler_node.generate_calls == [] and tab.scheduler.calls == []
     assert tab.hung is False and tab.shown == []
     assert caplog.text.count("Could not put the error on") == 2
-    assert "Put Submit's error on" not in caplog.text
+    assert "Sent Submit's error to" not in caplog.text

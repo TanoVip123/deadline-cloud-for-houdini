@@ -54,6 +54,7 @@ from ..validation import (
     check_cook_set_has_steps,
     environment_with_hip,
     check_generated_counts,
+    check_service_nodes,
     check_shape_quotas,
     validate,
     waived,
@@ -1257,10 +1258,10 @@ _CONFIRM_BUTTONS: Tuple[str, ...] = ("Submit", "Cancel")
 def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> bool:
     """Run the node's Submit. Return True when the cook started.
 
-    First the unsaved-scene check, then the network's default scheduler, the farm
-    and the node's tabs, then a generate and every check on its items, then one confirmation,
-    then a cook of the display node. Each step raises the problem it finds, and
-    one place shows it in a popup and on the node's error tab.
+    First the unsaved-scene check, then the network's default scheduler, the farm,
+    the node's tabs and any Service node, then a generate and every check on its items,
+    then one confirmation, then a cook of the display node. Each step raises the problem
+    it finds, and one place shows it in a popup and on the node's error tab.
     """
     from deadline.client.exceptions import UserInitiatedCancel
 
@@ -1294,13 +1295,29 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
                 "Cook the network's TOP nodes once, then submit again."
             )
         cook_set: Optional[FrozenSet[str]] = _find_cook_set(context, display)
-        # A job shape over a quota is known from the wires, so nothing is generated for
-        # it, unless the artist turned validation off.
-        shape: Verdict = check_shape_quotas(
-            readers.node_infos(_graph_nodes(context), None, cook_set)
+        graph_nodes: List[Any] = _graph_nodes(context)
+        infos: Tuple[NodeInfo, ...] = readers.node_infos(graph_nodes, None, cook_set)
+        # A Service node's generate starts PDG's service processes, so it's refused first. PDG
+        # keeps the last generate's cook type, so each node's own Cook Type parm is read.
+        homs: Dict[str, Any] = _top_nodes(graph_nodes)
+        services: Verdict = check_service_nodes(
+            ValidationContext(
+                nodes=tuple(
+                    dataclasses.replace(
+                        info, cook_type=readers._cook_type(None, homs.get(info.name))
+                    )
+                    for info in infos
+                ),
+                snapshot=GraphSnapshot(steps=()),
+            )
         )
-        if shape.refusals and settings.validate_graph:
-            raise GraphRefusedError(shape)
+        # A job shape over a quota is known from the wires, so nothing is generated for
+        # it either. Both stops wait unless the artist turned validation off.
+        before_generate: Verdict = Verdict(
+            refusals=check_shape_quotas(infos).refusals + services.refusals
+        )
+        if before_generate.refusals and settings.validate_graph:
+            raise GraphRefusedError(before_generate)
         # Generate the display node's items, so every check sees the job the cook would
         # submit, and stop at the first step that passes a task quota.
         over_quota: List[Verdict] = []
@@ -1353,7 +1370,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             )
         else:
             _call(node, "generateStaticWorkItems", True)
-            _logger.info("Put Submit's error on %s's error tab.", node.path())
+            _logger.info("Sent Submit's error to %s's error tab.", node.path())
         return False
     counts: str = (
         f"Steps: {len(snapshot.steps)}, tasks: {snapshot.total_tasks}"
