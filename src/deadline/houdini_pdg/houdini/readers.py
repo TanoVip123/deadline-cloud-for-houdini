@@ -98,6 +98,7 @@ def node_infos(
     # One NodeInfo per topology node. Its wiring comes from the TOP network, and
     # from the items' dependencies only when no network could be read.
     infos: List[NodeInfo] = []
+    dynamic: Set[str] = _find_dynamic_nodes(pdg_nodes)
     for name in sorted(pdg_nodes):
         pdg_node: Any = pdg_nodes[name]
         hom: Any = _call(pdg_node, "topNode")
@@ -110,7 +111,7 @@ def node_infos(
         infos.append(
             NodeInfo(
                 name=name,
-                is_dynamic=bool(_attr(pdg_node, "isDynamic", False)),
+                is_dynamic=name in dynamic,
                 top_type=_enum_name(_attr(pdg_node, "nodeType", "")),
                 upstream=tuple(sorted(upstream - {name})),
                 items=tuple(items.get(name, ())),
@@ -492,6 +493,31 @@ def _dynamic_by_parm(hom: Any) -> Optional[bool]:
     except Exception:
         return None
     return _GENERATE_WHEN.get(label)
+
+
+def _find_dynamic_nodes(pdg_nodes: Mapping[str, Any]) -> Set[str]:
+    """The names of the nodes PDG generates while the cook runs.
+
+    Houdini 19.5's ``pdg.Node`` has no ``isDynamic``. There a node is dynamic when
+    its own Generate When says so or a dynamic node is wired above it.
+    """
+    # PDG's own flag decides where the node has one. None marks a node without it.
+    flags: Dict[str, Optional[bool]] = {
+        name: _attr(node, "isDynamic", None) for name, node in pdg_nodes.items()
+    }
+    dynamic: Set[str] = {name for name, flag in flags.items() if flag}
+    unknown: Set[str] = {name for name, flag in flags.items() if flag is None}
+    if not unknown:
+        return dynamic
+    # Without the flag, a node's Generate When decides, and PDG flags every node
+    # below a dynamic one, so the flag spreads down the wires until nothing changes.
+    dynamic |= {name for name in unknown if _dynamic_by_parm(_call(pdg_nodes[name], "topNode"))}
+    wiring: Dict[str, Set[str]] = _hom_wiring(pdg_nodes) or {}
+    while True:
+        below: Set[str] = {name for name in unknown - dynamic if wiring.get(name, set()) & dynamic}
+        if not below:
+            return dynamic
+        dynamic |= below
 
 
 def _scheduler_override(hom: Any) -> str:

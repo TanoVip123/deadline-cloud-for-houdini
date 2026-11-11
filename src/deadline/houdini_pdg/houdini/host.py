@@ -222,10 +222,14 @@ class HoudiniPdgHost:
         # PDG queues one of its items, its generation is done.
         # A dynamic node generates only once its upstream items cook, which the
         # wait holds back. PDG flags the nodes below one as dynamic too.
+        nodes: Dict[str, Any] = {
+            _name(node): node for node in _graph_nodes(self._scheduler.context)
+        }
+        dynamic: Set[str] = readers._find_dynamic_nodes(nodes)
         started: Set[str] = {
-            _name(node)
-            for node in _graph_nodes(self._scheduler.context)
-            if _name(node) in pending and (_has_queued_item(node) or _attr(node, "isDynamic"))
+            name
+            for name, node in nodes.items()
+            if name in pending and (_has_queued_item(node) or name in dynamic)
         }
         with self._generation_lock:
             self._generated |= started

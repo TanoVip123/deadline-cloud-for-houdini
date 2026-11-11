@@ -330,6 +330,45 @@ def test_a_step_pdg_reports_dynamic_is_not_awaited(
     assert host.pending_generation() == pending
 
 
+class _PdgNodeWithoutDynamicFlag(FakePdgNode):
+    """A ``pdg.Node`` as Houdini 19.5 has it, with no ``isDynamic``."""
+
+    def __getattribute__(self, name: str) -> Any:
+        if name == "isDynamic":
+            raise AttributeError(name)
+        return super().__getattribute__(name)
+
+
+@pytest.mark.parametrize(
+    "token, pending",
+    [("0", ("sim",)), ("1", ("montage", "render", "sim"))],
+)
+def test_without_pdgs_dynamic_flag_the_generate_when_parm_decides_what_is_awaited(
+    scene: FakeHou, token: str, pending: Tuple[str, ...]
+) -> None:
+    """Houdini 19.5 has no ``isDynamic``, so render's Generate When says it is dynamic.
+
+    Every step below it is dynamic too, so the wait skips them rather than stall until
+    the timeout. A static Generate When still waits for all three steps.
+    """
+    host, network = _start_watching_host()
+    for node in network.pdg_nodes:
+        node.__class__ = _PdgNodeWithoutDynamicFlag
+    # The menu's tokens are out of label order, as Houdini has them.
+    network.node("render").hom.set_parm(
+        "pdg_workitemgeneration",
+        token,
+        menu=("1", "3", "0", "2"),
+        labels=(
+            "All Upstream Items are Generated",
+            "All Upstream Items are Cooked",
+            "Each Upstream Item is Cooked",
+            "Automatic",
+        ),
+    )
+    assert host.pending_generation() == pending
+
+
 # -- read_graph and read_scene ------------------------------------------------
 
 

@@ -130,6 +130,7 @@ class FakeParm:
         kind: str = "",
         tags: Optional[Dict[str, str]] = None,
         menu: Sequence[str] = (),
+        labels: Sequence[str] = (),
     ) -> None:
         self._node: FakeNode = node
         self._name: str = name
@@ -139,6 +140,8 @@ class FakeParm:
         self.sets: List[Any] = []
         #: A menu parm's tokens. Houdini's eval gives the chosen index, and evalAsString the token.
         self.menu: Tuple[str, ...] = tuple(menu)
+        #: The menu's labels, in token order, for a parm read by its label.
+        self.labels: Tuple[str, ...] = tuple(labels)
 
     def name(self) -> str:
         return self._name
@@ -162,6 +165,12 @@ class FakeParm:
 
     def evalAsString(self) -> str:
         return self.value if self.menu else expand(str(self.eval()))
+
+    def menuItems(self) -> Tuple[str, ...]:
+        return self.menu
+
+    def menuLabels(self) -> Tuple[str, ...]:
+        return self.labels
 
     def unexpandedString(self) -> str:
         return str(self.value)
@@ -265,9 +274,10 @@ class FakeNode:
         kind: str = "",
         tags: Optional[Dict[str, str]] = None,
         menu: Sequence[str] = (),
+        labels: Sequence[str] = (),
     ) -> FakeParm:
         """Add or replace a parm, and return it. A ``menu`` makes it an ordinal menu set to ``value``."""
-        parm: FakeParm = FakeParm(self, name, value, kind, tags, menu)
+        parm: FakeParm = FakeParm(self, name, value, kind, tags, menu, labels)
         self._parms[name] = parm
         return parm
 
