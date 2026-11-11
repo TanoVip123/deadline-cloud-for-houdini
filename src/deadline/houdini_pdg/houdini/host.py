@@ -225,7 +225,7 @@ class HoudiniPdgHost:
         nodes: Dict[str, Any] = {
             _name(node): node for node in _graph_nodes(self._scheduler.context)
         }
-        dynamic: Set[str] = self.on_main_thread(lambda: readers._find_dynamic_nodes(nodes))
+        dynamic: Set[str] = self.on_main_thread(lambda: readers.find_dynamic_nodes(nodes))
         started: Set[str] = {
             name
             for name, node in nodes.items()
@@ -1166,7 +1166,9 @@ def _check_service_nodes_by_parm(infos: Tuple[NodeInfo, ...], graph_nodes: List[
     return check_service_nodes(
         ValidationContext(
             nodes=tuple(
-                dataclasses.replace(info, cook_type=readers._cook_type(None, homs.get(info.name)))
+                dataclasses.replace(
+                    info, cook_type=readers.read_cook_type(None, homs.get(info.name))
+                )
                 for info in infos
             ),
             snapshot=GraphSnapshot(steps=()),

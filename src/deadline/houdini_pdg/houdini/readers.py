@@ -98,7 +98,7 @@ def node_infos(
     # One NodeInfo per topology node. Its wiring comes from the TOP network, and
     # from the items' dependencies only when no network could be read.
     infos: List[NodeInfo] = []
-    dynamic: Set[str] = _find_dynamic_nodes(pdg_nodes)
+    dynamic: Set[str] = find_dynamic_nodes(pdg_nodes)
     for name in sorted(pdg_nodes):
         pdg_node: Any = pdg_nodes[name]
         hom: Any = _call(pdg_node, "topNode")
@@ -119,7 +119,7 @@ def node_infos(
                 attribute_names=tuple(sorted(carried.get(name, ()))),
                 schedulable=job_script,
                 in_cook_set=in_cook(name),
-                cook_type=_cook_type(pdg_node, hom),
+                cook_type=read_cook_type(pdg_node, hom),
                 scheduler_override=_scheduler_override(hom),
                 cache_mode=_cache_mode(hom),
                 dynamic_by_parm=_dynamic_by_parm(hom),
@@ -437,7 +437,7 @@ def _has_job_script(node: Any) -> bool:
         return False
 
 
-def _cook_type(node: Any, hom: Any) -> Optional[str]:
+def read_cook_type(node: Any, hom: Any) -> Optional[str]:
     """Where the node's items cook: PDG's own answer first, then the node's parm."""
     value: Optional[str] = _cook_type_name(_attr(node, "cookType", None))
     if value:
@@ -495,7 +495,7 @@ def _dynamic_by_parm(hom: Any) -> Optional[bool]:
     return _GENERATE_WHEN.get(label)
 
 
-def _find_dynamic_nodes(pdg_nodes: Mapping[str, Any]) -> Set[str]:
+def find_dynamic_nodes(pdg_nodes: Mapping[str, Any]) -> Set[str]:
     """The names of the nodes PDG generates while the cook runs.
 
     Houdini 19.5's ``pdg.Node`` has no ``isDynamic``. There a node is dynamic when
