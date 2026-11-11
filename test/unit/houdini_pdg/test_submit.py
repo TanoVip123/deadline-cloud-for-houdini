@@ -40,18 +40,27 @@ def _workstation(name: str) -> str:
     return values.get(name, "")
 
 
+def _with_items(network: FakeNetwork) -> FakeNetwork:
+    """Give each node one item, as a finished generate leaves it, so Submit judges the graph."""
+    for node in network.pdg_nodes:
+        node.workItems = [None]
+    return network
+
+
 def _network() -> FakeNetwork:
     """A Pyro Bonfire network whose scheduler node has every parm Submit reads."""
-    return build_network(
-        PYRO_BONFIRE,
-        scheduler_parms={
-            "working_dir": "$HIP",
-            "debug_level": 0,
-            "validate_graph": 1,
-            "auto_save_hip": 0,
-            "name": "bonfire",
-            "priority": 50,
-        },
+    return _with_items(
+        build_network(
+            PYRO_BONFIRE,
+            scheduler_parms={
+                "working_dir": "$HIP",
+                "debug_level": 0,
+                "validate_graph": 1,
+                "auto_save_hip": 0,
+                "name": "bonfire",
+                "priority": 50,
+            },
+        )
     )
 
 
@@ -128,9 +137,11 @@ def test_a_network_that_does_not_cook_on_this_scheduler_is_refused(
 
 def test_the_confirmation_shows_the_jobs_settings_and_any_warning(scene: FakeHou) -> None:
     """The artist confirms what will run, and a waived refusal is shown, not hidden."""
-    network: FakeNetwork = build_network(
-        COOKING_EXAMPLE,
-        scheduler_parms={"working_dir": "$HIP", "validate_graph": 0, "priority": 70},
+    network: FakeNetwork = _with_items(
+        build_network(
+            COOKING_EXAMPLE,
+            scheduler_parms={"working_dir": "$HIP", "validate_graph": 0, "priority": 70},
+        )
     )
     assert submit(network.scheduler_node, get_setting=_workstation) is True
     text: str = scene.messages.calls[0][0]
@@ -692,13 +703,31 @@ def test_a_refused_submit_sends_its_advisories_to_the_warning_tab(
     assert "Sent Submit's error and advisories to" in caplog.text
 
 
+_ALL: Tuple[str, ...] = ("wedge1", "sim", "render", "partition", "montage")
+
+
+@pytest.mark.parametrize(
+    "empty, dynamic, error_shown",
+    [
+        (_ALL, (), True),
+        (_ALL, (), False),
+        (("render", "partition", "montage"), (), False),
+        (("sim", "render", "partition", "montage"), ("render", "partition", "montage"), False),
+    ],
+    ids=["node-error", "error-not-set-yet", "canceled-part-way", "only-static-step-empty"],
+)
 def test_a_generate_that_did_not_finish_stops_submit_with_only_a_popup(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture
+    scene: FakeHou,
+    caplog: pytest.LogCaptureFixture,
+    empty: Tuple[str, ...],
+    dynamic: Tuple[str, ...],
+    error_shown: bool,
 ) -> None:
     """PDG's blocking generate returns normally when it is canceled or a node fails to generate.
 
-    The nodes keep the error, so Submit must stop rather than judge and submit part of the graph.
-    The stop is popup only, because no refusal on the generated items was found.
+    Submit must stop rather than judge part of the graph. In Houdini 21.0 the node error came
+    0.7 s after the generate returned, so with no error the empty items alone must stop it:
+    every static step empty, or an empty step below an empty node, as a cancel leaves it.
     """
     # PDG has the scheduler, and wedge1's generate fails during Submit's display generate.
     network: FakeNetwork = _network()
@@ -706,8 +735,16 @@ def test_a_generate_that_did_not_finish_stops_submit_with_only_a_popup(
     tab: _ErrorTab = _ErrorTab(network, scene)
     display: Any = network.topnet.displayNode()
 
+    for name in dynamic:
+        network.node(name).isDynamic = True
+
     def generate() -> None:
-        network.node("wedge1").hom.node_errors = ["Unable to evaluate expression (Bracing error)."]
+        # The nodes in ``empty`` have no items, and the error may not be set yet.
+        for name in empty:
+            network.node(name).workItems = []
+        tab.scheduler.dependency_graph = ({}, {}, [])
+        if error_shown:
+            network.node("wedge1").hom.node_errors = ["Unable to evaluate expression."]
 
     # Submit stops with the popup only: no cook, no cookError and no UI update.
     display.on_generate = generate
@@ -731,3 +768,16 @@ def test_an_error_on_a_node_the_display_node_does_not_cook_does_not_stop_submit(
     _generated(network, {"sim": 1, "render": 1})
     network.node("montage").hom.node_errors = ["An error from an earlier cook."]
     assert submit(network.scheduler_node, get_setting=_workstation) is True
+
+
+def test_a_step_with_no_items_below_nodes_with_items_is_still_refused_as_too_early(
+    scene: FakeHou,
+) -> None:
+    """Only a step whose nodes above it have items is the early read, so it keeps its refusal."""
+    # montage alone has no items, and every node above it has some.
+    network: FakeNetwork = _network()
+    _generated(network, {"sim": 1, "render": 1})
+    network.node("montage").workItems = []
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    text: str = scene.messages.calls[-1][0]
+    assert "montage: This node runs on the farm and has generated no work items yet" in text

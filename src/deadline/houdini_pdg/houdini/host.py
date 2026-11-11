@@ -1376,13 +1376,8 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             _call(context, "removeEventHandler", handler)
         if over_quota:
             raise GraphRefusedError(over_quota[0])
-        # A canceled or failed generate still returns, and leaves an error on the node that
-        # stopped and each node below it. Part of a graph can't be judged, so Submit stops.
-        if any(
-            _call(hom, "errors")
-            for name, hom in _top_nodes(graph_nodes).items()
-            if cook_set is None or name in cook_set
-        ):
+        # A canceled or failed generate still returns. Part of a graph can't be judged, so Submit stops.
+        if _generate_did_not_finish(graph_nodes, infos, cook_set):
             raise CookSetupError(
                 "The generate didn't finish, so Submit can't check the graph. "
                 "Fix the node errors, then submit again."
@@ -1455,6 +1450,39 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     # The display node is what the network's own Cook button cooks.
     display.cookWorkItems(block=False)
     return True
+
+
+def _generate_did_not_finish(
+    graph_nodes: List[Any], infos: Tuple[NodeInfo, ...], cook_set: Optional[FrozenSet[str]]
+) -> bool:
+    """Whether the display node's generate stopped early, from the cooked nodes' errors or items.
+
+    PDG can set the errors after the generate returns, so a stopped generate is also known
+    from its items: no step has any, or a step has none and neither has a node above it.
+    """
+    # The nodes in this cook, by PDG name.
+    nodes: Dict[str, Any] = {
+        _name(node): node
+        for node in graph_nodes
+        if _name(node) and (cook_set is None or _name(node) in cook_set)
+    }
+    # The node that stopped and each node below it keep an error, once PDG sets it.
+    if any(_call(_call(node, "topNode"), "errors") for node in nodes.values()):
+        return True
+    # A dynamic node has no items until it cooks, so its count says nothing here.
+    dynamic: Set[str] = {info.name for info in infos if info.is_dynamic}
+    empty: Set[str] = {
+        name for name, node in nodes.items() if name not in dynamic and not _attr(node, "workItems")
+    }
+    steps: Set[str] = {
+        name for name, node in nodes.items() if name not in dynamic and _is_step(node)
+    }
+    # Each node's empty ancestors, so an empty step below an empty node is found.
+    empty_above: Dict[str, Set[str]] = find_ancestors_among(infos, empty)
+    unfinished: bool = bool(steps) and (
+        steps <= empty or any(empty_above.get(step) for step in steps & empty)
+    )
+    return unfinished
 
 
 def _find_cook_set(context: Any, display: Any) -> Optional[FrozenSet[str]]:
