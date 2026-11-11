@@ -1569,10 +1569,13 @@ def _start_cook_for_node_tabs(path: str, output: Any) -> None:
 
 
 def redraw_network_editors(scheduler_path: str) -> None:
-    """Redraw every network editor, so the scheduler node's error badge shows with no click.
+    """Update Houdini's UI and redraw every network editor, so the error badge shows unclicked.
 
     Houdini's network editor doesn't draw the badge by itself after the scheduler sends an error.
     """
+    # A pane redraw alone left the badge waiting for a click, so ask Houdini's UI to update first.
+    _call(_attr(hou, "ui"), "triggerUpdate")
+    _logger.info("Triggered a UI update to show %s's badge", scheduler_path)
     # Only the network editors, and through _call, so a closing UI or hython can't raise here.
     network_editor: Any = _attr(_attr(hou, "paneTabType"), "NetworkEditor")
     for tab in _call(_attr(hou, "ui"), "paneTabs") or ():

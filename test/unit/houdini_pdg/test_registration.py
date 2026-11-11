@@ -722,8 +722,8 @@ def test_submits_stop_logs_under_the_package_and_redraws_the_network_editors_aft
 ) -> None:
     """In the GUI, the badge waited for a click, and the package's log level hid the refusal lines.
 
-    onStartCook queues the redraw after it sends the stop, and logs under the package's logger,
-    though PDG loads the module under its own name.
+    onStartCook queues a UI update and then the redraw after it sends the stop, and logs under
+    the package's logger, though PDG loads the module under its own name.
     """
     # Submit stored a stop, and the network has two network editors and a parameter editor.
     caplog.set_level(logging.INFO, logger="deadline.houdini_pdg")
@@ -738,13 +738,19 @@ def test_submits_stop_logs_under_the_package_and_redraws_the_network_editors_aft
     ]
     parameters: FakePaneTab = FakePaneTab("Parm")
     scene.pane_tabs = [*editors, parameters]
-    # The cook start is refused, and nothing is redrawn until the queue runs.
+    # The redraw count when the UI update runs, so the test catches an update after the redraw.
+    redraws_at_update: List[int] = []
+    scene.on_update = lambda: redraws_at_update.append(editors[0].redraws)
+    # The cook start is refused, and nothing is updated or redrawn until the queue runs.
     assert scheduler.onStartCook(False, None) is False
     assert scheduler.calls == [("cookError", "The cook can't start.")]
     assert [editor.redraws for editor in editors] == [0, 0] and len(ui.queued) == 1
+    assert scene.updates == 0
     ui.queued[0]()
     assert [editor.redraws for editor in editors] == [1, 1] and parameters.redraws == 0
     assert seen == [1, 1]
+    # One UI update, after the error and before the redraw.
+    assert scene.updates == 1 and redraws_at_update == [0]
     # Every line is under the package's logger, so one setLevel shows them all, in this order.
     lines: List[str] = [
         r.getMessage() for r in caplog.records if r.name.startswith("deadline.houdini_pdg.")
@@ -752,5 +758,6 @@ def test_submits_stop_logs_under_the_package_and_redraws_the_network_editors_aft
     assert lines == [
         f"Took Submit's stop for {path} in onStartCook",
         f"Refused the cook start to show Submit's stop on {path}'s tabs",
+        f"Triggered a UI update to show {path}'s badge",
         f"Redrew the network editor to show {path}'s badge",
     ]
