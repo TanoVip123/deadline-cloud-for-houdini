@@ -1122,13 +1122,42 @@ def _check_network(
     # they wait. A cook set with no step, and the job's shape, are known now.
     waiting: FrozenSet[RefusalScenario] = frozenset() if generated else _NEEDS_ITEMS
     topology: Tuple[Refusal, ...] = () if generated else check_shape_quotas(infos).refusals
+    # PDG's cook type is the last generate's, so a node just set to Service is found from its
+    # parm too, as Submit finds it. A refusal both reads find is kept once.
+    by_parm: Tuple[Refusal, ...] = (
+        ()
+        if generated
+        else tuple(
+            r
+            for r in _check_service_nodes_by_parm(infos, graph_nodes).refusals
+            if r not in full.refusals
+        )
+    )
     verdict: Verdict = Verdict(
         refusals=tuple(r for r in full.refusals if r.scenario not in waiting)
         + topology
+        + by_parm
         + check_cook_set_has_steps(infos, cook_set).refusals,
         advisories=tuple(a for a in full.advisories if a.scenario not in waiting),
     )
     return (verdict if settings is None or settings.validate_graph else waived(verdict)), shape
+
+
+def _check_service_nodes_by_parm(infos: Tuple[NodeInfo, ...], graph_nodes: List[Any]) -> Verdict:
+    """The Service node refusals, with each node's cook type read from its own Cook Type parm.
+
+    PDG keeps the last generate's cook type, so a node the artist just set to Service reads stale.
+    """
+    homs: Dict[str, Any] = _top_nodes(graph_nodes)
+    return check_service_nodes(
+        ValidationContext(
+            nodes=tuple(
+                dataclasses.replace(info, cook_type=readers._cook_type(None, homs.get(info.name)))
+                for info in infos
+            ),
+            snapshot=GraphSnapshot(steps=()),
+        )
+    )
 
 
 def _read_settings_or_none(node: Any) -> Optional[SchedulerSettings]:
@@ -1298,20 +1327,8 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         scheduler_name: str = _call(node, "getPDGNodeName") or node.name()
         graph_nodes: List[Any] = _graph_nodes(context)
         infos: Tuple[NodeInfo, ...] = readers.node_infos(graph_nodes, None, cook_set)
-        # A Service node's generate starts PDG's service processes, so it's refused first. PDG
-        # keeps the last generate's cook type, so each node's own Cook Type parm is read.
-        homs: Dict[str, Any] = _top_nodes(graph_nodes)
-        services: Verdict = check_service_nodes(
-            ValidationContext(
-                nodes=tuple(
-                    dataclasses.replace(
-                        info, cook_type=readers._cook_type(None, homs.get(info.name))
-                    )
-                    for info in infos
-                ),
-                snapshot=GraphSnapshot(steps=()),
-            )
-        )
+        # A Service node's generate starts PDG's service processes, so it's refused first.
+        services: Verdict = _check_service_nodes_by_parm(infos, graph_nodes)
         # A job shape over a quota is known from the wires, so nothing is generated for
         # it either. Both stops wait unless the artist turned validation off.
         before_generate: Verdict = Verdict(

@@ -177,6 +177,34 @@ def _connect(network: FakeNetwork, cloud: FakeCloud, tmp_path: Path) -> CookServ
 # -- start, tick and stop -----------------------------------------------------
 
 
+def test_a_cook_of_a_node_just_set_to_service_stops_pdg_at_its_start(scene: FakeHou) -> None:
+    """PDG started a Service node's processes after a True start, and still said Out-of-Process.
+
+    The parm must decide, and only a False start stops PDG before those processes start.
+    """
+    # PDG still says Out-of-Process from an earlier generate, and the artist sets render to Service.
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
+    network.node("render").cookType = "OutOfProcess"
+    network.node("render").hom.set_parm("pdg_cooktype", 3)
+    scheduler: Any = _scheduler(network)
+    assert scheduler.onStartCook(False, None) is False
+    (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
+    assert "render: This node's work items cook in a long-running service process" in error
+    assert not [call for call in scheduler.calls if call[0] == "setWorkingDir"]
+
+
+def test_a_start_that_fails_on_a_bad_setting_still_returns_true(scene: FakeHou) -> None:
+    """Only a Service refusal may return False. Any other failed start cancels on the first tick."""
+    # A Debug Level of 5 fails the start after every check passed.
+    network: FakeNetwork = build_network(
+        PYRO_BONFIRE, scheduler_parms={"working_dir": "$HIP", "debug_level": 5, "validate_graph": 1}
+    )
+    scheduler: Any = _scheduler(network)
+    assert scheduler.onStartCook(False, None) is True
+    (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
+    assert "debug_level" in error and scheduler.onTick() == PDG.tickResult.SchedulerCancelCook
+
+
 #: The ``pdg.cookType`` members, with their values, as Houdini 21.0 lists them.
 #: StaticDepsGen is left out: it has GenerateFull's value, and Houdini names it GenerateFull.
 _GENERATE_TYPES: List[Tuple[str, int]] = [
