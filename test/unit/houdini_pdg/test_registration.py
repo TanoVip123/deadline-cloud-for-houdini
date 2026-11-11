@@ -201,6 +201,26 @@ def test_a_refused_graph_stops_pdg_at_its_start(scene: FakeHou, cook_type: str, 
     assert not [call for call in scheduler.calls if call[0] == "setWorkingDir"]
 
 
+def test_a_refused_start_sends_its_advisories_to_the_warning_tab(scene: FakeHou) -> None:
+    """A refused start showed only its refusals, so an advisory naming a likely cause was lost.
+
+    The working directory is away from the scene, so the start's verdict also has the
+    scene-directory advisory, which must go to the Warning tab next to the refusal.
+    """
+    # render is In-Process, which is refused, and the working directory is not the scene's.
+    network: FakeNetwork = build_network(
+        PYRO_BONFIRE, scheduler_parms={"working_dir": "/tmp/elsewhere", "validate_graph": 1}
+    )
+    network.node("render").cookType = "InProcess"
+    scheduler: Any = _scheduler(network)
+    assert scheduler.onStartCook(False, None) is False
+    (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
+    (warning,) = [call[1] for call in scheduler.calls if call[0] == "cookWarning"]
+    assert "render:" in error and "The scene is in" not in error
+    assert warning.startswith(f"{os.environ['HIP']}: The scene is in ")
+    assert "'/tmp/elsewhere'" in warning
+
+
 def test_a_start_that_fails_on_a_bad_setting_still_returns_true(scene: FakeHou) -> None:
     """Only a graph refusal may return False. A setup error cancels on the first tick."""
     # A Debug Level of 5 raises a setup error after every check passed.

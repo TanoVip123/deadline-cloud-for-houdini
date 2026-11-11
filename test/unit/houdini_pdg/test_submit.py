@@ -665,6 +665,33 @@ def test_submits_advisories_go_on_the_warning_tab_before_the_confirmation(
     assert ("Warning tab." if has_ui else "Warning tab, which may update late") in caplog.text
 
 
+def test_a_refused_submit_sends_its_advisories_to_the_warning_tab(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A refused Submit showed only its refusals, so the advisory naming their cause was lost.
+
+    With the working directory away from the scene, sim's $HIP output is refused, and the
+    scene-directory advisory must go on the Warning tab with one UI update for both tabs.
+    """
+    # The working directory is not the scene's folder, and sim writes under $HIP.
+    caplog.set_level("INFO")
+    network: FakeNetwork = _network()
+    network.scheduler_node.set_parm("working_dir", "/tmp/elsewhere")
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    graph: Any = network.context.schedulers["deadlinecloudscheduler1"].dependency_graph[0]
+    (sim_item,) = [item for item in graph if item.node.name == "sim"]
+    sim_item.expectedOutputFiles = [(os.environ["HIP"] + "/geo/sim.bgeo.sc", "file/geo")]
+    tab: _ErrorTab = _ErrorTab(network, scene)
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    text: str = scene.messages.calls[-1][0]
+    assert "sim:" in text and "outside the working directory" in text
+    (warning,) = [c[1] for c in tab.scheduler.calls if c[0] == "cookWarning"]
+    assert warning.startswith(f"{os.environ['HIP']}: The scene is in ")
+    assert "'/tmp/elsewhere'" in warning
+    assert tab.events == ["dirty", "cookError", "cookWarning", "popup", "update"]
+    assert "Sent Submit's error and advisories to" in caplog.text
+
+
 def test_a_generate_that_did_not_finish_stops_submit_with_only_a_popup(
     scene: FakeHou, caplog: pytest.LogCaptureFixture
 ) -> None:

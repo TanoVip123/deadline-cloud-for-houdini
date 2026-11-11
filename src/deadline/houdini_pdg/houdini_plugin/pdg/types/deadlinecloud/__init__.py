@@ -31,7 +31,12 @@ from pdg.scheduler import PyScheduler  # type: ignore[import-not-found]
 
 from deadline.houdini_pdg.cook import CookServices, PdgScheduler, ScheduleResult, SystemClock
 from deadline.houdini_pdg.diagnostics import CookJournal
-from deadline.houdini_pdg.errors import CookSetupError, GraphRefusedError, artist_message
+from deadline.houdini_pdg.errors import (
+    CookSetupError,
+    GraphRefusedError,
+    artist_message,
+    format_advisories,
+)
 from deadline.houdini_pdg.farm_job import DeadlineFarmJob
 from deadline.houdini_pdg.houdini.host import (
     HoudiniPdgHost,
@@ -163,6 +168,9 @@ class DeadlineCloudPDGScheduler(PyScheduler):
             # A refused graph returns False, so PDG starts nothing, such as a Service node's
             # processes. The node keeps the error made above, and no working directory is needed.
             if isinstance(error, GraphRefusedError):
+                # The verdict's advisories go on the Warning tab, next to the refusals.
+                if error.verdict.advisories:
+                    host.show_warning(format_advisories(error.verdict.advisories))
                 return False
             self._use_scratch_working_dir()
             return True

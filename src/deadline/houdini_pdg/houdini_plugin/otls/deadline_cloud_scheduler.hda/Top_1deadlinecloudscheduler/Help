@@ -35,7 +35,8 @@ check that fails starts nothing and creates no job.
   whose Cook Type is Service or In-Process. A refused cook stops before PDG
   starts anything, including a Service node's processes, and PDG then says
   "Failed to start scheduler", with the reason on this node's error tab. Any
-  warning the checks find goes on this node's Warning tab. The cook uses
+  warning the checks find goes on this node's Warning tab, also when they
+  refuse the cook. The cook uses
   the work items PDG already has, so after you change a parm on a SOP outside
   the TOP network, dirty the network or click __Generate__ before you cook, or
   use __Submit__, which does that itself.
@@ -54,8 +55,8 @@ check that fails starts nothing and creates no job.
   node, and Submit doesn't change them, except that Always Save turns on
   automatic saving. When a check fails, Submit shows why in a popup. When the
   check that fails runs on the work items Submit generated, Submit also puts
-  the same text on this node's error tab, so you can read it again while you
-  fix the scene. A node whose Cook Type is Service is refused before that
+  the same text on this node's error tab, and any warnings on its Warning
+  tab, so you can read them again while you fix the scene. A node whose Cook Type is Service is refused before that
   generate, because the generate would start its service processes. Its text
   also goes on the error tab once PDG has this scheduler from an earlier
   generate in the session. Any other problem found before that generate

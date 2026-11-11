@@ -1405,10 +1405,18 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             if isinstance(stopped, GraphRefusedError)
             else str(stopped)
         )
+        # Only the final check's verdict has advisories, and they go on the Warning tab.
+        advisories: str = (
+            format_advisories(stopped.verdict.advisories)
+            if isinstance(stopped, GraphRefusedError)
+            else ""
+        )
         # The error tab keeps the text after the popup closes. The cookError comes first, so
         # Houdini's UI handles the node's update while the popup is open.
         if scheduler is not None:
             _call(scheduler, "cookError", text)
+            if advisories:
+                _call(scheduler, "cookWarning", advisories)
         _show(text)
         if scheduler is None:
             _logger.warning(
@@ -1416,6 +1424,8 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
                 "the display node's generate finished, or PDG has no scheduler for the node.",
                 node.path(),
             )
+        elif advisories:
+            _update_node_tabs(node, "Submit's error and advisories", "error and Warning tabs")
         else:
             _update_node_tabs(node, "Submit's error", "error tab")
         return False
