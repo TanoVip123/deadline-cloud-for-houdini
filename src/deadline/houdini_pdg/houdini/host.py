@@ -1266,8 +1266,8 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     from deadline.client.exceptions import UserInitiatedCancel
 
     read: Callable[[str], str] = get_setting or get_workstation_setting
-    # Set only once the display node's generate finishes. The scheduler node's generate hangs
-    # Houdini's UI after a dirty with no finished generate, so the error tab needs this.
+    # Set only once the display node's generate finishes, because only the refusals found on
+    # its items go on the error tab. A stop before that shows only in the popup.
     scheduler: Any = None
     try:
         # The save prompt comes first, so the artist answers it before anything else.
@@ -1360,17 +1360,22 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         if scheduler is not None:
             _call(scheduler, "cookError", text)
         _show(text)
-        # PDG shows a cookError only once the node updates, and a generate on the scheduler
-        # node does that at once. It runs only after this Submit's display generate finished.
+        # PDG shows a cookError only once Houdini's UI updates, so Submit asks for that update
+        # rather than a generate, which can start PDG's processes. hython has no UI to update.
         if scheduler is None:
             _logger.warning(
                 "Could not put the error on %s's error tab, because Submit stopped before "
                 "the display node's generate finished, or PDG has no scheduler for the node.",
                 node.path(),
             )
-        else:
-            _call(node, "generateStaticWorkItems", True)
+        elif hou.isUIAvailable():
+            hou.ui.triggerUpdate()
             _logger.info("Sent Submit's error to %s's error tab.", node.path())
+        else:
+            _logger.info(
+                "Sent Submit's error to %s's error tab, which may update late with no UI.",
+                node.path(),
+            )
         return False
     counts: str = (
         f"Steps: {len(snapshot.steps)}, tasks: {snapshot.total_tasks}"

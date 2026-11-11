@@ -411,6 +411,15 @@ class FakeHou:
     file_references: List[Tuple[Any, str]] = field(default_factory=list)
     instances: List[Any] = field(default_factory=list)
     libraries: Dict[str, str] = field(default_factory=dict)
+    #: Called by ``hou.ui.triggerUpdate`` when set, as Houdini's UI then redraws the nodes.
+    on_update: Optional[Callable[[], None]] = None
+    updates: int = 0
+
+    def trigger_update(self) -> None:
+        """``hou.ui.triggerUpdate``: count the call, then run ``on_update``."""
+        self.updates += 1
+        if self.on_update is not None:
+            self.on_update()
 
 
 def install_hou(monkeypatch: pytest.MonkeyPatch, hip_file: str) -> FakeHou:
@@ -433,7 +442,9 @@ def install_hou(monkeypatch: pytest.MonkeyPatch, hip_file: str) -> FakeHou:
     attributes: Dict[str, Any] = {
         "hipFile": state.hip_file,
         "text": types.SimpleNamespace(expandString=expand),
-        "ui": types.SimpleNamespace(displayMessage=state.messages),
+        "ui": types.SimpleNamespace(
+            displayMessage=state.messages, triggerUpdate=state.trigger_update
+        ),
         "isUIAvailable": lambda: state.ui,
         "fileReferences": lambda: list(state.file_references),
         "getenv": lambda name: os.environ.get(name),
