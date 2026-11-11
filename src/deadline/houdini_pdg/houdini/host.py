@@ -1438,14 +1438,13 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         else "Extra attachments: none"
     )
     lines: List[str] = [counts, _describe_host_requirements(requirements), attached]
-    # The advisories also go on the Warning tab, which keeps them after the confirmation closes.
     details: str = format_advisories(verdict.advisories)
-    if details and scheduler is not None:
-        _call(scheduler, "cookWarning", details)
     confirmed: bool = _ask_to_confirm(node, settings, details, read, lines)
-    if details and scheduler is not None:
-        _update_node_tabs(node, "Submit's advisories", "Warning tab")
     if not confirmed:
+        # The cook sends its own advisories to the Warning tab, so only a cancel sends them here.
+        if details and scheduler is not None:
+            _call(scheduler, "cookWarning", details)
+            _update_node_tabs(node, "Submit's advisories", "Warning tab")
         return False
     # The display node is what the network's own Cook button cooks.
     display.cookWorkItems(block=False)

@@ -91,14 +91,18 @@ def test_cancel_cooks_nothing_and_writes_nothing(
 ) -> None:
     """Cancel at the save prompt or at the confirmation leaves the scene and the node as they were.
 
-    Closing the confirmation is a cancel too, so a stray click never submits a job.
+    Closing the confirmation is a cancel too, so a stray click never submits a job. With no
+    advisory, a cancel sends no empty warning to the Warning tab and asks for no UI update.
     """
     scene.hip_file.unsaved = True
     scene.messages.answers = list(answers)
     network: FakeNetwork = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     assert _cooks(network) == []
     assert _parm_writes(network) == []
+    scheduler: Any = network.context.schedulers["deadlinecloudscheduler1"]
+    assert [c for c in scheduler.calls if c[0] == "cookWarning"] == [] and scene.updates == 0
 
 
 def test_enter_picks_save_on_the_save_prompt_and_submit_on_the_confirmation(
@@ -652,28 +656,40 @@ def test_in_the_ui_a_stop_before_the_display_generate_finishes_skips_the_error_t
 
 
 @pytest.mark.parametrize("has_ui", [True, False], ids=["ui", "hython"])
-def test_submits_advisories_go_on_the_warning_tab_before_the_confirmation(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture, has_ui: bool
+@pytest.mark.parametrize("confirmed", [True, False], ids=["submit", "cancel"])
+def test_submits_advisories_go_on_the_warning_tab_once(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture, has_ui: bool, confirmed: bool
 ) -> None:
     """An advisory showed only under Show Details, so it was gone once the confirmation closed.
 
-    One cookWarning with the details' text comes before the confirmation, and the UI update
-    after it shows the warning. hython has no UI, so the log says the tab may update late.
+    A confirmed cook sends the same advisories from its snapshot, so Submit sending them too
+    showed each twice. A cancel starts no cook, so Submit sends them after the confirmation.
     """
     # Validation is off, so an In-Process render step is an advisory, found after the generate.
     caplog.set_level("INFO")
     scene.ui = has_ui
+    scene.messages.choice = 0 if confirmed else 1
     network: FakeNetwork = _network()
     network.scheduler_node.set_parm("validate_graph", 0)
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
     tab: _ErrorTab = _ErrorTab(network, scene)
     network.node("render").hom.set_parm("pdg_cooktype", 1)
-    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    # The cook's snapshot sends the confirmation's advisories, as Houdini 21.0 showed.
+    display: Any = network.topnet.displayNode()
+    cook: Any = display.cookWorkItems
+    display.cookWorkItems = lambda **kwargs: (
+        tab.scheduler.cookWarning(scene.messages.options[-1]["details"]),
+        cook(**kwargs),
+    )
+    assert submit(network.scheduler_node, get_setting=_workstation) is confirmed
     details: str = scene.messages.options[-1]["details"]
     assert details.startswith("render: ")
     assert [c for c in tab.scheduler.calls if c[0] == "cookWarning"] == [("cookWarning", details)]
-    assert tab.events == ["dirty", "cookWarning", "popup"] + ["update"] * has_ui
-    assert ("Warning tab." if has_ui else "Warning tab, which may update late") in caplog.text
+    if confirmed:
+        assert tab.events == ["dirty", "popup", "cookWarning"]
+    else:
+        assert tab.events == ["dirty", "popup", "cookWarning"] + ["update"] * has_ui
+        assert ("Warning tab." if has_ui else "Warning tab, which may update late") in caplog.text
 
 
 def test_a_refused_submit_sends_its_advisories_to_the_warning_tab(

@@ -49,9 +49,9 @@ check that fails starts nothing and creates no job.
   stops generating as soon as a step or the job has more tasks than Deadline
   Cloud allows. Then it shows the job's farm, queue, name, priority, working
   directory, step and task counts, host requirements, and extra attachments,
-  and any warnings, which also go on this node's Warning tab. Click
-  __Submit__ there, and the TOP network's display node cooks in the
-  background. The job uses the settings on this
+  and any warnings. Click __Submit__ there, and the TOP network's display
+  node cooks in the background, and the cook puts the warnings on this node's
+  Warning tab. Click __Cancel__, and Submit puts them there itself. The job uses the settings on this
   node, and Submit doesn't change them, except that Always Save turns on
   automatic saving. When a check fails, Submit shows why in a popup. When the
   check that fails runs on the work items Submit generated, Submit also puts
