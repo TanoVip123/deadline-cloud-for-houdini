@@ -42,6 +42,7 @@ from deadline.houdini_pdg.houdini.host import (
     SUBMIT_STOP_MAX_AGE,
     HoudiniPdgHost,
     cook_set_names,
+    redraw_network_editors,
     run_pre_cook_checks,
     show_error_popup,
     submit_stops,
@@ -53,7 +54,9 @@ from deadline.houdini_pdg.submitter import PdgSubmitter, farm_problem, get_works
 from deadline.houdini_pdg.task_storage import S3TaskStorage
 from deadline.houdini_pdg.validation import Verdict
 
-_logger: logging.Logger = logging.getLogger(__name__)
+# PDG imports this module as pdg.types.deadlinecloud, so a name from __name__ would sit outside
+# the package's logger, and setting that logger's level wouldn't reach these lines.
+_logger: logging.Logger = logging.getLogger("deadline.houdini_pdg.registration")
 
 _SCHEDULE_RESULTS: Dict[ScheduleResult, Any] = {
     ScheduleResult.SUCCEEDED: pdg.scheduleResult.Succeeded,
@@ -165,6 +168,10 @@ class DeadlineCloudPDGScheduler(PyScheduler):
                     self.cookError(error)
                 if advisories:
                     host.show_warning(advisories)
+                # Queued, so it runs once PDG's events from this refusal have reached the node.
+                import hdefereval  # type: ignore[import-not-found]
+
+                hdefereval.executeDeferred(lambda: redraw_network_editors(path))
                 _logger.info("Refused the cook start to show Submit's stop on %s's tabs", path)
                 return False
             # Houdini starts a generate with static False, and says so in the cook options.

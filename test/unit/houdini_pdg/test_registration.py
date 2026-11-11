@@ -8,6 +8,7 @@ import importlib.util
 import logging
 import os
 import sys
+import time
 import types
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ from .houdini_fakes import (
     PYRO_BONFIRE,
     FakeHou,
     FakeNetwork,
+    FakePaneTab,
     build_network,
     install_hou,
 )
@@ -31,6 +33,7 @@ from .houdini_fakes import (
 import deadline.houdini_pdg
 from deadline.houdini_pdg.cook import CookServices, ScheduleResult, SystemClock
 from deadline.houdini_pdg.errors import CookSetupError
+from deadline.houdini_pdg.houdini import host as host_module
 from deadline.houdini_pdg.houdini.host import HoudiniPdgHost
 from deadline.houdini_pdg.houdini.settings import SchedulerSettings
 from deadline.houdini_pdg.ports import CookPhase, CookSummary
@@ -712,3 +715,42 @@ def test_each_cook_shows_one_popup_and_the_next_cook_shows_its_own(
     network.node("render").isDynamic = True
     scheduler.onStartCook(False, None)
     assert len(ui.queued) == 2
+
+
+def test_submits_stop_logs_under_the_package_and_redraws_the_network_editors_after_the_error(
+    scene: FakeHou, ui: _Deferred, caplog: pytest.LogCaptureFixture
+) -> None:
+    """In the GUI, the badge waited for a click, and the package's log level hid the refusal lines.
+
+    onStartCook queues the redraw after it sends the stop, and logs under the package's logger,
+    though PDG loads the module under its own name.
+    """
+    # Submit stored a stop, and the network has two network editors and a parameter editor.
+    caplog.set_level(logging.INFO, logger="deadline.houdini_pdg")
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
+    scheduler: Any = _scheduler(network)
+    path: str = network.scheduler_node.path()
+    host_module.submit_stops[path] = (time.monotonic(), "The cook can't start.", "")
+    seen: List[int] = []
+    editors: List[FakePaneTab] = [
+        FakePaneTab("NetworkEditor", on_redraw=lambda: seen.append(len(scheduler.calls)))
+        for _ in range(2)
+    ]
+    parameters: FakePaneTab = FakePaneTab("Parm")
+    scene.pane_tabs = [*editors, parameters]
+    # The cook start is refused, and nothing is redrawn until the queue runs.
+    assert scheduler.onStartCook(False, None) is False
+    assert scheduler.calls == [("cookError", "The cook can't start.")]
+    assert [editor.redraws for editor in editors] == [0, 0] and len(ui.queued) == 1
+    ui.queued[0]()
+    assert [editor.redraws for editor in editors] == [1, 1] and parameters.redraws == 0
+    assert seen == [1, 1]
+    # Every line is under the package's logger, so one setLevel shows them all, in this order.
+    lines: List[str] = [
+        r.getMessage() for r in caplog.records if r.name.startswith("deadline.houdini_pdg.")
+    ]
+    assert lines == [
+        f"Took Submit's stop for {path} in onStartCook",
+        f"Refused the cook start to show Submit's stop on {path}'s tabs",
+        f"Redrew the network editor to show {path}'s badge",
+    ]

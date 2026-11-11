@@ -1548,12 +1548,7 @@ def _show_on_node_tabs(node: Any, display: Any, error: str, advisories: str) -> 
 
 
 def _start_cook_for_node_tabs(path: str, output: Any) -> None:
-    """Start a cook of ``output`` the way Cook Output Node does, for the stop stored at ``path``.
-
-    Then redraw the network editors, which don't draw the node's error badge by themselves.
-    """
-    import hdefereval  # type: ignore[import-not-found]
-
+    """Start a cook of ``output`` the way Cook Output Node does, for the stop stored at ``path``."""
     failure: str = ""
     # Submit already handled saving, so a save prompt here would be a second dialog.
     try:
@@ -1572,16 +1567,18 @@ def _start_cook_for_node_tabs(path: str, output: Any) -> None:
                 failure or "no error",
             )
 
-    def redraw_network_editors() -> None:
-        # Only the network editors, so the badge shows with no click or graph change.
-        network_editor: Any = _attr(_attr(hou, "paneTabType"), "NetworkEditor")
-        for tab in _call(_attr(hou, "ui"), "paneTabs") or ():
-            if network_editor is not None and _call(tab, "type") == network_editor:
-                _call(tab, "redraw")
-        _logger.info("Redrew the network editor to show %s's badge", path)
 
-    # Queued, so it runs after PDG's events from the refused cook start have reached the node.
-    hdefereval.executeDeferred(redraw_network_editors)
+def redraw_network_editors(scheduler_path: str) -> None:
+    """Redraw every network editor, so the scheduler node's error badge shows with no click.
+
+    Houdini's network editor doesn't draw the badge by itself after the scheduler sends an error.
+    """
+    # Only the network editors, and through _call, so a closing UI or hython can't raise here.
+    network_editor: Any = _attr(_attr(hou, "paneTabType"), "NetworkEditor")
+    for tab in _call(_attr(hou, "ui"), "paneTabs") or ():
+        if network_editor is not None and _call(tab, "type") == network_editor:
+            _call(tab, "redraw")
+    _logger.info("Redrew the network editor to show %s's badge", scheduler_path)
 
 
 def _ask_to_confirm(
