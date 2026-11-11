@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import threading
+import time
 from types import ModuleType
 from typing import (
     AbstractSet,
@@ -1299,9 +1300,12 @@ def rebuild_layout_from_definition(node: Any) -> None:
 
 _CONFIRM_BUTTONS: Tuple[str, ...] = ("Submit", "Cancel")
 
-#: Submit's stop for each scheduler node by path, as (error, advisories), until the scheduler's
-#: ``onStartCook`` takes it. A module dict, so storing it doesn't mark the scene unsaved.
-submit_stops: Dict[str, Tuple[str, str]] = {}
+#: Submit's stop for each scheduler node by path, as (``time.monotonic()`` when stored, error,
+#: advisories), until ``onStartCook`` takes it. A module dict doesn't mark the scene unsaved.
+submit_stops: Dict[str, Tuple[float, str, str]] = {}
+
+#: Seconds a stored stop stays valid. ``onStartCook`` drops an older one and cooks as normal.
+SUBMIT_STOP_MAX_AGE: float = 30.0
 
 
 def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> bool:
@@ -1535,7 +1539,7 @@ def _show_on_node_tabs(node: Any, display: Any, error: str, advisories: str) -> 
     network: Any = node.parent()
     output: Any = (network.outputNode() if hasattr(network, "outputNode") else None) or display
     path: str = node.path()
-    submit_stops[path] = (error, advisories)
+    submit_stops[path] = (time.monotonic(), error, advisories)
     _logger.info("Routing Submit's stop through a cook start of %s", output.path())
     if error:
         _show(error)
@@ -1546,17 +1550,18 @@ def _show_on_node_tabs(node: Any, display: Any, error: str, advisories: str) -> 
 def _start_cook_for_node_tabs(path: str, output: Any) -> None:
     """Start a cook of ``output`` the way Cook Output Node does, for the stop stored at ``path``."""
     failure: str = ""
+    # Submit already handled saving, so a save prompt here would be a second dialog.
     try:
-        output.cookWorkItems(block=False, generate_only=False, save_prompt=True, nodes=[output])
+        output.cookWorkItems(block=False, generate_only=False, save_prompt=False, nodes=[output])
     except hou.OperationFailed as error:
         # PDG raises this when onStartCook refuses the cook, and for any other failed start.
         failure = str(error)
     finally:
-        # A stop left here would refuse the artist's next TOP Cook, so it goes either way.
-        if submit_stops.pop(path, None) is not None:
+        # The stop stays, because the cook may still start later. onStartCook ignores it once stale.
+        if path in submit_stops:
             _logger.warning(
-                "The cook start of %s didn't reach %s's onStartCook (%s), so its tabs don't "
-                "show Submit's stop.",
+                "The cook start of %s hasn't reached %s's onStartCook yet (%s), so Submit's stop "
+                "is still waiting.",
                 output.path(),
                 path,
                 failure or "no error",

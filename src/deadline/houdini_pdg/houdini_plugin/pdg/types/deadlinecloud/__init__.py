@@ -39,6 +39,7 @@ from deadline.houdini_pdg.errors import (
 )
 from deadline.houdini_pdg.farm_job import DeadlineFarmJob
 from deadline.houdini_pdg.houdini.host import (
+    SUBMIT_STOP_MAX_AGE,
     HoudiniPdgHost,
     cook_set_names,
     run_pre_cook_checks,
@@ -148,10 +149,18 @@ class DeadlineCloudPDGScheduler(PyScheduler):
             # A stopped Submit starts this cook only to put its stop on the node's tabs, because
             # PDG keeps a message sent inside a cook. Submit shows the popup itself.
             path: str = host.scheduler_node().path()
-            stop: Optional[Tuple[str, str]] = submit_stops.pop(path, None)
+            stop: Optional[Tuple[float, str, str]] = submit_stops.pop(path, None)
+            # A stale stop belongs to an earlier Submit, so this is a real cook and goes on.
+            if stop is not None and time.monotonic() - stop[0] > SUBMIT_STOP_MAX_AGE:
+                _logger.warning(
+                    "Dropped Submit's stop for %s, stored %.0f s ago, and started the cook.",
+                    path,
+                    time.monotonic() - stop[0],
+                )
+                stop = None
             if stop is not None:
                 _logger.info("Took Submit's stop for %s in onStartCook", path)
-                error, advisories = stop
+                _, error, advisories = stop
                 if error:
                     self.cookError(error)
                 if advisories:

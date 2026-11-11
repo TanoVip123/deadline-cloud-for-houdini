@@ -22,6 +22,7 @@ from .houdini_fakes import (
     install_hou,
 )
 
+from deadline.houdini_pdg.houdini import host
 from deadline.houdini_pdg.houdini.host import submit
 
 
@@ -36,6 +37,8 @@ def scene(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeHou:
     monkeypatch.setitem(
         sys.modules, "hdefereval", types.SimpleNamespace(executeDeferred=lambda call: call())
     )
+    # A stop no cook start took would otherwise reach the next test's cook.
+    host.submit_stops.clear()
     return install_hou(monkeypatch, hip)
 
 
