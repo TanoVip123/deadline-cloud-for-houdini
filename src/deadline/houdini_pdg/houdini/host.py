@@ -1338,9 +1338,13 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             if isinstance(stopped, GraphRefusedError)
             else str(stopped)
         )
+        # The error tab keeps the text after the popup closes. The cookError comes first, so
+        # Houdini's UI handles the node's update while the popup is open.
+        if scheduler is not None:
+            _call(scheduler, "cookError", text)
         _show(text)
-        # The error tab keeps the text after the popup closes. PDG shows a cookError only
-        # once the node updates, and a generate on the scheduler node does that at once.
+        # PDG shows a cookError only once the node updates, and a generate on the scheduler
+        # node does that at once. It runs only after this Submit's display generate finished.
         if scheduler is None:
             _logger.warning(
                 "Could not put the error on %s's error tab, because Submit stopped before "
@@ -1348,8 +1352,8 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
                 node.path(),
             )
         else:
-            _call(scheduler, "cookError", text)
             _call(node, "generateStaticWorkItems", True)
+            _logger.info("Put Submit's error on %s's error tab.", node.path())
         return False
     counts: str = (
         f"Steps: {len(snapshot.steps)}, tasks: {snapshot.total_tasks}"

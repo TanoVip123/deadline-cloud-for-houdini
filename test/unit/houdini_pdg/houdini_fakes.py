@@ -386,10 +386,12 @@ def expand(text: str) -> str:
 class FakeMessages:
     """``hou.ui.displayMessage``: answers from ``answers`` in turn, then ``choice``, and records each call.
 
-    An answer of None closes the window, which returns the call's ``close_choice``.
+    An answer of None closes the window, which returns the call's ``close_choice``. A test can
+    set ``on_show`` to run while the window is open, as Houdini handles its queue then.
     """
 
     def __init__(self) -> None:
+        self.on_show: Optional[Callable[[], None]] = None
         self.choice: Optional[int] = 0
         self.answers: List[Optional[int]] = []
         self.calls: List[Tuple[str, Tuple[str, ...]]] = []
@@ -399,6 +401,8 @@ class FakeMessages:
         # Record the text, the buttons, and every other option, then answer.
         self.calls.append((text, tuple(kwargs.get("buttons", ()))))
         self.options.append(kwargs)
+        if self.on_show is not None:
+            self.on_show()
         answer: Optional[int] = self.answers.pop(0) if self.answers else self.choice
         return int(kwargs.get("close_choice", -1)) if answer is None else answer
 
