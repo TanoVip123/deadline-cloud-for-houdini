@@ -1525,7 +1525,8 @@ def _update_node_tabs(node: Any, sent: str, tab: str) -> None:
     also show it, but it can start PDG's processes. hython has no UI to update.
     """
     if hou.isUIAvailable():
-        hou.ui.triggerUpdate()
+        # A failed update only delays the tab, so it's logged and Submit goes on.
+        _call(hou.ui, "triggerUpdate")
         _logger.info("Sent %s to %s's %s.", sent, node.path(), tab)
     else:
         _logger.info(

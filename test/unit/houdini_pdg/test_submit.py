@@ -620,6 +620,22 @@ def test_in_hython_the_error_is_sent_to_the_tab_with_no_ui_update(
     assert "error tab, which may update late with no UI." in caplog.text
 
 
+def test_a_failed_ui_update_does_not_make_submit_raise(scene: FakeHou) -> None:
+    """The update only redraws the tab, so a raise from it must not escape the Submit button."""
+    # render is an In-Process step, which is refused, and Houdini's UI update raises.
+    network: FakeNetwork = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    tab: _ErrorTab = _ErrorTab(network, scene)
+    network.node("render").hom.set_parm("pdg_cooktype", 1)
+
+    def fail() -> None:
+        raise RuntimeError("The UI is closing.")
+
+    scene.on_update = fail
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert tab.events == ["dirty", "cookError", "popup"] and scene.updates == 1
+
+
 def test_in_the_ui_a_stop_before_the_display_generate_finishes_skips_the_error_tab(
     scene: FakeHou, caplog: pytest.LogCaptureFixture
 ) -> None:
