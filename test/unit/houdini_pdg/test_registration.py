@@ -177,25 +177,33 @@ def _connect(network: FakeNetwork, cloud: FakeCloud, tmp_path: Path) -> CookServ
 # -- start, tick and stop -----------------------------------------------------
 
 
-def test_a_cook_of_a_node_just_set_to_service_stops_pdg_at_its_start(scene: FakeHou) -> None:
+@pytest.mark.parametrize(
+    "cook_type, text",
+    [
+        ("Service", "render: This node's work items cook in a long-running service process"),
+        ("InProcess", "render: This node runs a command, but its cook type is In-Process"),
+    ],
+    ids=["Service", "InProcess"],
+)
+def test_a_refused_graph_stops_pdg_at_its_start(scene: FakeHou, cook_type: str, text: str) -> None:
     """PDG started a Service node's processes after a True start, and still said Out-of-Process.
 
-    The parm must decide, and only a False start stops PDG before those processes start.
+    Every graph refusal returns False, so PDG starts nothing, and the node keeps the refusal.
     """
-    # PDG still says Out-of-Process from an earlier generate, and the artist sets render to Service.
+    # Service is set on the parm while PDG still says Out-of-Process. In-Process is PDG's own.
     network: FakeNetwork = build_network(PYRO_BONFIRE)
-    network.node("render").cookType = "OutOfProcess"
-    network.node("render").hom.set_parm("pdg_cooktype", 3)
+    network.node("render").cookType = "OutOfProcess" if cook_type == "Service" else cook_type
+    network.node("render").hom.set_parm("pdg_cooktype", 3 if cook_type == "Service" else 1)
     scheduler: Any = _scheduler(network)
     assert scheduler.onStartCook(False, None) is False
     (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
-    assert "render: This node's work items cook in a long-running service process" in error
+    assert text in error
     assert not [call for call in scheduler.calls if call[0] == "setWorkingDir"]
 
 
 def test_a_start_that_fails_on_a_bad_setting_still_returns_true(scene: FakeHou) -> None:
-    """Only a Service refusal may return False. Any other failed start cancels on the first tick."""
-    # A Debug Level of 5 fails the start after every check passed.
+    """Only a graph refusal may return False. A setup error cancels on the first tick."""
+    # A Debug Level of 5 raises a setup error after every check passed.
     network: FakeNetwork = build_network(
         PYRO_BONFIRE, scheduler_parms={"working_dir": "$HIP", "debug_level": 5, "validate_graph": 1}
     )
@@ -613,10 +621,10 @@ def test_a_cook_of_only_in_process_nodes_is_refused_at_its_start_before_the_farm
     network: FakeNetwork = build_network(PYRO_BONFIRE)
     cloud: FakeCloud = FakeCloud()
     scheduler: Any = _scheduler(network, cloud)
-    assert scheduler.onStartCook(False, [network.node("wedge1")]) is True
+    assert scheduler.onStartCook(False, [network.node("wedge1")]) is False
     (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
     assert "wedge1" in error and "No node in this cook runs a command on a worker" in error
-    assert cloud.s3.keys == [] and scheduler.onTick() == PDG.tickResult.SchedulerCancelCook
+    assert cloud.s3.keys == []
 
 
 class _Deferred:

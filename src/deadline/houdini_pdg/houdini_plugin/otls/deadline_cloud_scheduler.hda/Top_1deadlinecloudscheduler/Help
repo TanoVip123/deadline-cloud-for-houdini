@@ -31,10 +31,11 @@ check that fails starts nothing and creates no job.
 
 * Cook the TOP network as usual, for example with the Cook Output Node button.
   The scheduler refuses the cook if the scene has never been saved or has
-  unsaved changes, or if a node's Cook Type is Service. A Service node is
-  refused before PDG starts its service processes, and PDG then says "Failed to
-  start scheduler", with the reason on this node's error tab. Any warning the
-  checks find goes on this node's Warning tab. The cook uses
+  unsaved changes, or if a check finds a node it can't run, such as a node
+  whose Cook Type is Service or In-Process. A refused cook stops before PDG
+  starts anything, including a Service node's processes, and PDG then says
+  "Failed to start scheduler", with the reason on this node's error tab. Any
+  warning the checks find goes on this node's Warning tab. The cook uses
   the work items PDG already has, so after you change a parm on a SOP outside
   the TOP network, dirty the network or click __Generate__ before you cook, or
   use __Submit__, which does that itself.

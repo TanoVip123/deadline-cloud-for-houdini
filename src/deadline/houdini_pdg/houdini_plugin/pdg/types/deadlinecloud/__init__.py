@@ -44,7 +44,7 @@ from deadline.houdini_pdg.houdini.settings import SchedulerSettings
 from deadline.houdini_pdg.ports import Clock, WorkItemHandle
 from deadline.houdini_pdg.submitter import PdgSubmitter, farm_problem, get_workstation_setting
 from deadline.houdini_pdg.task_storage import S3TaskStorage
-from deadline.houdini_pdg.validation import RefusalScenario, Verdict
+from deadline.houdini_pdg.validation import Verdict
 
 _logger: logging.Logger = logging.getLogger(__name__)
 
@@ -130,9 +130,9 @@ class DeadlineCloudPDGScheduler(PyScheduler):
     def onStartCook(self, static: bool, cook_set: Any) -> bool:
         """Start a cook.
 
-        A failure reports its error here and returns True, so the cook is canceled
-        on the first tick. A Service node refusal returns False, because PDG starts
-        that node's service processes after a True return.
+        A failure reports its error here. A graph refusal returns False, because PDG
+        starts a Service node's processes after a True return. Any other failure
+        returns True, and the cook is canceled on the first tick.
         """
         self._start_failed = False
         self._popup_shown = False
@@ -160,12 +160,9 @@ class DeadlineCloudPDGScheduler(PyScheduler):
             self._core = None
             self._start_failed = True
             self._fail("onStartCook", error)
-            # False stops PDG before it starts the service processes, and the node keeps the
-            # error made above. PDG then schedules nothing, so no working directory is needed.
-            if isinstance(error, GraphRefusedError) and any(
-                refusal.scenario is RefusalScenario.SERVICE_NODE
-                for refusal in error.verdict.refusals
-            ):
+            # A refused graph returns False, so PDG starts nothing, such as a Service node's
+            # processes. The node keeps the error made above, and no working directory is needed.
+            if isinstance(error, GraphRefusedError):
                 return False
             self._use_scratch_working_dir()
             return True
