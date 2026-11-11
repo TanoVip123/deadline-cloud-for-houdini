@@ -16,6 +16,7 @@ from .houdini_fakes import (
     PYRO_BONFIRE,
     COOKING_EXAMPLE,
     FakeHou,
+    FakePaneTab,
     FakeNetwork,
     FakeNode,
     build_network,
@@ -594,6 +595,36 @@ def test_each_refused_submit_shows_its_own_text_on_the_error_tab(scene: FakeHou)
     second: str = scene.messages.calls[-1][0]
     assert second != first and tab.shown == [second]
     assert network.scheduler_node.generate_calls == []
+
+
+def test_each_refused_submit_redraws_the_network_editors_after_the_text_is_on_the_tab(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Houdini's network editor didn't draw the error badge until the next click or graph change.
+
+    Each refused Submit, the same text again included, redraws every network editor once the
+    text is on the tab, and leaves other pane tabs alone.
+    """
+    # Two network editors and a parameter editor, each noting what the tab showed at its redraw.
+    caplog.set_level("INFO")
+    network: FakeNetwork
+    tab: _ErrorTab
+    network, tab, text = _refused_on_the_tab(scene)
+    seen: List[List[str]] = []
+    editors: List[FakePaneTab] = [
+        FakePaneTab("NetworkEditor", on_redraw=lambda: seen.append(list(tab.shown)))
+        for _ in range(2)
+    ]
+    parameters: FakePaneTab = FakePaneTab("Parm")
+    scene.pane_tabs = [*editors, parameters]
+    # The same refusal twice, as a repeat Submit with no change makes it.
+    for _ in range(2):
+        assert submit(network.scheduler_node, get_setting=_workstation) is False
+    assert [editor.redraws for editor in editors] == [2, 2] and parameters.redraws == 0
+    assert seen == [[text]] * 4 and scene.updates == 0
+    assert "Redrew the network editor to show /obj/topnet1/deadlinecloudscheduler1's badge" in (
+        caplog.text
+    )
 
 
 @pytest.mark.skip(reason="Submit no longer asks the UI to update, so hython and the UI match.")

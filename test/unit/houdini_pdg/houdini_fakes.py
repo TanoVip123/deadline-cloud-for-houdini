@@ -433,6 +433,25 @@ class FakeMessages:
 
 
 @dataclass
+class FakePaneTab:
+    """A pane tab in ``hou.ui.paneTabs``, which counts its redraws and runs ``on_redraw`` on each."""
+
+    kind: str
+    on_redraw: Optional[Callable[[], None]] = None
+    redraws: int = 0
+
+    def type(self) -> str:
+        """``hou.PaneTab.type``: the tab's ``hou.paneTabType`` value."""
+        return self.kind
+
+    def redraw(self) -> None:
+        """``hou.NetworkEditor.redraw``: count the call, then run ``on_redraw``."""
+        self.redraws += 1
+        if self.on_redraw is not None:
+            self.on_redraw()
+
+
+@dataclass
 class FakeHou:
     """The scene a test sets up, written onto the shared fake ``hou`` module."""
 
@@ -445,6 +464,8 @@ class FakeHou:
     #: Called by ``hou.ui.triggerUpdate`` when set, as Houdini's UI then redraws the nodes.
     on_update: Optional[Callable[[], None]] = None
     updates: int = 0
+    #: What ``hou.ui.paneTabs`` returns.
+    pane_tabs: List[FakePaneTab] = field(default_factory=list)
 
     def trigger_update(self) -> None:
         """``hou.ui.triggerUpdate``: count the call, then run ``on_update``."""
@@ -474,8 +495,11 @@ def install_hou(monkeypatch: pytest.MonkeyPatch, hip_file: str) -> FakeHou:
         "hipFile": state.hip_file,
         "text": types.SimpleNamespace(expandString=expand),
         "ui": types.SimpleNamespace(
-            displayMessage=state.messages, triggerUpdate=state.trigger_update
+            displayMessage=state.messages,
+            triggerUpdate=state.trigger_update,
+            paneTabs=lambda: tuple(state.pane_tabs),
         ),
+        "paneTabType": types.SimpleNamespace(NetworkEditor="NetworkEditor", Parm="Parm"),
         "isUIAvailable": lambda: state.ui,
         "OperationFailed": OperationFailed,
         "fileReferences": lambda: list(state.file_references),
