@@ -8,7 +8,7 @@ import os
 import sys
 import types
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -791,3 +791,131 @@ def test_a_step_with_no_items_below_nodes_with_items_is_still_refused_as_too_ear
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     text: str = scene.messages.calls[-1][0]
     assert "montage: This node runs on the farm and has generated no work items yet" in text
+
+
+class _Queue:
+    """``hdefereval``: keeps what Submit queues for after its button callback, until the test runs it."""
+
+    def __init__(self) -> None:
+        self.queued: List[Callable[[], Any]] = []
+
+    def executeDeferred(self, function: Callable[[], Any]) -> None:
+        self.queued.append(function)
+
+    def run(self) -> None:
+        """Run and clear the queue, as Houdini does once the callback returns."""
+        queued: List[Callable[[], Any]] = self.queued
+        self.queued = []
+        for function in queued:
+            function()
+
+
+@pytest.fixture
+def queue(scene: FakeHou, monkeypatch: pytest.MonkeyPatch) -> _Queue:
+    """A main-thread queue the test runs by hand, in place of the one that runs at once."""
+    deferred: _Queue = _Queue()
+    monkeypatch.setitem(sys.modules, "hdefereval", deferred)
+    return deferred
+
+
+def _record_cook_kwargs(node: FakeNode) -> List[Dict[str, Any]]:
+    """Record the arguments of every ``cookWorkItems`` call on ``node``, refused or not."""
+    seen: List[Dict[str, Any]] = []
+    cook: Callable[..., None] = node.cookWorkItems
+
+    def record(**kwargs: Any) -> None:
+        seen.append(kwargs)
+        cook(**kwargs)
+
+    node.cookWorkItems = record  # type: ignore[method-assign]
+    return seen
+
+
+def test_a_stopped_submit_stores_its_stop_and_queues_a_cook_of_the_output_node(
+    scene: FakeHou, queue: _Queue
+) -> None:
+    """A cook started inside the button callback never reached onStartCook in the GUI.
+
+    So the cook start waits for the main-thread queue, cooks the node Cook Output Node cooks,
+    and asks for no second save prompt.
+    """
+    # render is an In-Process step and the network's Output node, and montage is the display node.
+    network: FakeNetwork = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    network.node("render").hom.set_parm("pdg_cooktype", 1)
+    output: FakeNode = network.node("render").hom
+    network.topnet.outputNode = lambda: output  # type: ignore[attr-defined]
+    kwargs: List[Dict[str, Any]] = _record_cook_kwargs(output)
+    path: str = network.scheduler_node.path()
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    # The popup has shown, the stop waits for onStartCook, and nothing is cooked yet.
+    text: str = scene.messages.calls[-1][0]
+    assert "The cook can't start." in text and host.submit_stops[path][1:] == (text, "")
+    assert len(queue.queued) == 1 and kwargs == []
+    queue.run()
+    assert kwargs == [
+        {"block": False, "generate_only": False, "save_prompt": False, "nodes": [output]}
+    ]
+    assert output.stop_cooks == [{path: (text, "")}] and _cooks(network) == []
+
+
+def test_a_cancel_at_the_confirmation_routes_only_the_advisories(
+    scene: FakeHou, queue: _Queue
+) -> None:
+    """A cancel is no error, so the cook start must carry the advisories and no error text.
+
+    An error there would put a red badge on a graph that passed every check.
+    """
+    # Validation is off, so an In-Process render step is an advisory, and the artist cancels.
+    scene.messages.choice = 1
+    network: FakeNetwork = _network()
+    network.scheduler_node.set_parm("validate_graph", 0)
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    network.node("render").hom.set_parm("pdg_cooktype", 1)
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    details: str = scene.messages.options[0]["details"]
+    entry: Tuple[float, str, str] = host.submit_stops[network.scheduler_node.path()]
+    assert details.startswith("render: ") and entry[1:] == ("", details)
+    # The confirmation was the only dialog, and the cook start is queued.
+    assert [buttons for _, buttons in scene.messages.calls] == [("Submit", "Cancel")]
+    assert len(queue.queued) == 1
+
+
+@pytest.mark.parametrize("stop", ["default-scheduler", "no-display-node", "no-pdg-graph"])
+def test_a_stop_before_the_network_has_a_pdg_graph_starts_no_cook(
+    scene: FakeHou, queue: _Queue, stop: str
+) -> None:
+    """These stops come before Submit has a PDG graph, so they stay popup only.
+
+    A cook start there could run on another scheduler, or build the graph as a side effect.
+    """
+    # Each case breaks the network before Submit gets its graph context.
+    network: FakeNetwork = _network()
+    display: Any = network.topnet.displayNode()
+    if stop == "default-scheduler":
+        network.topnet.set_parm("topscheduler", "localscheduler")
+    elif stop == "no-display-node":
+        network.topnet.display = None
+    else:
+        network.scheduler_node.context = None
+        network.scheduler_node.cook_creates = None
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    # One error popup, and no stop stored, queued or cooked.
+    ((_, buttons),) = scene.messages.calls
+    assert buttons == () and host.submit_stops == {} and queue.queued == []
+    assert display.stop_cooks == [] and display.cook_calls == []
+
+
+def test_a_confirmed_submit_routes_nothing_through_a_cook_start(
+    scene: FakeHou, queue: _Queue
+) -> None:
+    """The real cook sends the advisories from its snapshot, so a routed copy would show twice."""
+    # Validation is off, so an In-Process render step is an advisory, and the artist confirms.
+    network: FakeNetwork = _network()
+    network.scheduler_node.set_parm("validate_graph", 0)
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    network.node("render").hom.set_parm("pdg_cooktype", 1)
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    assert scene.messages.options[-1]["details"].startswith("render: ")
+    assert host.submit_stops == {} and queue.queued == []
+    assert _cooks(network) == [{"block": False}]

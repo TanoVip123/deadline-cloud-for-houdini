@@ -147,6 +147,8 @@ def scene(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeHou:
     os.makedirs(os.path.dirname(hip))
     monkeypatch.delenv("DEADLINE_PDG_DEBUG_LEVEL", raising=False)
     monkeypatch.setenv("HIP", os.path.dirname(hip))
+    # A stop an earlier test left behind would turn this test's cook into a refusal.
+    host_module.submit_stops.clear()
     state: FakeHou = install_hou(monkeypatch, hip)
     state.ui = False
     return state
@@ -737,3 +739,45 @@ def test_submits_stop_logs_under_the_package_logger(
         f"Took Submit's stop for {path} in onStartCook",
         f"Refused the cook start to show Submit's stop on {path}'s tabs",
     ]
+
+
+def test_on_start_cook_takes_submits_stop_sends_it_to_both_tabs_and_refuses(
+    scene: FakeHou, ui: _Deferred
+) -> None:
+    """The stop reaches the node only through this refused start, as PDG keeps a message sent in a cook.
+
+    Submit already showed the popup, so this start shows none and contacts no farm.
+    """
+    # The cook would start without the stop, so the refusal comes from the stop alone.
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
+    cloud: FakeCloud = FakeCloud()
+    scheduler: Any = _scheduler(network, cloud)
+    path: str = network.scheduler_node.path()
+    host_module.submit_stops[path] = (time.monotonic(), "The cook can't start.", "render: slow")
+    assert scheduler.onStartCook(False, [network.node("sim")]) is False
+    assert scheduler.calls == [
+        ("cookError", "The cook can't start."),
+        ("cookWarning", "render: slow"),
+    ]
+    # The stop is used once, and nothing else was queued or called.
+    assert host_module.submit_stops == {} and ui.queued == [] and cloud.s3.keys == []
+
+
+@pytest.mark.parametrize("age, refused", [(29.0, True), (31.0, False)], ids=["29s", "31s"])
+def test_on_start_cook_drops_a_stop_older_than_30_seconds_and_cooks(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture, age: float, refused: bool
+) -> None:
+    """A stop no cook start took, say after a failed queue, must not refuse a later real cook.
+
+    A stop within 30 s is still Submit's own, so it is taken.
+    """
+    # Submit stored a stop ``age`` seconds ago, and the cook would start without it.
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
+    scheduler: Any = _scheduler(network)
+    path: str = network.scheduler_node.path()
+    host_module.submit_stops[path] = (time.monotonic() - age, "The cook can't start.", "")
+    started: bool = scheduler.onStartCook(False, [network.node("sim")])
+    errors: List[Any] = [call for call in scheduler.calls if call[0] == "cookError"]
+    assert started is not refused and host_module.submit_stops == {}
+    assert errors == ([("cookError", "The cook can't start.")] if refused else [])
+    assert ("Dropped Submit's stop for " + path in caplog.text) is not refused
