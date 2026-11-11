@@ -61,11 +61,12 @@ check that fails starts nothing and creates no job.
   also goes on the error tab once PDG has this scheduler from an earlier
   generate in the session. Any other problem found before that generate
   finishes, such as a bad tab value or a step over a quota, shows only in the
-  popup. So does a generate that was canceled or that failed on a node, which
-  leaves steps with no work items and errors on the nodes. The errors can show
-  a moment after the popup. Fix them, then submit again. When no node has an
-  error yet, the popup names the steps with no work items, because those steps
-  may also make no items with their current settings.
+  popup. A generate that was canceled or that failed on a node leaves steps
+  with no work items and errors on the nodes. Submit stops, and puts its text
+  on the error tab too. The node errors can show a moment after the popup.
+  Fix them, then submit again. When no node has an error yet, the text names
+  the steps with no work items, because those steps may also make no items
+  with their current settings.
 
 Some checks need the generated work items, so the cook runs every check again
 before it submits the job. Results stay on the farm: download them with

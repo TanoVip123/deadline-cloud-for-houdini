@@ -1376,12 +1376,13 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             _call(context, "removeEventHandler", handler)
         if over_quota:
             raise GraphRefusedError(over_quota[0])
+        # From here every stop goes on the error tab too, which the dirty above cleared.
+        scheduler = _call(context, "schedulerForName", scheduler_name)
         # A canceled or failed generate still returns. Part of a graph can't be judged, so Submit stops.
         unfinished: str = _explain_unfinished_generate(graph_nodes, infos, cook_set)
         if unfinished:
             raise CookSetupError(unfinished)
         # Read the items from this scheduler, as the cook does, and check them all.
-        scheduler = _call(context, "schedulerForName", scheduler_name)
         dependency_graph: Any = _call(scheduler, "dependencyGraph", True)
         verdict: Verdict
         snapshot: GraphSnapshot

@@ -776,22 +776,25 @@ _BOTH_CAUSES: str = (
         "only-static-step-empty",
     ],
 )
-def test_a_generate_that_did_not_finish_stops_submit_with_only_a_popup(
+@pytest.mark.parametrize("found", [True, False], ids=["scheduler", "no-scheduler"])
+def test_a_generate_that_did_not_finish_stops_submit_on_the_popup_and_the_error_tab(
     scene: FakeHou,
     caplog: pytest.LogCaptureFixture,
     empty: Tuple[str, ...],
     dynamic: Tuple[str, ...],
     error_shown: bool,
     expected: str,
+    found: bool,
 ) -> None:
     """PDG's blocking generate returns normally when it is canceled or a node fails to generate.
 
     Submit must stop rather than judge part of the graph. In Houdini 21.0 the node error came
     0.7 s after the generate returned, so with no error the empty items alone must stop it:
     every static step empty, or an empty step below an empty node, as a cancel leaves it. With
-    no error the steps may also make nothing, so the popup names them and both causes.
+    no error the steps may also make nothing, so the popup names them and both causes. The
+    text also goes on the error tab, or the log says why not when PDG has no scheduler.
     """
-    # PDG has the scheduler, and wedge1's generate fails during Submit's display generate.
+    # The generate leaves the steps empty, and may set wedge1's error or lose the scheduler.
     network: FakeNetwork = _network()
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
     tab: _ErrorTab = _ErrorTab(network, scene)
@@ -807,14 +810,24 @@ def test_a_generate_that_did_not_finish_stops_submit_with_only_a_popup(
         tab.scheduler.dependency_graph = ({}, {}, [])
         if error_shown:
             network.node("wedge1").hom.node_errors = ["Unable to evaluate expression."]
+        if not found:
+            del network.context.schedulers["deadlinecloudscheduler1"]
 
-    # Submit stops with the popup only: no cook, no cookError and no UI update.
+    # Submit stops with no cook and no generate of the scheduler node.
+    caplog.set_level("INFO")
     display.on_generate = generate
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     ((text, buttons),) = scene.messages.calls
     assert text == expected
     assert buttons == () and _cooks(network) == []
-    assert tab.scheduler.calls == [] and scene.updates == 0 and "error tab" in caplog.text
+    assert network.scheduler_node.generate_calls == []
+    # With the scheduler, the same text is on the tab. Without it, only the popup and the log.
+    if found:
+        assert tab.events == ["dirty", "cookError", "popup", "update"] and tab.shown == [text]
+        assert "Sent Submit's error to" in caplog.text
+    else:
+        assert tab.scheduler.calls == [] and scene.updates == 0
+        assert "Could not put the error on" in caplog.text
 
 
 def test_an_error_on_a_node_the_display_node_does_not_cook_does_not_stop_submit(
