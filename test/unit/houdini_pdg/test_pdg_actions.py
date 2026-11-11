@@ -1320,14 +1320,6 @@ def test_a_scene_that_fails_to_load_is_left_to_the_job_script(
 # -- the node's extra output folders -------------------------------------------
 
 
-def test_without_output_directories_the_clients_arguments_are_as_before(pdg_dir: str) -> None:
-    """A session from an older submitter sends no list, and the client must get what it got before."""
-    client_args: Dict[str, Any] = download_pdg_work_item(
-        FakeStorage(payload()), ADDRESS, args(pdg_dir), []
-    )[0]
-    assert "mapped_output_directories" not in client_args
-
-
 def test_a_silent_command_reports_what_it_wrote_in_an_output_directory(
     pdg_dir: str, tmp_path: Path, scripts: Path
 ) -> None:

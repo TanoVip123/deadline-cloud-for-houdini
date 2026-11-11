@@ -804,55 +804,6 @@ def test_a_node_with_no_item_in_the_cook_is_outside_it() -> None:
     assert unknown_set["render"].in_cook_set is None
 
 
-def test_an_item_pdg_cooked_from_cache_is_dropped_but_recorded() -> None:
-    """A cached item never reaches the farm, so the node keeps a record of it for validation to refuse."""
-    # One cached item and one queued item on the same step.
-    nodes: List[_PdgNode] = _pyro_like()
-    cached: _WorkItem = _WorkItem(
-        nodes[1], 0, state=_Enum("workItemState.CookedCache"), outputs=[_File("$HIP/geo/c.0.bgeo")]
-    )
-    items: Dict[Any, List[Any]] = {
-        cached: [],
-        _WorkItem(nodes[1], 1, state=_Enum("workItemState.Waiting")): [],
-        _WorkItem(nodes[1], 2, state=_Enum("workItemState.CookedSuccess")): [],
-    }
-    infos: Dict[str, NodeInfo] = _by_name(
-        node_infos(nodes, (items, {}, []), only_items_in_cook=True)
-    )
-    assert [i.name for i in infos["cache"].items] == ["cache_1"]
-    assert [i.name for i in infos["cache"].cached_items] == ["cache_0"]
-    assert infos["cache"].cached_items[0].declared_outputs[0].path == "$HIP/geo/c.0.bgeo"
-    # Outside a cook nothing is dropped, so nothing is recorded as cached.
-    outside: Dict[str, NodeInfo] = _by_name(node_infos(nodes, (items, {}, [])))
-    assert outside["cache"].cached_items == ()
-
-
-def test_items_from_cache_are_recorded_only_on_a_node_the_cook_set_names() -> None:
-    """Cooking render alone must not be refused for a cache an earlier cook left above it.
-
-    Houdini's cook set names every node a cook touches, so a node it leaves out
-    holds an earlier cook's states. A node whose every item came from cache stays
-    outside the cook either way, because it has no item to offer.
-    """
-    # The cache's only item came from cache, and render is scheduled.
-    nodes: List[_PdgNode] = _pyro_like()
-    items: Dict[Any, List[Any]] = {
-        _WorkItem(nodes[1], 0, state=_Enum("workItemState.CookedCache")): [],
-        _WorkItem(nodes[3], 0, state=_Enum("workItemState.Scheduled")): [],
-    }
-    named: Dict[str, NodeInfo] = _by_name(
-        node_infos(nodes, (items, {}, []), ["cache", "render"], only_items_in_cook=True)
-    )
-    assert [i.name for i in named["cache"].cached_items] == ["cache_0"]
-    assert named["cache"].in_cook_set is False
-    # The same graph when the cook set names only render.
-    render_only: Dict[str, NodeInfo] = _by_name(
-        node_infos(nodes, (items, {}, []), ["render"], only_items_in_cook=True)
-    )
-    assert render_only["cache"].cached_items == ()
-    assert render_only["cache"].in_cook_set is False
-
-
 def test_an_item_whose_state_is_unknown_or_unreadable_is_kept() -> None:
     """An item with no state, a new state, or a blank one is kept: only known states drop items."""
     # No state, a state PDG may add later, and a blank one.

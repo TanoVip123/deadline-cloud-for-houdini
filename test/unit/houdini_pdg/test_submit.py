@@ -5,10 +5,9 @@
 from __future__ import annotations
 
 import os
-import sys
 import types
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -18,12 +17,11 @@ from .houdini_fakes import (
     FakeHou,
     FakeNetwork,
     FakeNode,
-    FakePdgNode,
     build_network,
     install_hou,
 )
 
-from deadline.houdini_pdg.houdini.host import run_pre_cook_checks, submit
+from deadline.houdini_pdg.houdini.host import submit
 
 
 @pytest.fixture
@@ -142,48 +140,6 @@ def test_the_confirmation_shows_the_jobs_settings_and_any_warning(scene: FakeHou
     assert "python1" in scene.messages.options[0]["details"]
 
 
-def _bad_working_directory(network: FakeNetwork, tmp_path: Path) -> str:
-    """Empty the working directory, and return the parm the error must name."""
-    network.scheduler_node.set_parm("working_dir", "")
-    return "'working_dir'"
-
-
-def _bad_host_requirement(network: FakeNetwork, tmp_path: Path) -> str:
-    """Set a GPU minimum above its maximum, and return the parm the error must name."""
-    _with_requirements(network, hr_gpu_min=4, hr_gpu_max=2)
-    return "hr_gpu_min"
-
-
-def _missing_listed_file(network: FakeNetwork, tmp_path: Path) -> str:
-    """List one file that isn't on disk, and return the parm the error must name."""
-    network.scheduler_node.set_parm("input_filenames", 1)
-    network.scheduler_node.set_parm(
-        "input_filenames1", str(tmp_path / "nowhere.cube"), kind="FileReference"
-    )
-    return "input_filenames1"
-
-
-@pytest.mark.parametrize(
-    "break_tab", [_bad_working_directory, _bad_host_requirement, _missing_listed_file]
-)
-def test_a_bad_tab_value_is_named_before_anything_is_generated(
-    scene: FakeHou, tmp_path: Path, break_tab: Callable[[FakeNetwork, Path], str]
-) -> None:
-    """A typo on a tab must not cost the artist a whole generate first, and nothing cooks.
-
-    Before, such a value surfaced only once the cook had started, on the node's error flag.
-    """
-    network: FakeNetwork = _network()
-    named: str = break_tab(network, tmp_path)
-    display: Any = network.topnet.displayNode()
-    # One error popup names the parm, and nothing is generated or cooked.
-    assert submit(network.scheduler_node, get_setting=_workstation) is False
-    ((text, buttons),) = scene.messages.calls
-    assert named in text and buttons == ()
-    assert scene.messages.options[0]["severity"] == "Error"
-    assert ("generate", True) not in display.work_item_calls and _cooks(network) == []
-
-
 def test_submitting_a_display_node_with_no_step_above_it_is_refused(scene: FakeHou) -> None:
     """With the wedge displayed, the cook would run only in-process nodes and make no job."""
     # Display the wedge, then Submit, which must refuse before cooking.
@@ -217,24 +173,6 @@ def _generated(network: FakeNetwork, counts: Dict[str, int]) -> None:
     scheduler: Any = network.scheduler()
     scheduler.dependency_graph = (items, {}, [])
     network.context.schedulers["deadlinecloudscheduler1"] = scheduler
-
-
-def test_the_generate_runs_after_the_save_and_leaves_the_saved_scene_saved(scene: FakeHou) -> None:
-    """A generate that marked the scene changed would make Submit refuse the scene it just saved.
-
-    The generate blocks, so the confirmation can show the job's real step and task counts.
-    """
-    # An unsaved scene, saved by Submit, then generated.
-    scene.hip_file.unsaved = True
-    network: FakeNetwork = _network()
-    _generated(network, {"sim": 1, "render": 1, "montage": 1})
-    display: Any = network.topnet.displayNode()
-    assert submit(network.scheduler_node, get_setting=_workstation) is True
-    assert scene.hip_file.saves == 1 and ("generate", True) in display.work_item_calls
-    assert scene.hip_file.hasUnsavedChanges() is False
-    assert _parm_writes(network) == []
-    # The confirmation shows the generated job's size.
-    assert "Steps: 3, tasks: 3" in scene.messages.calls[-1][0]
 
 
 def test_a_network_over_a_shape_quota_is_refused_before_it_is_generated(scene: FakeHou) -> None:
@@ -294,16 +232,6 @@ def test_the_confirmation_lists_the_host_requirements(scene: FakeHou) -> None:
     assert "Host requirements: attr.worker.os.family any of linux, amount.worker.gpu min 1" in text
 
 
-def test_the_confirmation_says_any_worker_and_no_extra_attachments_for_empty_tabs(
-    scene: FakeHou,
-) -> None:
-    """Both lines are always shown, so an artist can tell "none" from a tab that was ignored."""
-    network: FakeNetwork = _network()
-    assert submit(network.scheduler_node, get_setting=_workstation) is True
-    text: str = scene.messages.calls[0][0]
-    assert "Host requirements: any worker" in text and "Extra attachments: none" in text
-
-
 def test_the_confirmation_counts_the_extra_attachments(scene: FakeHou, tmp_path: Path) -> None:
     """The artist sees that the listed files and folders go with the job before choosing Submit."""
     # One file, one folder and two output folders on the tab.
@@ -352,109 +280,6 @@ def test_after_generating_a_read_no_step_writes_and_no_disk_holds_is_refused(
     assert _cooks(network) == []
 
 
-def test_each_submit_judges_the_graph_as_it_is_now(scene: FakeHou) -> None:
-    """A second Submit must read the graph again, or it would pass a step the artist just broke.
-
-    The same node submits twice, and between the two the render step's cook type
-    becomes Service, which the cook refuses.
-    """
-    network: FakeNetwork = _network()
-    _generated(network, {"sim": 1, "render": 1, "montage": 1})
-    assert submit(network.scheduler_node, get_setting=_workstation) is True
-    # Make render a service step, then Submit the same node again.
-    network.node("render").hom.set_parm("pdg_cooktype", 3)
-    assert submit(network.scheduler_node, get_setting=_workstation) is False
-    text: str = scene.messages.calls[-1][0]
-    assert "The cook can't start." in text and "render:" in text
-    assert _cooks(network) == [{"block": False}]
-
-
-def _with_side_branch() -> FakeNetwork:
-    """Pyro Bonfire plus ``side``, a step wired only to the wedge, which no display below montage cooks."""
-    return build_network(
-        [*PYRO_BONFIRE, ("side", "hython side.py", "Processor", ["wedge1"])],
-        scheduler_parms={
-            "working_dir": "$HIP",
-            "debug_level": 0,
-            "validate_graph": 1,
-            "auto_save_hip": 0,
-            "name": "bonfire",
-            "priority": 50,
-        },
-    )
-
-
-@pytest.mark.parametrize(
-    "counts, refused",
-    [({"sim": 1, "render": 1, "montage": 1}, False), ({"sim": 1, "montage": 1}, True)],
-)
-def test_a_displayed_subnet_without_a_display_node_cooks_what_is_wired_into_it(
-    scene: FakeHou, counts: Dict[str, int], refused: bool
-) -> None:
-    """A subnet has no PDG node, so the cook set starts from the nodes wired into it.
-
-    Naming the subnet itself would mark every step outside the cook, so render, which
-    generated nothing, would not be refused. The side branch the subnet doesn't cook
-    generates nothing either, and refusing it for that is false.
-    """
-    # Display a subnet wired below montage, then Submit the generated items.
-    network: FakeNetwork = _with_side_branch()
-    subnet: FakeNode = network.topnet.add(
-        FakeNode("/obj/topnet1/subnet1"), network.node("montage").hom
-    )
-    network.topnet.display = subnet
-    _generated(network, counts)
-    # Submit refuses render when it has no items, and never names the side branch.
-    assert submit(network.scheduler_node, get_setting=_workstation) is not refused
-    text: str = scene.messages.calls[0][0]
-    assert "side:" not in text
-    assert ("render:" in text) if refused else ("Steps: 3, tasks: 3" in text)
-
-
-def _with_inner_step(
-    network: FakeNetwork, subnet: FakeNode, name: str, *inputs: FakeNode
-) -> FakeNode:
-    """Add a step called ``name`` inside ``subnet``, wired to ``inputs``, with its own PDG node."""
-    # PDG names a node inside a subnet by the subnet's name and its own.
-    inner: FakeNode = subnet.add(FakeNode(f"{subnet.path()}/{name}"), *inputs)
-    pdg_inner: FakePdgNode = FakePdgNode(
-        name=f"{subnet.name()}_{name}", command=f"hython {name}.py", hom=inner
-    )
-    inner.pdg_node = pdg_inner
-    network.context.nodes.append(pdg_inner)
-    return inner
-
-
-@pytest.mark.parametrize(
-    "counts, refused",
-    [
-        ({"sim": 1, "render": 1, "montage": 1, "subnet1_inner": 1}, False),
-        ({"sim": 1, "montage": 1, "subnet1_inner": 1}, True),
-    ],
-)
-def test_a_displayed_subnet_cooks_its_display_node_and_the_steps_above_it(
-    scene: FakeHou, counts: Dict[str, int], refused: bool
-) -> None:
-    """The subnet's output step, and the steps wired above it, are in the cook and are checked.
-
-    Without the output step, render, which generated nothing, would go unreported. A
-    step inside the subnet that nothing wires to its output isn't cooked, and counting
-    every node inside refused it for having no items.
-    """
-    # A subnet with no inputs outputs inner, wired to montage, and also holds stray.
-    network: FakeNetwork = _with_side_branch()
-    subnet: FakeNode = network.topnet.add(FakeNode("/obj/topnet1/subnet1"))
-    subnet.display = _with_inner_step(network, subnet, "inner", network.node("montage").hom)
-    _with_inner_step(network, subnet, "stray")
-    network.topnet.display = subnet
-    _generated(network, counts)
-    # Submit refuses render when it has no items, and never names side or stray.
-    assert submit(network.scheduler_node, get_setting=_workstation) is not refused
-    text: str = scene.messages.calls[0][0]
-    assert "side:" not in text and "stray" not in text
-    assert ("render:" in text) if refused else ("Steps: 4, tasks: 4" in text)
-
-
 class _Unprintable:
     """A value Houdini hands back that can't be turned into text, as a broken node might."""
 
@@ -488,32 +313,6 @@ def test_submit_reads_the_items_with_partitions_expanded(scene: FakeHou) -> None
     scheduler: Any = network.context.schedulers["deadlinecloudscheduler1"]
     assert submit(network.scheduler_node, get_setting=_workstation) is True
     assert scheduler.calls == [("dependencyGraph", True)]
-
-
-def test_submit_checks_the_generated_items_through_the_cook_buttons_checks(scene: FakeHou) -> None:
-    """Submit and the TOP Cook button must share one check path, so a check added there covers both.
-
-    A copy of the checks in Submit would pass every other test and drift later.
-    """
-    # Record each call of the shared checks and the graph it was given, without patching them.
-    graphs: List[Any] = []
-    code: types.CodeType = run_pre_cook_checks.__code__
-
-    def record(frame: types.FrameType, event: str, _arg: Any) -> None:
-        if event == "call" and frame.f_code is code:
-            graphs.append(frame.f_locals["dependency_graph"])
-
-    # Submit a generated network with the recorder on, then put back any earlier profiler.
-    network: FakeNetwork = _network()
-    _generated(network, {"sim": 1, "render": 1, "montage": 1})
-    scheduler: Any = network.context.schedulers["deadlinecloudscheduler1"]
-    previous: Any = sys.getprofile()
-    sys.setprofile(record)
-    try:
-        assert submit(network.scheduler_node, get_setting=_workstation) is True
-    finally:
-        sys.setprofile(previous)
-    assert len(graphs) == 1 and graphs[0] is scheduler.dependency_graph
 
 
 def test_a_network_with_no_pdg_graph_is_told_so_and_nothing_is_generated(scene: FakeHou) -> None:

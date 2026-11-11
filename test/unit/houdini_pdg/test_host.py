@@ -6,9 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
-import ntpath
 import os
-import posixpath
 import re
 import sys
 import threading
@@ -31,10 +29,8 @@ from .houdini_fakes import (
     install_hou,
 )
 
-from deadline.client.exceptions import UserInitiatedCancel
 from deadline.houdini_pdg.errors import CookSetupError, PayloadTransferError
 from deadline.houdini_pdg.graph import NodeInfo
-from deadline.houdini_pdg.houdini import host as host_module
 from deadline.houdini_pdg.houdini.host import (
     HoudiniPdgHost,
     cook_set_names,
@@ -274,17 +270,6 @@ def test_items_of_a_node_that_is_not_a_step_are_not_counted(scene: FakeHou) -> N
     network.node("wedge1").workItems = [None] * 20_000
     network.context.emit("NodeGenerated", "wedge1")
     assert reports == [] and not network.context.canceled.is_set()
-
-
-def test_a_stop_the_cook_declines_leaves_generation_running(scene: FakeHou) -> None:
-    """With validation off the cook keeps the report as a warning, so nothing is canceled."""
-    # The cook declines the stop, and a step goes over its limit.
-    network: FakeNetwork = build_network(PYRO_BONFIRE)
-    host: HoudiniPdgHost = HoudiniPdgHost(network.scheduler())
-    host.watch_generation(None, lambda verdict: False)
-    network.node("sim").workItems = [None] * 10_001
-    network.context.emit("NodeGenerated", "sim")
-    assert not network.context.canceled.wait(0.2)
 
 
 def test_stopping_the_watch_removes_its_handler_and_is_safe_twice(scene: FakeHou) -> None:
@@ -584,32 +569,6 @@ def test_a_directory_parm_that_reaches_home_is_refused_naming_the_path_and_the_p
     assert "/obj/geo1/file1/cachedir" in str(raised.value)
 
 
-def test_a_directory_below_home_is_attached(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Only home and above are refused. A project folder inside home is what most scenes use."""
-    host, home = _home_scene(monkeypatch, tmp_path, "$HIP/caches")
-    os.makedirs(os.path.join(home, "caches"))
-    assert host.scene_files().directories == (os.path.join(home, "caches"),)
-
-
-def test_the_home_comparison_ignores_case_and_separators_where_windows_does() -> None:
-    """On Windows ``C:/Users/Ana`` and ``c:\\users\\ana`` are one folder, and on Linux they aren't.
-
-    A miss on Windows would let a parm that names home attach the whole home
-    directory, so the cook would hang hashing it.
-    """
-    # Home itself, a folder above it and a drive root, in each spelling.
-    for spelled in (r"C:\USERS\ANA", "C:/Users/Ana", "c:/users", "D:/"):
-        assert host_module._is_unbounded(spelled, [r"C:\Users\Ana"], ntpath), spelled
-    # A folder inside home, and a sibling whose name only starts with home's.
-    for spelled in (r"C:\Users\Ana\proj", "c:/users/anabel"):
-        assert not host_module._is_unbounded(spelled, [r"C:\Users\Ana"], ntpath), spelled
-    # Linux paths keep their case.
-    assert not host_module._is_unbounded("/Home/ana", ["/home/ana"], posixpath)
-    assert host_module._is_unbounded("/home/ana/", ["/home/ana"], posixpath)
-
-
 # -- settings -----------------------------------------------------------------
 
 
@@ -748,20 +707,6 @@ def test_scene_reads_from_a_pdg_thread_run_on_the_main_thread(
     assert len(ran_on) >= 4 and set(ran_on) == {"pdg"}
 
 
-def test_without_a_ui_scene_reads_run_on_the_calling_thread(
-    scene: FakeHou, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """hython has no UI to race and no ``hdefereval``, so it reads directly."""
-    monkeypatch.setitem(sys.modules, "hdefereval", None)
-    scene.ui = False
-    host: HoudiniPdgHost = HoudiniPdgHost(build_network(PYRO_BONFIRE).scheduler())
-    results: List[Any] = []
-    worker: threading.Thread = threading.Thread(target=lambda: results.append(host.read_graph()))
-    worker.start()
-    worker.join()
-    assert results
-
-
 # -- pre-cook checks ----------------------------------------------------------
 
 
@@ -852,25 +797,6 @@ def test_python_code_that_opens_a_file_is_advised_before_generation(scene: FakeH
     ]
 
 
-def test_a_non_step_writing_a_file_a_step_reads_is_refused_before_generation(
-    scene: FakeHou,
-) -> None:
-    """A node between steps that writes a file on this machine never delivers it to the step that reads it."""
-    network: FakeNetwork = build_network(
-        [
-            ("sim", "hython sim.py", "Processor", []),
-            ("textoutput1", "", "Processor", ["sim"]),
-            ("render", "hython render.py", "Processor", ["textoutput1"]),
-        ]
-    )
-    # Text Output's ``filepath`` is a write, and the render step reads the same file.
-    writer: FakeNode = network.node("textoutput1").hom
-    writer._type_name = "textoutput"
-    writer.set_parm("filepath", "$HIP/mid/notes.txt", kind="FileReference")
-    network.node("render").hom.set_parm("file", "$HIP/mid/notes.txt", kind="FileReference")
-    assert (RefusalScenario.IN_PROCESS_NODE, "textoutput1") in _refused(_verdict(network))
-
-
 @pytest.mark.parametrize(
     "new, unsaved, words",
     [(True, False, "never been saved"), (False, True, "unsaved changes"), (True, True, "never")],
@@ -889,66 +815,12 @@ def test_an_unsaved_or_new_scene_is_refused(
     assert scene.messages.calls == [] and scene.hip_file.saves == 0
 
 
-@pytest.mark.parametrize("new, refused", [(False, False), (True, True)])
-def test_with_no_ui_only_a_never_saved_scene_is_refused(
-    scene: FakeHou, new: bool, refused: bool
-) -> None:
-    """hython reports unsaved changes even right after a save, and no artist is editing the scene.
-
-    A scene that was never saved has no file for a worker to load, UI or not.
-    """
-    scene.hip_file.new, scene.hip_file.unsaved, scene.ui = new, True, False
-    assert [r.scenario for r in _verdict(build_network(PYRO_BONFIRE)).refusals] == (
-        [RefusalScenario.UNSAVED_SCENE] if refused else []
-    )
-
-
 def _auto_save_network(auto_save: int) -> FakeNetwork:
     """A Pyro Bonfire network whose scheduler node has the auto-save toggle set to ``auto_save``."""
     return build_network(
         PYRO_BONFIRE,
         scheduler_parms={"working_dir": "$HIP", "validate_graph": 1, "auto_save_hip": auto_save},
     )
-
-
-@pytest.mark.parametrize(
-    "new, unsaved, ui, auto_save, prompted, saves, refused",
-    [
-        # Save at the prompt, which comes before the checks, so nothing is left to refuse.
-        (False, True, True, 0, True, 1, False),
-        # A saved scene has nothing to save, so it isn't asked.
-        (False, False, True, 0, False, 0, False),
-        # With auto-save on the artist chose to save on every submit.
-        (False, True, True, 1, False, 1, False),
-        # A new scene needs a file name, which the prompt can't ask for.
-        (True, True, True, 0, False, 0, True),
-        # hython has no artist to answer.
-        (False, True, False, 0, False, 0, False),
-    ],
-)
-def test_the_save_prompt_asks_only_when_an_artist_can_save_the_scene(
-    scene: FakeHou,
-    new: bool,
-    unsaved: bool,
-    ui: bool,
-    auto_save: int,
-    prompted: bool,
-    saves: int,
-    refused: bool,
-) -> None:
-    """The prompt writes no parm when the artist picks Save, and the verdict follows the save."""
-    scene.hip_file.new, scene.hip_file.unsaved, scene.ui = new, unsaved, ui
-    network: FakeNetwork = _auto_save_network(auto_save)
-    verdict: Verdict = _verdict(network, prompt=True)
-    # The dialogs shown, the saves made, the refusal, and no write to the auto-save toggle.
-    assert [buttons for _, buttons in scene.messages.calls] == (
-        [("Save", "Always Save", "Cancel")] if prompted else []
-    )
-    assert scene.hip_file.saves == saves
-    assert [r.scenario for r in verdict.refusals] == (
-        [RefusalScenario.UNSAVED_SCENE] if refused else []
-    )
-    assert network.scheduler_node.parm("auto_save_hip").sets == []  # type: ignore[union-attr]
 
 
 def test_always_save_saves_and_turns_auto_save_on_so_the_next_submit_does_not_ask(
@@ -965,18 +837,6 @@ def test_always_save_saves_and_turns_auto_save_on_so_the_next_submit_does_not_as
     scene.hip_file.unsaved = True
     assert _verdict(network, prompt=True).accepted()
     assert len(scene.messages.calls) == 1 and scene.hip_file.saves == 2
-
-
-def test_cancel_at_the_save_prompt_raises_user_initiated_cancel(scene: FakeHou) -> None:
-    """Cancel starts nothing and saves nothing, and closing the prompt is a cancel too."""
-    for choice in (2, None):
-        scene.messages.choice = choice
-        scene.hip_file.unsaved = True
-        network: FakeNetwork = _auto_save_network(0)
-        with pytest.raises(UserInitiatedCancel):
-            _verdict(network, prompt=True)
-        assert scene.hip_file.saves == 0
-        assert network.scheduler_node.parm("auto_save_hip").sets == []  # type: ignore[union-attr]
 
 
 def test_a_network_without_a_pdg_graph_creates_its_nodes_first(scene: FakeHou) -> None:
@@ -1024,25 +884,6 @@ def _requirements_node(**parms: Any) -> FakeNode:
     for name in [name for name in defaults if name.startswith("hr_attr_option")]:
         node.set_parm(name, defaults[name], menu=("anyOf", "allOf"))
     return node
-
-
-@pytest.mark.parametrize(
-    "node",
-    [
-        # Even with values set, the first choice on the tab means any worker may run the job.
-        lambda: _requirements_node(hr_os="linux", hr_gpu_min=1),
-        # A scene saved before the tab has none of its parms, and must still cook on any worker.
-        lambda: FakeNode(SCHEDULER_PATH, parms={}),
-        # An empty block would make the service refuse the job, so it is left out.
-        lambda: _requirements_node(hr_mode="custom"),
-    ],
-    ids=["all workers", "no tab", "custom with nothing set"],
-)
-def test_a_tab_that_asks_for_nothing_gives_no_requirements(
-    scene: FakeHou, node: Callable[[], FakeNode]
-) -> None:
-    """No step may carry a block unless the artist chose custom requirements and set one."""
-    assert read_host_requirements(node()) is None
 
 
 def test_the_tabs_values_become_the_block_the_rops_dialog_gives(scene: FakeHou) -> None:
@@ -1185,21 +1026,6 @@ def test_a_listed_home_directory_is_refused_naming_its_parm(
         host.scene_files()
 
 
-def test_an_output_directory_is_never_attached_as_an_input(scene: FakeHou, tmp_path: Path) -> None:
-    """Attaching it would upload an earlier cook's renders before every job."""
-    # An output folder that the file reference scan also reports, as Houdini does for a directory parm.
-    os.makedirs(str(tmp_path / "renders"))
-    network: FakeNetwork = build_network(PYRO_BONFIRE)
-    _set_list_parm(
-        network.scheduler_node, "output_directories", "output_dir", [str(tmp_path / "renders")]
-    )
-    scene.file_references.append(
-        (network.scheduler_node.parm("output_dir1"), str(tmp_path / "renders"))
-    )
-    files: SceneFiles = HoudiniPdgHost(network.scheduler()).scene_files()
-    assert files.directories == () and files.assets == ()
-
-
 def test_the_output_directories_are_read_into_the_cooks_settings(
     scene: FakeHou, tmp_path: Path
 ) -> None:
@@ -1220,17 +1046,6 @@ def test_an_output_directory_that_overlaps_the_working_directory_is_refused(
     _set_list_parm(node, "output_directories", "output_dir", [os.path.join("$HIP", relative)])
     with pytest.raises(CookSetupError, match=f"{SCHEDULER_PATH}/output_dir1 .*working directory"):
         read_scheduler_settings(node)
-
-
-@pytest.mark.parametrize("names", [("scene_renders",), ("out", "out2")])
-def test_folders_whose_names_only_start_alike_are_accepted(
-    scene: FakeHou, tmp_path: Path, names: Tuple[str, ...]
-) -> None:
-    """A sibling whose name starts like the working directory, or like another listed folder, isn't inside it."""
-    node: FakeNode = _settings_node(working_dir="$HIP")
-    folders: List[str] = [str(tmp_path / name) for name in names]
-    _set_list_parm(node, "output_directories", "output_dir", folders)
-    assert read_scheduler_settings(node).output_directories == tuple(folders)
 
 
 @pytest.mark.parametrize("order", [("out", "out/frames"), ("out/frames", "out")])

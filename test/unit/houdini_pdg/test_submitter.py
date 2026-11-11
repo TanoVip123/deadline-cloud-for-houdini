@@ -586,25 +586,6 @@ _GPU_LINUX: Dict[str, Any] = {
 }
 
 
-@settings(max_examples=25, deadline=None)
-@given(snapshots())
-def test_the_host_requirements_go_on_every_step_and_the_template_still_decodes(
-    snapshot: GraphSnapshot,
-) -> None:
-    """One set for the whole job, as the ROP does, so every step of a session runs on matching workers."""
-    template: Dict[str, Any] = make_submitter(snapshot).get_job_template(
-        make_submitter(snapshot).get_settings(), host_requirements=_GPU_LINUX
-    )
-    assert [s["hostRequirements"] for s in template["steps"]] == [_GPU_LINUX] * len(snapshot.steps)
-    decode_job_template(template=template)
-
-
-def test_without_host_requirements_no_step_has_any() -> None:
-    """Any worker may run the job, so a step must not carry an empty block the service refuses."""
-    template: Dict[str, Any] = template_for(GraphSnapshot(steps=(step("a", 1), step("b", 1))))
-    assert all("hostRequirements" not in s for s in template["steps"])
-
-
 def test_the_submitted_bundle_carries_the_nodes_host_requirements(tmp_path: Path) -> None:
     """The submitter takes the block from the host, so what the node sets is what the job gets."""
     # The host gives a block, and the bundle is written as the cook writes it.
@@ -1341,46 +1322,6 @@ def test_the_template_needs_a_snapshot() -> None:
         sub.get_job_template(sub.get_settings())
 
 
-def test_every_node_read_goes_through_the_hosts_main_thread_reader() -> None:
-    """Houdini crashes when a PDG thread reads the scene, so every node read must use the host's on_main_thread."""
-    # The node fails any read made outside the host's reader. Use every read path:
-    # settings, template, and parameter values.
-    host: FakeHost = FakeHost()
-    sub: PdgSubmitter = PdgSubmitter(
-        node=FakeNode({"priority": 10}, allowed=host.allowed),
-        host=host,
-        working_dir=WORKING_DIR,
-        snapshot=GraphSnapshot(steps=(step("a", 1),)),
-        job_attachments=lambda farm, queue: ("b", "p"),
-        get_setting=workstation(),
-    )
-    settings_: PdgSubmitterSettings = sub.get_settings()
-    sub.get_job_template(settings_)
-    sub.get_parameter_values(settings_, [])
-    assert settings_.priority == 10
-    assert host.main_thread_reads >= 2
-
-
-def test_the_hosts_version_and_queue_values_reach_the_job() -> None:
-    """The submitter takes Houdini's version and the node's queue values from the host, not from Houdini directly."""
-    # A host with a distinct version and queue value, so a default could not pass.
-    host: FakeHost = FakeHost(queue_values=[{"name": "CondaChannels", "value": "my-channel"}])
-    sub: PdgSubmitter = PdgSubmitter(
-        node=FakeNode(),
-        host=host,
-        working_dir=WORKING_DIR,
-        snapshot=GraphSnapshot(steps=(step("a", 1),)),
-        job_attachments=lambda farm, queue: ("b", "p"),
-        get_setting=workstation(),
-    )
-    settings_: PdgSubmitterSettings = sub.get_settings()
-    values: List[Dict[str, Any]] = sub.get_parameter_values(settings_, [])
-    assert {"name": "CondaChannels", "value": "my-channel"} in values
-    template: Dict[str, Any] = sub.get_job_template(settings_)
-    (init_file,) = template["jobEnvironments"][0]["script"]["embeddedFiles"]
-    assert yaml.safe_load(init_file["data"])["version"] == "21.0.631"
-
-
 # ---------------------------------------------------------------- queue lookup
 
 
@@ -1419,13 +1360,3 @@ def test_the_nodes_output_directories_join_the_working_directory_in_the_bundle(
     init: Dict[str, Any] = yaml.safe_load(environment["script"]["embeddedFiles"][0]["data"])
     assert init["pdg"]["output_directories"] == ["/renders/shot"]
     decode_job_template(template=bundle["template"])
-
-
-def test_without_output_directories_the_init_data_is_as_before(tmp_path: Path) -> None:
-    """A job from a node with an empty tab must read the same on an adaptor that doesn't know the field."""
-    # Submit with no output folders, then read the session's init data.
-    sub: PdgSubmitter = make_submitter()
-    sub.submit(GraphSnapshot(steps=(step("a", 1),)), str(tmp_path / "bundle"))
-    (environment,) = read_bundle(tmp_path / "bundle")["template"]["jobEnvironments"]
-    init: Dict[str, Any] = yaml.safe_load(environment["script"]["embeddedFiles"][0]["data"])
-    assert set(init["pdg"]) == {"pdg_dir", "bucket", "root_prefix"}

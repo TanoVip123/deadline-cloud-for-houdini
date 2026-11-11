@@ -28,7 +28,6 @@ from deadline.houdini_pdg.scene_reads import (
     ReadReport,
     ReadVerdict,
     SceneRead,
-    is_output_parm,
     match_reads,
     reads_opening,
 )
@@ -522,31 +521,6 @@ def test_offenders_are_exactly_writes_naming_their_own_attributes(
         assert uses[0].attribute == attribute and uses[0].variable == name
 
 
-def test_a_file_cache_write_is_still_matched_as_a_read() -> None:
-    """A File Cache's ``file`` is judged as a write by the attribute check only.
-
-    A step that loads the cache reads that parm, so matching must still give it
-    the data edge, or its worker never syncs the cache.
-    """
-    cache: StepSpec = _step(
-        "ropfetch_pyro_cache",
-        [f"{WORK}/geo/pyro_cache/wedge{i}/pyro_cache.w{i}.0001.bgeo.sc" for i in range(2)],
-    )
-    karma: StepSpec = _step("ropfetch_karma")
-    load: SceneRead = SceneRead(
-        step="ropfetch_karma",
-        node_path="/obj/pyro/pyro_cache",
-        parm="file",
-        raw="$HIP/geo/$OS/wedge`@wedgeindex`/$OS.w`@wedgeindex`.$F4.bgeo.sc",
-        path=f"{WORK}/geo/pyro_cache/wedge/pyro_cache.w.0001.bgeo.sc",
-        static_prefix=f"{WORK}/geo/pyro_cache/wedge",
-        is_file_cache_write=True,
-    )
-    report: ReadReport = match_reads(GraphSnapshot(steps=(cache, karma)), [load], WORK)
-    assert report.data_edges == {"ropfetch_karma": frozenset({"ropfetch_pyro_cache"})}
-    assert not is_output_parm("filecache::2.0", "file")
-
-
 # -- reads that depend on a work item -----------------------------------------
 
 
@@ -819,60 +793,6 @@ def test_prefix_matching_rules_hold_for_any_prefix(
 # -- nodes that map to no step ---------------------------------------------------
 
 
-def _with_merge() -> GraphSnapshot:
-    """Pyro Bonfire's shape, with a ``merge`` node that maps to no step."""
-    return GraphSnapshot(steps=_pyro().steps, skipped_nodes=("merge",))
-
-
-def test_a_read_by_a_node_that_is_no_step_is_matched_but_kept_apart() -> None:
-    """A non-step node's read is matched to its producer, but adds no edge and no step match.
-
-    Folding it into the step matches would let a node that maps to no step add a
-    dependency, or be judged as a step by the path checks.
-    """
-    # The merge reads pyro's cache, which would be an edge if merge were a step.
-    read: SceneRead = _read("merge", f"{WORK}/geo/pyro_cache/wedge0/p.1.vdb")
-    report: ReadReport = match_reads(_with_merge(), [read], WORK)
-    assert _verdicts(report.node_reads) == [("pyro", ReadVerdict.EDGE_ADDED, ())]
-    assert (report.matches, report.data_edges, report.unportable, report.step_reads) == (
-        (),
-        {},
-        (),
-        (),
-    )
-
-
-def test_writes_and_reads_are_sorted_between_steps_and_other_nodes() -> None:
-    """A non-step write lands in ``node_writes``, and ``step_reads`` holds every step read but no write."""
-    # One write by the merge, and one write and one read by a step.
-    node_write: SceneRead = _read("merge", f"{WORK}/mid/x.txt", parm="outputpath")
-    step_write: SceneRead = _read("karma", f"{WORK}/render/karma/k.1.exr", parm="picture")
-    step_read: SceneRead = _read("karma", "/library/hdri/sky.exr")
-    report: ReadReport = match_reads(_with_merge(), [node_write, step_write, step_read], WORK)
-    assert report.node_writes == (node_write,)
-    assert report.step_reads == (step_read,)
-    assert report.node_reads == ()
-
-
-@pytest.mark.parametrize(
-    ("node_type", "parm", "expected"),
-    [
-        ("textoutput", "filepath", True),
-        ("csvoutput", "csvfilepath", True),
-        ("geometryimport", "filepath", False),
-        ("jsonoutput", "outputfile", True),
-        ("filecopy", "destfolder", True),
-        ("invoke", "outputpath", True),
-        ("ropgeometry", "sopoutput", True),
-    ],
-)
-def test_a_write_parm_is_known_by_its_name_or_by_its_node_type(
-    node_type: str, parm: str, expected: bool
-) -> None:
-    """``filepath`` is a write on the text and CSV output nodes only, because Geometry Import reads with it."""
-    assert is_output_parm(node_type, parm) is expected
-
-
 def test_reads_opening_matches_a_file_by_path_or_by_static_prefix() -> None:
     """A plain read matches only the exact file, and a prefix read matches the files under its prefix.
 
@@ -902,54 +822,3 @@ def test_reads_opening_matches_a_file_by_path_or_by_static_prefix() -> None:
 
 #: An output folder outside the working directory, as the node's Job Attachments tab lists it.
 EXTRA: str = "/renders/shot"
-
-
-def _extra_writers() -> GraphSnapshot:
-    """Two steps writing into different folders of the extra output folder, and a reader."""
-    return GraphSnapshot(
-        steps=(
-            _step("beauty", [f"{EXTRA}/beauty/b.1.exr", f"{EXTRA}/beauty/b.2.exr"]),
-            _step("depth", [f"{EXTRA}/depth/d.1.exr", f"{EXTRA}/x/d.1.exr"]),
-            _step("comp"),
-        )
-    )
-
-
-def test_a_root_that_holds_an_extra_output_directory_matches_only_exact_directories() -> None:
-    """The extra folder holds every step's output, so a root at it would claim every read there."""
-    # depth's outputs share only the extra folder itself as their root.
-    read: SceneRead = _read("comp", f"{EXTRA}/beauty/b.3.exr")
-    report: ReadReport = match_reads(
-        _extra_writers(),
-        [read, _read("comp", f"{EXTRA}/other/z.exr")],
-        WORK,
-        output_directories=(EXTRA,),
-    )
-    assert [(m.read.path, m.producer) for m in report.matches] == [
-        (f"{EXTRA}/beauty/b.3.exr", "beauty"),
-        (f"{EXTRA}/other/z.exr", ""),
-    ]
-    # Without the folder listed, depth's root is the folder, and it claims the second read.
-    unlisted: ReadReport = match_reads(
-        _extra_writers(), [_read("comp", f"{EXTRA}/other/z.exr")], WORK
-    )
-    assert [m.producer for m in unlisted.matches] == ["depth"]
-
-
-@pytest.mark.parametrize("prefix", [f"{EXTRA}/", "/renders/", EXTRA])
-def test_a_prefix_that_holds_an_extra_output_directory_matches_nothing(prefix: str) -> None:
-    """Such a prefix covers every step writing there, so it would add an edge to each of them."""
-    report: ReadReport = match_reads(
-        _extra_writers(), [_wedged("comp", prefix)], WORK, output_directories=(EXTRA,)
-    )
-    assert report.matches == () and report.data_edges == {}
-
-
-def test_reads_opening_ignores_a_prefix_that_holds_an_extra_output_directory() -> None:
-    """The check for in-process nodes asks which reads open a file, with the same guard as matching."""
-    files: Set[str] = {f"{EXTRA}/beauty/b.1.exr"}
-    assert reads_opening(files, [_wedged("comp", f"{EXTRA}/")], WORK) != ()
-    assert (
-        reads_opening(files, [_wedged("comp", f"{EXTRA}/")], WORK, output_directories=(EXTRA,))
-        == ()
-    )

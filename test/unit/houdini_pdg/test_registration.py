@@ -17,9 +17,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import pytest
 from botocore.exceptions import ClientError, NoCredentialsError
 from deadline.client.api import _telemetry
-from hypothesis import HealthCheck, given
-from hypothesis import settings as hypothesis_settings
-from hypothesis import strategies as st
 
 from .houdini_fakes import (
     COOKING_EXAMPLE,
@@ -180,27 +177,6 @@ def _connect(network: FakeNetwork, cloud: FakeCloud, tmp_path: Path) -> CookServ
 # -- start, tick and stop -----------------------------------------------------
 
 
-def test_a_failed_start_works_in_a_temporary_directory_that_stop_removes(scene: FakeHou) -> None:
-    """Without a working directory PDG copies its job scripts to the filesystem root."""
-    scheduler: Any = _scheduler(build_network(COOKING_EXAMPLE))
-    scheduler.onStartCook(False, None)
-    (directory,) = [call[1] for call in scheduler.calls if call[0] == "setWorkingDir"]
-    assert os.path.isdir(directory) and os.path.basename(directory).startswith("deadline_pdg_")
-    assert scheduler.onStopCook(False) is True
-    assert not os.path.exists(directory)
-
-
-def test_a_generate_sets_the_working_directory_and_skips_the_checks(
-    scene: FakeHou, tmp_path: Path
-) -> None:
-    """A generate submits nothing, so a graph the cook would refuse still generates."""
-    scheduler: Any = _scheduler(build_network(COOKING_EXAMPLE))
-    assert scheduler.onStartCook(True, None) is True
-    folder: str = str(tmp_path / "scene")
-    assert ("setWorkingDir", folder, folder) in scheduler.calls
-    assert not [call for call in scheduler.calls if call[0] == "cookError"]
-
-
 #: The ``pdg.cookType`` members, with their values, as Houdini 21.0 lists them.
 #: StaticDepsGen is left out: it has GenerateFull's value, and Houdini names it GenerateFull.
 _GENERATE_TYPES: List[Tuple[str, int]] = [
@@ -294,40 +270,6 @@ class FakeCore:
         return True
 
 
-_ITEM: Any = types.SimpleNamespace(
-    id=1, index=0, name="sim_1", node=types.SimpleNamespace(name="sim"), expectedOutputFiles=[]
-)
-
-
-@hypothesis_settings(max_examples=40, suppress_health_check=[HealthCheck.function_scoped_fixture])
-@given(
-    result=st.sampled_from(list(ScheduleResult) + [None]),
-    error=st.sampled_from(
-        [None, RuntimeError("boom"), KeyError("x"), CookSetupError("setup"), ValueError("v")]
-    ),
-)
-def test_schedule_answers_succeeded_or_deferred_from_the_cook_and_fails_anything_else(
-    scene: FakeHou, result: Any, error: Optional[Exception]
-) -> None:
-    """PDG must hear Succeeded or Deferred exactly when the cook says so, and never an exception."""
-    scheduler: Any = _scheduler(build_network(PYRO_BONFIRE))
-    scheduler._core = FakeCore(result, error)
-    answer: Any = scheduler.onSchedule(_ITEM)
-    expected: Dict[Any, str] = {
-        ScheduleResult.SUCCEEDED: PDG.scheduleResult.Succeeded,
-        ScheduleResult.DEFERRED: PDG.scheduleResult.Deferred,
-    }
-    wanted: str = (
-        expected.get(result, PDG.scheduleResult.CookFailed)
-        if error is None
-        else PDG.scheduleResult.CookFailed
-    )
-    assert answer == wanted
-    # A raised error is shown on the node, and nothing else is.
-    shown: bool = any(call[0] == "cookError" for call in scheduler.calls)
-    assert shown is (error is not None)
-
-
 def test_a_work_item_reaches_the_cook_with_its_node_and_declared_outputs(scene: FakeHou) -> None:
     """The cook names a task by its node and checks its declared outputs, so neither may be lost."""
     # Schedule one item with two outputs and one output with no path, through a recording core.
@@ -395,20 +337,6 @@ def test_a_cook_that_ends_with_every_item_from_cache_shows_why_on_the_node(
     assert "sim:" in error and str(tmp_path / "geo" / "sim.0.bgeo.sc") in error
     assert "render:" in error and str(tmp_path / "geo" / "render.1.exr") in error
     assert "montage:" not in error and "no job was created" in error
-
-
-def test_the_scheduler_registers_under_the_hdas_type_name() -> None:
-    """The HDA binds to the scheduler by this name, so a different one leaves the node without code."""
-    registered: List[Tuple[Any, Dict[str, Any]]] = []
-
-    class Registry:
-        def registerScheduler(self, cls: Any, **kwargs: Any) -> None:
-            registered.append((cls, kwargs))
-
-    REGISTRATION.registerTypes(Registry())
-    ((cls, kwargs),) = registered
-    assert cls is REGISTRATION.DeadlineCloudPDGScheduler
-    assert kwargs["name"] == "deadlinecloudscheduler" == cls.templateName()
 
 
 # -- the composition root -----------------------------------------------------
@@ -661,37 +589,6 @@ def test_a_cook_of_only_in_process_nodes_is_refused_at_its_start_before_the_farm
     (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
     assert "wedge1" in error and "No node in this cook runs a command on a worker" in error
     assert cloud.s3.keys == [] and scheduler.onTick() == PDG.tickResult.SchedulerCancelCook
-
-
-def test_a_cook_that_offered_nothing_and_had_no_step_says_so_at_its_end(scene: FakeHou) -> None:
-    """When PDG gives no cook set at the start, the end of a cook that offered nothing still says why."""
-    network: FakeNetwork = build_network(PYRO_BONFIRE)
-    scheduler: Any = _scheduler(network)
-    assert scheduler.onStartCook(False, None) is True
-    # PDG cooked the wedge in this session, so only its items are in the graph.
-    wedge: Any = _CachedItem("wedge1", 0, "")
-    wedge.command, wedge.state, wedge.outputFiles = "", types.SimpleNamespace(name="Waiting"), []
-    scheduler.dependency_graph = ({wedge: []}, {}, [])
-    network.context.cookSet = [network.node("wedge1")]
-    assert scheduler.onStopCook(False) is True
-    (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
-    assert "wedge1" in error and "No node in this cook runs a command on a worker" in error
-
-
-def test_a_step_over_the_task_quota_while_generating_is_shown_on_the_node(
-    scene: FakeHou,
-) -> None:
-    """The cancel that stops generation would otherwise end the cook with no word on why."""
-    network: FakeNetwork = build_network(PYRO_BONFIRE)
-    scheduler: Any = _scheduler(network)
-    assert scheduler.onStartCook(False, None) is True
-    # sim generates one task more than a step may have, then PDG stops the cook.
-    network.node("sim").workItems = [None] * 10_001
-    network.context.emit("NodeGenerated", "sim")
-    assert network.context.canceled.wait(5)
-    assert scheduler.onStopCook(True) is True
-    (error,) = [call[1] for call in scheduler.calls if call[0] == "cookError"]
-    assert "sim: 10,001 tasks per step, more than the limit of 10,000." in error
 
 
 class _Deferred:

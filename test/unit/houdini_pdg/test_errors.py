@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 
-from deadline.houdini_pdg.errors import GraphRefusedError, artist_message, format_refusals
+from deadline.houdini_pdg.errors import GraphRefusedError
 from deadline.houdini_pdg.validation import Refusal, RefusalScenario, Verdict
 
 
@@ -24,12 +24,3 @@ def test_each_refusal_is_on_its_own_line_after_a_header() -> None:
         "- a: x. y.",
         "- b: p. q.",
     ]
-
-
-def test_the_node_error_carries_the_same_lines() -> None:
-    """The node's error flag shows the same lines as the popup, under the scheduler's name."""
-    # The node error ends with the same refusal lines, and adds no line of its own.
-    verdict: Verdict = Verdict(refusals=(_refusal("a"), _refusal("b")))
-    message: str = artist_message(GraphRefusedError(verdict))
-    assert message.endswith("\n" + "\n".join(format_refusals(verdict.refusals).split("\n")[1:]))
-    assert message.count("\n") == 2

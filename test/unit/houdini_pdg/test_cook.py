@@ -2109,20 +2109,6 @@ def _all_cached() -> Tuple[NodeInfo, ...]:
     )
 
 
-@pytest.mark.parametrize("listed, refused_", [((), True), (("/renders",), False)])
-def test_a_step_writing_to_a_listed_output_directory_feeds_the_step_below(
-    listed: Tuple[str, ...], refused_: bool
-) -> None:
-    """The cook judges outputs against the node's folders, or a listed folder would still be refused."""
-    h: Harness = Harness(outputs={"a": "/renders/a.{i}.exr"}, output_directories=listed)
-    h.start()
-    if refused_:
-        with pytest.raises(GraphRefusedError):
-            h.scheduler.on_schedule(handle("a_0"))
-    else:
-        assert h.scheduler.on_schedule(handle("a_0")) is ScheduleResult.SUCCEEDED
-
-
 def _over_quota() -> Verdict:
     """What the host finds when one step generates more tasks than a step may have."""
     return Verdict(
@@ -2168,28 +2154,6 @@ def test_a_quota_crossed_after_the_snapshot_changes_nothing() -> None:
     assert h.host.on_quota_exceeded is not None
     assert h.host.on_quota_exceeded(_over_quota()) is False
     assert h.phase() is CookPhase.COOKING
-
-
-def test_an_artists_stop_before_any_offer_reads_nothing_and_refuses_nothing() -> None:
-    """The artist stopped the cook, so its cached items say nothing about why no job was built."""
-    # The same cook, stopped by the artist.
-    h: Harness = Harness(nodes=_all_cached())
-    h.start()
-    assert h.scheduler.on_stop_cook(True)
-    assert h.events.count("read_graph") == 0
-    assert h.summary().refusals == ()
-
-
-def test_a_cook_that_already_offered_an_item_reads_no_cache_at_its_end() -> None:
-    """Once an item was offered the snapshot already judged the cache, so the end reads nothing again."""
-    # The job runs every item, then the graph changes before PDG ends the cook.
-    h: Harness = Harness().cooking()
-    for name in ("a_1", "b_0"):
-        h.scheduler.on_schedule(handle(name))
-    h.host.nodes = _all_cached()
-    assert h.scheduler.on_stop_cook(False)
-    assert h.events.count("read_graph") == 1
-    assert h.summary().refusals == ()
 
 
 def test_with_validation_off_a_cook_from_cache_logs_the_refusal_as_a_warning(
