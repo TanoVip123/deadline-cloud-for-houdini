@@ -467,30 +467,35 @@ def test_a_stop_before_the_dirty_leaves_the_scheduler_node_alone(
     assert scene.updates == 0 and "error tab" in caplog.text
 
 
-def test_a_service_node_is_refused_before_the_dirty_from_its_cook_type_parm(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture
+def test_a_service_node_is_refused_from_its_cook_type_parm_and_replaces_the_tabs_text(
+    scene: FakeHou,
 ) -> None:
     """The display node's generate starts PDG's service processes for a Service node, and was slow to refuse.
 
-    PDG keeps the last generate's cook type, so the parm must decide. Only the popup shows.
+    PDG keeps the last generate's cook type, so the parm must decide. Neither node may generate,
+    and the dirty must come before the cookError, or the tab keeps the earlier Submit's text.
     """
-    # PDG still says Out-of-Process from an earlier generate, and the artist sets render to Service.
-    network: FakeNetwork = _network()
-    _generated(network, {"sim": 1, "render": 1, "montage": 1})
-    tab: _ErrorTab = _ErrorTab(network, scene)
+    # An earlier Submit put an In-Process refusal on the tab.
+    network: FakeNetwork
+    tab: _ErrorTab
+    network, tab, _first = _refused_on_the_tab(scene)
+    tab.events.clear()
+    # PDG still says Out-of-Process from that generate, and the artist sets render to Service.
     network.node("render").cookType = "OutOfProcess"
     network.node("render").hom.set_parm("pdg_cooktype", 3)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
-    assert scene.messages.calls[-1][0] == (
+    text: str = scene.messages.calls[-1][0]
+    assert text == (
         "The cook can't start.\n\nThe graph was refused (1 refusal(s)):\n- render: This node's "
         "work items cook in a long-running service process, which this scheduler does not "
         "start. Set the node's 'pdg_cooktype' parm to Out Of Process, or cook this network "
         "with another scheduler."
     )
-    # Nothing was dirtied or generated, and the scheduler node was left alone.
+    # Only the new text shows, and this Submit only dirtied the display node's items.
+    assert tab.shown == [text] and tab.events == ["dirty", "cookError", "popup", "update"]
     display: Any = network.topnet.displayNode()
-    assert display.work_item_calls == [] and network.scheduler_node.generate_calls == []
-    assert tab.scheduler.calls == [] and "Could not put the error on" in caplog.text
+    assert display.work_item_calls[2:] == [("dirty", False)]
+    assert network.scheduler_node.generate_calls == []
 
 
 def test_a_quota_stop_during_the_display_generate_leaves_the_scheduler_node_alone(
@@ -522,22 +527,30 @@ def test_a_quota_stop_during_the_display_generate_leaves_the_scheduler_node_alon
     assert scene.updates == 0 and "error tab" in caplog.text
 
 
-def test_with_no_scheduler_after_the_generate_only_the_popup_shows(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    "cook_type, work_item_calls",
+    [(1, [("dirty", False), ("generate", True)]), (3, [("dirty", False)])],
+    ids=["in-process", "service"],
+)
+def test_with_no_scheduler_only_the_popup_shows(
+    scene: FakeHou,
+    caplog: pytest.LogCaptureFixture,
+    cook_type: int,
+    work_item_calls: List[Tuple[str, bool]],
 ) -> None:
-    """PDG may name no scheduler for the node even after a generate, so only the popup can show.
+    """PDG names no scheduler in a fresh session, and may name none even after a generate.
 
-    The log must say why the tab is empty, and nothing is generated on the scheduler node.
+    Only the popup can show then, so the log must say why the tab is empty, with no UI update.
     """
-    # PDG names no scheduler, and render is an In-Process step, which is refused after the generate.
+    # PDG names no scheduler, and render is an In-Process step or a Service node.
     network: FakeNetwork = _network()
-    network.node("render").hom.set_parm("pdg_cooktype", 1)
+    network.node("render").hom.set_parm("pdg_cooktype", cook_type)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     assert "The cook can't start." in scene.messages.calls[0][0]
     display: Any = network.topnet.displayNode()
-    assert display.work_item_calls == [("dirty", False), ("generate", True)]
-    assert network.scheduler_node.generate_calls == []
-    assert "error tab" in caplog.text
+    assert display.work_item_calls == work_item_calls
+    assert network.scheduler_node.generate_calls == [] and scene.updates == 0
+    assert "Could not put the error on" in caplog.text
 
 
 def test_in_the_ui_each_refused_submit_shows_its_own_text_on_the_error_tab(
@@ -567,17 +580,18 @@ def test_in_the_ui_each_refused_submit_shows_its_own_text_on_the_error_tab(
     assert network.scheduler_node.generate_calls == []
 
 
+@pytest.mark.parametrize("cook_type", [1, 3], ids=["in-process", "service"])
 def test_in_hython_the_error_is_sent_to_the_tab_with_no_ui_update(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture
+    scene: FakeHou, caplog: pytest.LogCaptureFixture, cook_type: int
 ) -> None:
     """hython has no ``hou.ui`` to update, so the update is skipped and the log says why."""
-    # PDG has the scheduler, and render is an In-Process step, which is refused after the generate.
+    # PDG has the scheduler, and render is an In-Process step or a Service node.
     caplog.set_level("INFO")
     scene.ui = False
     network: FakeNetwork = _network()
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
     tab: _ErrorTab = _ErrorTab(network, scene)
-    network.node("render").hom.set_parm("pdg_cooktype", 1)
+    network.node("render").hom.set_parm("pdg_cooktype", cook_type)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     assert "cookError" in tab.events and scene.updates == 0
     assert network.scheduler_node.generate_calls == []

@@ -1266,8 +1266,8 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     from deadline.client.exceptions import UserInitiatedCancel
 
     read: Callable[[str], str] = get_setting or get_workstation_setting
-    # Set only once the display node's generate finishes, because only the refusals found on
-    # its items go on the error tab. A stop before that shows only in the popup.
+    # Set only for a Service refusal, after its dirty, or once the display node's generate
+    # finishes, because only those refusals go on the error tab. The others are popup only.
     scheduler: Any = None
     try:
         # The save prompt comes first, so the artist answers it before anything else.
@@ -1295,6 +1295,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
                 "Cook the network's TOP nodes once, then submit again."
             )
         cook_set: Optional[FrozenSet[str]] = _find_cook_set(context, display)
+        scheduler_name: str = _call(node, "getPDGNodeName") or node.name()
         graph_nodes: List[Any] = _graph_nodes(context)
         infos: Tuple[NodeInfo, ...] = readers.node_infos(graph_nodes, None, cook_set)
         # A Service node's generate starts PDG's service processes, so it's refused first. PDG
@@ -1317,6 +1318,11 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             refusals=check_shape_quotas(infos).refusals + services.refusals
         )
         if before_generate.refusals and settings.validate_graph:
+            # A Service refusal also goes on the error tab. The dirty clears an earlier
+            # Submit's text from it, and unlike a generate it starts no PDG process.
+            if services.refusals:
+                display.dirtyAllWorkItems(False)
+                scheduler = _call(context, "schedulerForName", scheduler_name)
             raise GraphRefusedError(before_generate)
         # Generate the display node's items, so every check sees the job the cook would
         # submit, and stop at the first step that passes a task quota.
@@ -1338,7 +1344,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         if over_quota:
             raise GraphRefusedError(over_quota[0])
         # Read the items from this scheduler, as the cook does, and check them all.
-        scheduler = _call(context, "schedulerForName", _call(node, "getPDGNodeName") or node.name())
+        scheduler = _call(context, "schedulerForName", scheduler_name)
         dependency_graph: Any = _call(scheduler, "dependencyGraph", True)
         verdict: Verdict
         snapshot: GraphSnapshot

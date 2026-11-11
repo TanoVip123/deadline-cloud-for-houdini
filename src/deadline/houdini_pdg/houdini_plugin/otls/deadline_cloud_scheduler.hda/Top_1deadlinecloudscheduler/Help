@@ -49,8 +49,12 @@ check that fails starts nothing and creates no job.
   automatic saving. When a check fails, Submit shows why in a popup. When the
   check that fails runs on the work items Submit generated, Submit also puts
   the same text on this node's error tab, so you can read it again while you
-  fix the scene. A problem found before that generate finishes, such as a bad
-  tab value or a step over a quota, shows only in the popup.
+  fix the scene. A node whose Cook Type is Service is refused before that
+  generate, because the generate would start its service processes. Its text
+  also goes on the error tab once PDG has this scheduler from an earlier
+  generate in the session. Any other problem found before that generate
+  finishes, such as a bad tab value or a step over a quota, shows only in the
+  popup.
 
 Some checks need the generated work items, so the cook runs every check again
 before it submits the job. Results stay on the farm: download them with
