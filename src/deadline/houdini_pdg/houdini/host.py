@@ -1377,11 +1377,9 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         if over_quota:
             raise GraphRefusedError(over_quota[0])
         # A canceled or failed generate still returns. Part of a graph can't be judged, so Submit stops.
-        if _generate_did_not_finish(graph_nodes, infos, cook_set):
-            raise CookSetupError(
-                "The generate didn't finish, so Submit can't check the graph. "
-                "Fix the node errors, then submit again."
-            )
+        unfinished: str = _explain_unfinished_generate(graph_nodes, infos, cook_set)
+        if unfinished:
+            raise CookSetupError(unfinished)
         # Read the items from this scheduler, as the cook does, and check them all.
         scheduler = _call(context, "schedulerForName", scheduler_name)
         dependency_graph: Any = _call(scheduler, "dependencyGraph", True)
@@ -1451,13 +1449,13 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     return True
 
 
-def _generate_did_not_finish(
+def _explain_unfinished_generate(
     graph_nodes: List[Any], infos: Tuple[NodeInfo, ...], cook_set: Optional[FrozenSet[str]]
-) -> bool:
-    """Whether the display node's generate stopped early, from the cooked nodes' errors or items.
+) -> str:
+    """Why the display node's generate may have stopped early, or ``""`` when it finished.
 
-    PDG can set the errors after the generate returns, so a stopped generate is also known
-    from its items: no step has any, or a step has none and neither has a node above it.
+    PDG can set the errors after the generate returns, so empty steps stop Submit too. A step
+    can also make no items with its settings, so that text names the steps and both causes.
     """
     # The nodes in this cook, by PDG name.
     nodes: Dict[str, Any] = {
@@ -1465,9 +1463,6 @@ def _generate_did_not_finish(
         for node in graph_nodes
         if _name(node) and (cook_set is None or _name(node) in cook_set)
     }
-    # The node that stopped and each node below it keep an error, once PDG sets it.
-    if any(_call(_call(node, "topNode"), "errors") for node in nodes.values()):
-        return True
     # A dynamic node has no items until it cooks, so its count says nothing here.
     dynamic: Set[str] = {info.name for info in infos if info.is_dynamic}
     empty: Set[str] = {
@@ -1478,10 +1473,25 @@ def _generate_did_not_finish(
     }
     # Each node's empty ancestors, so an empty step below an empty node is found.
     empty_above: Dict[str, Set[str]] = find_ancestors_among(infos, empty)
-    unfinished: bool = bool(steps) and (
+    # Every step empty, or an empty step below an empty node, is a stop or steps that make nothing.
+    stopped: bool = bool(steps) and (
         steps <= empty or any(empty_above.get(step) for step in steps & empty)
     )
-    return unfinished
+    listed: str = ", ".join(name for name in nodes if name in steps & empty)
+    # The node that stopped and each node below it keep an error, once PDG sets it.
+    errored: bool = any(_call(_call(node, "topNode"), "errors") for node in nodes.values())
+    text: str = (
+        "The generate didn't finish, so Submit can't check the graph. "
+        "Fix the node errors, then submit again."
+        if errored
+        else (
+            f"These steps have no work items: {listed}. Either the generate didn't finish "
+            "(check the node errors), or they make no items with these settings."
+            if stopped
+            else ""
+        )
+    )
+    return text
 
 
 def _find_cook_set(context: Any, display: Any) -> Optional[FrozenSet[str]]:

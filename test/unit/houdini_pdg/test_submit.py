@@ -738,15 +738,43 @@ def test_a_refused_submit_sends_its_advisories_to_the_warning_tab(
 _ALL: Tuple[str, ...] = ("wedge1", "sim", "render", "partition", "montage")
 
 
+_UNFINISHED: str = (
+    "The generate didn't finish, so Submit can't check the graph. "
+    "Fix the node errors, then submit again."
+)
+
+
+#: The end of Submit's popup for empty steps with no node error, which gives both causes.
+_BOTH_CAUSES: str = (
+    "Either the generate didn't finish (check the node errors), "
+    "or they make no items with these settings."
+)
+
+
 @pytest.mark.parametrize(
-    "empty, dynamic, error_shown",
+    "empty, dynamic, error_shown, expected",
     [
-        (_ALL, (), True),
-        (_ALL, (), False),
-        (("render", "partition", "montage"), (), False),
-        (("sim", "render", "partition", "montage"), ("render", "partition", "montage"), False),
+        (_ALL, (), True, _UNFINISHED),
+        (_ALL, (), False, "These steps have no work items: sim, render, montage. " + _BOTH_CAUSES),
+        (
+            ("render", "partition", "montage"),
+            (),
+            False,
+            "These steps have no work items: render, montage. " + _BOTH_CAUSES,
+        ),
+        (
+            ("sim", "render", "partition", "montage"),
+            ("render", "partition", "montage"),
+            False,
+            "These steps have no work items: sim. " + _BOTH_CAUSES,
+        ),
     ],
-    ids=["node-error", "error-not-set-yet", "canceled-part-way", "only-static-step-empty"],
+    ids=[
+        "wedge1-node-error",
+        "error-not-set-yet",
+        "empty-mid-chain-step",
+        "only-static-step-empty",
+    ],
 )
 def test_a_generate_that_did_not_finish_stops_submit_with_only_a_popup(
     scene: FakeHou,
@@ -754,12 +782,14 @@ def test_a_generate_that_did_not_finish_stops_submit_with_only_a_popup(
     empty: Tuple[str, ...],
     dynamic: Tuple[str, ...],
     error_shown: bool,
+    expected: str,
 ) -> None:
     """PDG's blocking generate returns normally when it is canceled or a node fails to generate.
 
     Submit must stop rather than judge part of the graph. In Houdini 21.0 the node error came
     0.7 s after the generate returned, so with no error the empty items alone must stop it:
-    every static step empty, or an empty step below an empty node, as a cancel leaves it.
+    every static step empty, or an empty step below an empty node, as a cancel leaves it. With
+    no error the steps may also make nothing, so the popup names them and both causes.
     """
     # PDG has the scheduler, and wedge1's generate fails during Submit's display generate.
     network: FakeNetwork = _network()
@@ -782,10 +812,7 @@ def test_a_generate_that_did_not_finish_stops_submit_with_only_a_popup(
     display.on_generate = generate
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     ((text, buttons),) = scene.messages.calls
-    assert text == (
-        "The generate didn't finish, so Submit can't check the graph. "
-        "Fix the node errors, then submit again."
-    )
+    assert text == expected
     assert buttons == () and _cooks(network) == []
     assert tab.scheduler.calls == [] and scene.updates == 0 and "error tab" in caplog.text
 
