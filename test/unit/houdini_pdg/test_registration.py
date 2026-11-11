@@ -780,4 +780,7 @@ def test_on_start_cook_drops_a_stop_older_than_30_seconds_and_cooks(
     errors: List[Any] = [call for call in scheduler.calls if call[0] == "cookError"]
     assert started is not refused and host_module.submit_stops == {}
     assert errors == ([("cookError", "The cook can't start.")] if refused else [])
-    assert ("Dropped Submit's stop for " + path in caplog.text) is not refused
+    dropped: str = (
+        f"Dropped Submit's stop for {path}, stored {age:.0f} s ago, and started the cook."
+    )
+    assert (dropped in caplog.text) is not refused

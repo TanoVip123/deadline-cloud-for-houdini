@@ -18,6 +18,7 @@ from .houdini_fakes import (
     FakeHou,
     FakeNetwork,
     FakeNode,
+    OperationFailed,
     build_network,
     install_hou,
 )
@@ -919,3 +920,44 @@ def test_a_confirmed_submit_routes_nothing_through_a_cook_start(
     assert scene.messages.options[-1]["details"].startswith("render: ")
     assert host.submit_stops == {} and queue.queued == []
     assert _cooks(network) == [{"block": False}]
+
+
+@pytest.mark.parametrize(
+    "start, warning",
+    [("refused", ""), ("ignored", "no error"), ("failed", "No cook to start")],
+)
+def test_a_cook_start_that_leaves_the_stop_waiting_is_logged(
+    scene: FakeHou, queue: _Queue, caplog: pytest.LogCaptureFixture, start: str, warning: str
+) -> None:
+    """When the cook start never reaches onStartCook, the tab stays empty and only the log says why.
+
+    A start that onStartCook refused took the stop, so it logs nothing.
+    """
+    # A refused Submit, then a cook start that takes the stop, does nothing, or fails on its own.
+    caplog.set_level("WARNING")
+    network: FakeNetwork = _network()
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    network.node("render").hom.set_parm("pdg_cooktype", 1)
+    display: Any = network.topnet.displayNode()
+    if start != "refused":
+
+        def cook(**_kwargs: Any) -> None:
+            if start == "failed":
+                raise OperationFailed("No cook to start")
+
+        display.cookWorkItems = cook
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    queue.run()
+    path: str = network.scheduler_node.path()
+    waiting: List[str] = [
+        r.getMessage() for r in caplog.records if "still waiting" in r.getMessage()
+    ]
+    expected: List[str] = (
+        [
+            f"The cook start of {display.path()} hasn't reached {path}'s onStartCook yet "
+            f"({warning}), so Submit's stop is still waiting."
+        ]
+        if warning
+        else []
+    )
+    assert waiting == expected and (path in host.submit_stops) is bool(warning)
