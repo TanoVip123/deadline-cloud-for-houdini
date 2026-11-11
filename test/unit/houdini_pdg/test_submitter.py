@@ -1322,6 +1322,26 @@ def test_the_template_needs_a_snapshot() -> None:
         sub.get_job_template(sub.get_settings())
 
 
+def test_every_node_read_goes_through_the_hosts_main_thread_reader() -> None:
+    """Houdini crashes when a PDG thread reads the scene, so every node read must use the host's on_main_thread."""
+    # The node fails any read made outside the host's reader. Use every read path:
+    # settings, template, and parameter values.
+    host: FakeHost = FakeHost()
+    sub: PdgSubmitter = PdgSubmitter(
+        node=FakeNode({"priority": 10}, allowed=host.allowed),
+        host=host,
+        working_dir=WORKING_DIR,
+        snapshot=GraphSnapshot(steps=(step("a", 1),)),
+        job_attachments=lambda farm, queue: ("b", "p"),
+        get_setting=workstation(),
+    )
+    settings_: PdgSubmitterSettings = sub.get_settings()
+    sub.get_job_template(settings_)
+    sub.get_parameter_values(settings_, [])
+    assert settings_.priority == 10
+    assert host.main_thread_reads >= 2
+
+
 # ---------------------------------------------------------------- queue lookup
 
 
