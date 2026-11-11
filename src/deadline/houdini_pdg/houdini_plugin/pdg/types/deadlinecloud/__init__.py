@@ -147,13 +147,16 @@ class DeadlineCloudPDGScheduler(PyScheduler):
             host: HoudiniPdgHost = HoudiniPdgHost(self)
             # A stopped Submit starts this cook only to put its stop on the node's tabs, because
             # PDG keeps a message sent inside a cook. Submit shows the popup itself.
-            stop: Optional[Tuple[str, str]] = submit_stops.pop(host.scheduler_node().path(), None)
+            path: str = host.scheduler_node().path()
+            stop: Optional[Tuple[str, str]] = submit_stops.pop(path, None)
             if stop is not None:
+                _logger.info("Took Submit's stop for %s in onStartCook", path)
                 error, advisories = stop
                 if error:
                     self.cookError(error)
                 if advisories:
                     host.show_warning(advisories)
+                _logger.info("Refused the cook start to show Submit's stop on %s's tabs", path)
                 return False
             # Houdini starts a generate with static False, and says so in the cook options.
             generate: bool = static or _is_generate(self.context)

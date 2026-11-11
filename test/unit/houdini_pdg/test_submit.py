@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import types
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,6 +32,10 @@ def scene(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeHou:
     os.makedirs(os.path.dirname(hip))
     monkeypatch.delenv("DEADLINE_PDG_DEBUG_LEVEL", raising=False)
     monkeypatch.setenv("HIP", os.path.dirname(hip))
+    # Houdini runs a deferred call once the button callback returns. Here it runs at once.
+    monkeypatch.setitem(
+        sys.modules, "hdefereval", types.SimpleNamespace(executeDeferred=lambda call: call())
+    )
     return install_hou(monkeypatch, hip)
 
 
@@ -477,7 +482,7 @@ def test_a_stop_before_the_dirty_goes_on_the_error_tab_with_no_generate(scene: F
     _with_requirements(network, hr_gpu_min=4, hr_gpu_max=2)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     text: str = scene.messages.calls[0][0]
-    assert "hr_gpu_min" in text and tab.shown == [text] and tab.events == ["stop", "popup"]
+    assert "hr_gpu_min" in text and tab.shown == [text] and tab.events == ["popup", "stop"]
     assert network.scheduler_node.generate_calls == [] and tab.scheduler.calls == []
     assert scene.updates == 0
 
@@ -507,7 +512,7 @@ def test_a_service_node_is_refused_from_its_cook_type_parm_and_replaces_the_tabs
         "with another scheduler."
     )
     # Only the new text shows, and this Submit only dirtied the display node's items.
-    assert tab.shown == [text] and tab.events == ["dirty", "stop", "popup"]
+    assert tab.shown == [text] and tab.events == ["dirty", "popup", "stop"]
     display: Any = network.topnet.displayNode()
     assert display.work_item_calls[2:] == [("dirty", False)]
     assert network.scheduler_node.generate_calls == []
@@ -569,7 +574,7 @@ def test_with_no_scheduler_the_stop_still_goes_on_the_error_tab(
 def test_each_refused_submit_shows_its_own_text_on_the_error_tab(scene: FakeHou) -> None:
     """A cookError sent outside a cook didn't stay on the tab in Houdini's UI.
 
-    Each refused Submit starts its own cook start, so each sends its text again, before the popup.
+    Each refused Submit starts its own cook start, so each sends its text again, after the popup.
     """
     # PDG has the scheduler, and render is an In-Process step, which is refused after the generate.
     network: FakeNetwork = _network()
@@ -578,7 +583,7 @@ def test_each_refused_submit_shows_its_own_text_on_the_error_tab(scene: FakeHou)
     network.node("render").hom.set_parm("pdg_cooktype", 1)
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     first: str = scene.messages.calls[-1][0]
-    assert tab.shown == [first] and tab.events[-2:] == ["stop", "popup"]
+    assert tab.shown == [first] and tab.events[-2:] == ["popup", "stop"]
     assert network.scheduler_node.generate_calls == [] and scene.updates == 0
     # A second refusal with different text replaces the first on the tab.
     network.node("montage").hom.set_parm("pdg_cooktype", 1)
@@ -703,7 +708,7 @@ def test_a_refused_submit_sends_its_advisories_to_the_warning_tab(scene: FakeHou
     (warning,) = tab.warned
     assert warning.startswith(f"{os.environ['HIP']}: The scene is in ")
     assert "'/tmp/elsewhere'" in warning
-    assert tab.shown == [text] and tab.events == ["dirty", "stop", "popup"]
+    assert tab.shown == [text] and tab.events == ["dirty", "popup", "stop"]
 
 
 _ALL: Tuple[str, ...] = ("wedge1", "sim", "render", "partition", "montage")
@@ -793,7 +798,7 @@ def test_a_generate_that_did_not_finish_stops_submit_on_the_popup_and_the_error_
     assert buttons == () and _cooks(network) == []
     assert network.scheduler_node.generate_calls == []
     # With or without the scheduler, the same text is on the tab.
-    assert tab.events == ["dirty", "stop", "popup"] and tab.shown == [text]
+    assert tab.events == ["dirty", "popup", "stop"] and tab.shown == [text]
 
 
 def test_an_error_on_a_node_the_display_node_does_not_cook_does_not_stop_submit(

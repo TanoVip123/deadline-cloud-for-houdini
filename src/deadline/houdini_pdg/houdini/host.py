@@ -1412,11 +1412,11 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             if isinstance(stopped, GraphRefusedError)
             else ""
         )
-        # The tabs keep the text after the popup closes. The cook start comes first, because
-        # the popup waits for the artist.
+        # Once there's a PDG graph, the tabs keep the text after the popup closes.
         if context is not None:
             _show_on_node_tabs(node, display, text, advisories)
-        _show(text)
+        else:
+            _show(text)
         return False
     counts: str = (
         f"Steps: {len(snapshot.steps)}, tasks: {snapshot.total_tasks}"
@@ -1524,22 +1524,42 @@ def _default_scheduler_problem(node: Any, network: Any) -> str:
 
 
 def _show_on_node_tabs(node: Any, display: Any, error: str, advisories: str) -> None:
-    """Put Submit's stop on the scheduler node's error and Warning tabs.
+    """Show Submit's stop in a popup, when it has an error, and on the scheduler node's tabs.
 
-    PDG keeps a message sent inside a cook, so Submit starts a cook of the display node, and
-    the scheduler's ``onStartCook`` sends ``error`` and ``advisories`` and refuses the cook.
+    PDG keeps a message sent inside a cook, so after Submit's button callback returns, a cook
+    start runs, and the scheduler's ``onStartCook`` sends the stop and refuses the cook.
     """
-    submit_stops[node.path()] = (error, advisories)
+    import hdefereval  # type: ignore[import-not-found]
+
+    # The node Houdini's Cook Output Node cooks: the network's Output node, else its display node.
+    network: Any = node.parent()
+    output: Any = (network.outputNode() if hasattr(network, "outputNode") else None) or display
+    path: str = node.path()
+    submit_stops[path] = (error, advisories)
+    _logger.info("Routing Submit's stop through a cook start of %s", output.path())
+    if error:
+        _show(error)
+    # A cook started inside the callback never reached onStartCook in the GUI, so it waits.
+    hdefereval.executeDeferred(lambda: _start_cook_for_node_tabs(path, output))
+
+
+def _start_cook_for_node_tabs(path: str, output: Any) -> None:
+    """Start a cook of ``output`` the way Cook Output Node does, for the stop stored at ``path``."""
+    failure: str = ""
     try:
-        display.cookWorkItems(block=False)
-    except hou.OperationFailed:
-        # PDG raises this at once when onStartCook refuses the cook, as it does here.
-        pass
+        output.cookWorkItems(block=False, generate_only=False, save_prompt=True, nodes=[output])
+    except hou.OperationFailed as error:
+        # PDG raises this when onStartCook refuses the cook, and for any other failed start.
+        failure = str(error)
     finally:
         # A stop left here would refuse the artist's next TOP Cook, so it goes either way.
-        if submit_stops.pop(node.path(), None) is not None:
+        if submit_stops.pop(path, None) is not None:
             _logger.warning(
-                "The scheduler didn't take Submit's stop, so %s's tabs don't show it.", node.path()
+                "The cook start of %s didn't reach %s's onStartCook (%s), so its tabs don't "
+                "show Submit's stop.",
+                output.path(),
+                path,
+                failure or "no error",
             )
 
 
