@@ -56,6 +56,17 @@ def test_each_rop_call_is_followed_by_moving_the_queue_folders_above_submit(
     assert 0 <= body.index(rop_call) < body.index(move)
 
 
+def test_create_and_load_lay_the_tabs_out_before_the_rops_queue_update() -> None:
+    """The ROP's update needs a login, so laying the tabs out first keeps them on a failed login."""
+    # Both scripts call the module's callback, which lays the tabs out before the ROP runs.
+    for section in ("OnCreated", "OnLoaded"):
+        assert "hdaModule().update_queue_parameters_callback(kwargs)" in _read(_NODE, section)
+    module: str = _read(_NODE, "PythonModule")
+    body: str = module[module.index("def update_queue_parameters_callback(") :]
+    layout: str = 'rebuild_layout_from_definition(kwargs["node"])'
+    assert 0 <= body.index(layout) < body.index("rop(kwargs)")
+
+
 NODE_SCRIPT: str = _read(_NODE, "DialogScript")
 
 
