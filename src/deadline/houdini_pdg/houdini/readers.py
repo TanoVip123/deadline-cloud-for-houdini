@@ -365,6 +365,10 @@ def _raw_item(work_item: Any, depends_on: Any) -> Optional[RawItem]:
     # so PDG's ``isBatch`` is False on every one of them.
     parent: Any = _attr(work_item, "batchParent", None)
     cached: bool = _enum_name(_attr(work_item, "state", None)) == _CACHED_STATE
+    # An item PDG cooked from cache holds the files it found in ``outputFiles``, when it has any.
+    found: Tuple[DeclaredFile, ...] = (
+        declared_files(_attr(work_item, "outputFiles", ())) if cached else ()
+    )
     return RawItem(
         name=name,
         index=_as_int(_attr(work_item, "index", 0), 0),
@@ -373,21 +377,12 @@ def _raw_item(work_item: Any, depends_on: Any) -> Optional[RawItem]:
         is_out_of_process=bool(_attr(work_item, "isOutOfProcess", False)),
         is_batch=bool(_attr(work_item, "isBatch", False)),
         batch_parent=_str_attr(parent, "name") if parent is not None else "",
-        declared_outputs=_declared_outputs(work_item, cached),
+        declared_outputs=found or declared_files(_attr(work_item, "expectedOutputFiles", ())),
         declared_inputs=declared_files(_attr(work_item, "inputFiles", ())),
         depends_on=tuple(n for n in (_str_attr(d, "name") for d in _iterate(depends_on)) if n),
         in_cook=_in_cook(_attr(work_item, "state", None)),
         cached=cached,
     )
-
-
-def _declared_outputs(work_item: Any, cached: bool) -> Tuple[DeclaredFile, ...]:
-    """The item's declared outputs. A cached item's come from its results, when it has any."""
-    # An item PDG cooked from cache holds the files it found in ``outputFiles``.
-    found: Tuple[DeclaredFile, ...] = (
-        declared_files(_attr(work_item, "outputFiles", ())) if cached else ()
-    )
-    return found or declared_files(_attr(work_item, "expectedOutputFiles", ()))
 
 
 def _in_cook(state: Any) -> Optional[bool]:
