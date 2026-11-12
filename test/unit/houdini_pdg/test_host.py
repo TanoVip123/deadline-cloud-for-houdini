@@ -1233,7 +1233,7 @@ def test_only_a_shared_posix_root_counts_as_apart(
     paths: types.ModuleType, working_dir: str, folder: str, apart: bool
 ) -> None:
     """A worker's "/" rule maps node paths such as /obj/pyro, and a drive or share rule can't."""
-    assert host_module._shares_only_a_root(working_dir, folder, paths) is apart
+    assert host_module._shares_only_the_posix_root(working_dir, folder, paths) is apart
 
 
 def test_the_cook_start_refuses_a_folder_in_another_top_level_folder(

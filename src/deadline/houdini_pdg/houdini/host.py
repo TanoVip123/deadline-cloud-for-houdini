@@ -534,7 +534,7 @@ def _read_output_directories(
     apart: Dict[str, Set[str]] = {
         folder: parms
         for folder, parms in folders.items()
-        if _shares_only_a_root(folder, working_dir)
+        if _shares_only_the_posix_root(folder, working_dir)
     }
     locations: Sequence[str] = read_local_locations() if apart else ()
     home: str = _find_local_location(working_dir, locations)
@@ -555,7 +555,7 @@ def _read_output_directories(
     return tuple(sorted(folders))
 
 
-def _shares_only_a_root(path: str, other: str, paths: ModuleType = os.path) -> bool:
+def _shares_only_the_posix_root(path: str, other: str, paths: ModuleType = os.path) -> bool:
     """Whether two absolute POSIX paths have nothing in common but "/".
 
     A Windows drive or share root never counts, because a worker's rule for it can't match a
