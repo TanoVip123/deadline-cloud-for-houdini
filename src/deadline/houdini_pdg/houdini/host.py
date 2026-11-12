@@ -334,9 +334,7 @@ class HoudiniPdgHost:
             names |= _names_of(self.scheduler_node())
         except CookSetupError:
             pass
-        return _own_overrides_cleared(
-            infos, graph_nodes, frozenset(name for name in names if name)
-        )
+        return _own_overrides_cleared(infos, graph_nodes, frozenset(name for name in names if name))
 
 
 def run_pre_cook_checks(
