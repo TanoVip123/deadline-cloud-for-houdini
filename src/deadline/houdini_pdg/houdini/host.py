@@ -1395,16 +1395,15 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     except UserInitiatedCancel:
         return False
     except (GraphRefusedError, CookSetupError) as stopped:
-        text: str = (
-            "The cook can't start.\n\n" + format_refusals(stopped.verdict.refusals)
+        # A refusal's text lists each refusal. Only the final check's verdict has advisories,
+        # and they go on the Warning tab.
+        text, advisories = (
+            (
+                "The cook can't start.\n\n" + format_refusals(stopped.verdict.refusals),
+                format_advisories(stopped.verdict.advisories),
+            )
             if isinstance(stopped, GraphRefusedError)
-            else str(stopped)
-        )
-        # Only the final check's verdict has advisories, and they go on the Warning tab.
-        advisories: str = (
-            format_advisories(stopped.verdict.advisories)
-            if isinstance(stopped, GraphRefusedError)
-            else ""
+            else (str(stopped), "")
         )
         # Once there's a PDG graph, the tabs keep the text after the popup closes.
         if context is not None:
