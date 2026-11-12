@@ -1189,17 +1189,18 @@ def test_an_output_folder_under_the_working_directorys_top_level_folder_passes(
         (("/opt/studio", "/tmp"), True),
         # The longest location wins, as in the library, so these still split the two.
         (("/opt", "/opt/studio", "/tmp/pdg-extra"), True),
-        # One side alone, or one location over both, still leaves "/" as the root.
-        (("/opt/studio",), False),
-        (("/tmp",), False),
+        # One side alone gives that side its own root, and the other side then gets its own.
+        (("/opt/studio",), True),
+        (("/tmp",), True),
+        # One location over both still leaves "/" as the root.
         (("/",), False),
         ((), False),
     ],
 )
-def test_a_storage_profile_location_for_each_side_lets_the_folder_through(
+def test_a_storage_profile_location_for_either_side_lets_the_folder_through(
     scene: FakeHou, locations: Tuple[str, ...], passes: bool
 ) -> None:
-    """A LOCAL location for each side makes job attachments give each its own root.
+    """A LOCAL location for either side, and not over both, makes job attachments split the roots.
 
     On Windows the two paths share a drive, which isn't refused, so every row passes there.
     """

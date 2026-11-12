@@ -530,27 +530,27 @@ def _read_output_directories(
         )
     _refuse_unbounded(folders)
     # Job attachments would root the job at "/", and a worker's "/" rule maps node paths such as
-    # /obj/pyro too. A LOCAL location for each side keeps them apart.
+    # /obj/pyro too. A LOCAL location for either side, and not over both, keeps them apart.
     apart: Dict[str, Set[str]] = {
         folder: parms
         for folder, parms in folders.items()
         if _shares_only_the_posix_root(folder, working_dir)
     }
     locations: Sequence[str] = read_local_locations() if apart else ()
-    home: str = _find_local_location(working_dir, locations)
-    together: List[str] = sorted(
+    working_dir_location: str = _find_local_location(working_dir, locations)
+    refused: List[str] = sorted(
         f"{parm} ('{folder}')"
         for folder, parms in apart.items()
-        if not home or _find_local_location(folder, locations) in ("", home)
+        if _find_local_location(folder, locations) == working_dir_location
         for parm in parms
     )
-    if together:
+    if refused:
         raise CookSetupError(
-            f"The output folder in {', '.join(together)} shares only '/' with the working "
+            f"The output folder in {', '.join(refused)} shares only '/' with the working "
             f"directory '{working_dir}', so the job's attachments would be rooted at '/', and "
             "the workers couldn't find the scene's nodes. Put the folder "
             "under the same top-level folder as the working directory, or ask your farm admin to "
-            "add a LOCAL location for each to the queue's storage profile."
+            "add a LOCAL location for either to the queue's storage profile."
         )
     return tuple(sorted(folders))
 
