@@ -107,6 +107,9 @@ _SAVE_REMEDY: str = "Save the scene, then cook again."
 #: ``USERPROFILE``, and a shell on any system may set ``HOME``.
 _HOME_VARIABLES: Tuple[str, ...] = ("HOME", "USERPROFILE")
 
+# A PDG log line's leading "[HH:MM:SS.fff] " stamp.
+_LOG_STAMP: "re.Pattern[str]" = re.compile(r"^\[[0-9:.]+\]\s*")
+
 # ``pdg.workItemState`` names of an item PDG has queued in the current cook.
 _QUEUED_STATES: FrozenSet[str] = frozenset({"Waiting", "Scheduled", "Cooking"})
 
@@ -256,7 +259,14 @@ class HoudiniPdgHost:
         try:
             graph: Any = _attr(self._scheduler.context, "graph")
             item: Any = _call(graph, "workItemById", item_id)
-            return _reason_from_log(str(_attr(item, "logMessages") or ""))
+            # Drop the time stamps and blank lines, then keep the ERROR lines apart from the last line.
+            log: str = str(_attr(item, "logMessages") or "")
+            stripped: List[str] = [_LOG_STAMP.sub("", line).strip() for line in log.splitlines()]
+            lines: List[str] = [line for line in stripped if line]
+            errors: List[str] = [
+                line.split("ERROR:", 1)[1].strip() for line in lines if "ERROR:" in line
+            ]
+            return " ".join(errors), (lines[-1] if lines else "")
         except Exception:
             _logger.debug("Could not read the log of work item %s.", item_id, exc_info=True)
             return "", ""
@@ -715,19 +725,6 @@ def _scheduler_node(scheduler: Any) -> Any:
             "cannot be read. Recreate the scheduler node."
         )
     return matches[0]
-
-
-# A PDG log line's leading "[HH:MM:SS.fff] " stamp.
-_LOG_STAMP: "re.Pattern[str]" = re.compile(r"^\[[0-9:.]+\]\s*")
-
-
-def _reason_from_log(log: str) -> Tuple[str, str]:
-    """A work item's log as ``(its ERROR: lines joined, its last line)``, without time stamps."""
-    # Drop the time stamps and blank lines, then keep the ERROR lines apart from the last line.
-    stripped: List[str] = [_LOG_STAMP.sub("", line).strip() for line in log.splitlines()]
-    lines: List[str] = [line for line in stripped if line]
-    errors: List[str] = [line.split("ERROR:", 1)[1].strip() for line in lines if "ERROR:" in line]
-    return " ".join(errors), (lines[-1] if lines else "")
 
 
 def _graph_nodes(context: Any) -> List[Any]:
