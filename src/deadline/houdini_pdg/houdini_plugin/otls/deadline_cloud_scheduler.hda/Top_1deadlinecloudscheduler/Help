@@ -197,11 +197,13 @@ Output Directories:
     uploads what it writes there, so the steps below and Deadline Cloud
     Monitor can fetch it. A folder that holds the working directory, or is
     inside it, stops the cook. On Linux and macOS, so does a folder that
-    shares only / with the working directory, such as /tmp/out with a working
-    directory under /opt. Put it under the same top-level folder, or ask your
-    farm admin to add a LOCAL location for either to the queue's storage
-    profile. On Windows, a folder on another drive, or one that shares only
-    the drive with the working directory, isn't refused.
+    shares only / with the working directory or another output folder, such
+    as /tmp/out with a working directory under /opt, when the queue's storage
+    profile gives the two the same LOCAL location or none. Put it under the
+    working directory's top-level folder, or ask your farm admin to give the
+    two different LOCAL locations in the storage profile. On Windows, a
+    folder on another drive, or one that shares only the drive with the
+    working directory, isn't refused.
 
 == Host Requirements ==
 

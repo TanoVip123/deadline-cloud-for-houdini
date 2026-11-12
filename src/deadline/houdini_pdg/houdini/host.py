@@ -484,7 +484,8 @@ def _read_output_directories(
     A node from before the tab has none. Raises ``CookSetupError`` naming the parm of a
     folder with an unset variable, one that overlaps the working directory or another
     folder, one that is a drive or home directory, or one that shares only "/" with the
-    working directory when no LOCAL storage profile location gives each its own.
+    working directory or another folder that has the same longest LOCAL storage profile
+    location, or none.
     """
     folders: Dict[str, Set[str]] = {}
     for index in range(1, int(_parm(node, "output_directories", 0, as_text=False)) + 1):
@@ -529,28 +530,31 @@ def _read_output_directories(
             "record each file in the inner one twice. Keep only the outer folder."
         )
     _refuse_unbounded(folders)
-    # Job attachments would root the job at "/", and a worker's "/" rule maps node paths such as
-    # /obj/pyro too. A LOCAL location for either side, and not over both, keeps them apart.
-    apart: Dict[str, Set[str]] = {
-        folder: parms
-        for folder, parms in folders.items()
-        if _shares_only_the_posix_root(folder, working_dir)
+    # Job attachments root each LOCAL location's group at its common path, and a "/" root maps node
+    # paths such as /obj/pyro too. Only a folder apart from the working directory can give one.
+    any_apart: bool = any(_shares_only_the_posix_root(folder, working_dir) for folder in folders)
+    locations: Sequence[str] = read_local_locations() if any_apart else ()
+    groups: Dict[str, str] = {
+        path: _find_local_location(path, locations) for path in (working_dir, *folders)
     }
-    locations: Sequence[str] = read_local_locations() if apart else ()
-    working_dir_location: str = _find_local_location(working_dir, locations)
+    # A folder's group is rooted at "/" when it shares only "/" with any path in the group.
     refused: List[str] = sorted(
         f"{parm} ('{folder}')"
-        for folder, parms in apart.items()
-        if _find_local_location(folder, locations) == working_dir_location
+        for folder, parms in folders.items()
+        if any(
+            groups[other] == groups[folder] and _shares_only_the_posix_root(folder, other)
+            for other in groups
+        )
         for parm in parms
     )
     if refused:
         raise CookSetupError(
             f"The output folder in {', '.join(refused)} shares only '/' with the working "
-            f"directory '{working_dir}', so the job's attachments would be rooted at '/', and "
-            "the workers couldn't find the scene's nodes. Put the folder "
-            "under the same top-level folder as the working directory, or ask your farm admin to "
-            "add a LOCAL location for either to the queue's storage profile."
+            f"directory '{working_dir}' or another output folder, and the queue's storage profile "
+            "gives them the same LOCAL location or none. So the job's attachments would be rooted "
+            "at '/', and the workers couldn't find the scene's nodes. Put each folder under the "
+            "same top-level folder as the working directory, or ask your farm admin to give them "
+            "different LOCAL locations in the queue's storage profile."
         )
     return tuple(sorted(folders))
 

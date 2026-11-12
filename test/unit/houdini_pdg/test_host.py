@@ -1218,6 +1218,38 @@ def test_a_storage_profile_location_for_either_side_lets_the_folder_through(
 
 
 @pytest.mark.parametrize(
+    "folders, locations, passes",
+    [
+        # Job attachments put both folders in one group with no location, rooted at "/".
+        (("/tmp/pdg-extra", "/var/pdg-extra"), ("/opt/studio",), False),
+        # The location holds only the working directory, so the other two share only "/".
+        (("/opt/pdg-near", "/tmp/pdg-extra"), ("/opt/studio",), False),
+        # Both folders under one "/" location, and the working directory in its own.
+        (("/tmp/pdg-extra", "/var/pdg-extra"), ("/opt/studio", "/"), False),
+        # A location for each folder gives each its own group, so nothing is rooted at "/".
+        (("/tmp/pdg-extra", "/var/pdg-extra"), ("/opt/studio", "/tmp", "/var"), True),
+    ],
+)
+def test_two_output_folders_grouped_at_slash_are_refused(
+    scene: FakeHou, folders: Tuple[str, ...], locations: Tuple[str, ...], passes: bool
+) -> None:
+    """Job attachments group paths by LOCAL location, so two folders can root a group at "/".
+
+    On Windows the paths share a drive, which isn't refused, so every row passes there.
+    """
+    node: FakeNode = _settings_node(working_dir="/opt/studio/cooks/shot")
+    _set_list_parm(node, "output_directories", "output_dir", list(folders))
+    profile: _StorageProfile = _StorageProfile(*(os.path.abspath(p) for p in locations))
+    if passes or os.name == "nt":
+        settings: SchedulerSettings = read_scheduler_settings(node, read_local_locations=profile)
+        assert settings.output_directories == tuple(sorted(os.path.abspath(f) for f in folders))
+        return
+    # Both folders are in the "/" group, so the refusal names both.
+    with pytest.raises(CookSetupError, match="output_dir1.*output_dir2"):
+        read_scheduler_settings(node, read_local_locations=profile)
+
+
+@pytest.mark.parametrize(
     "paths, working_dir, folder, apart",
     [
         # Only "/" in common, which job attachments would make the job's root.
