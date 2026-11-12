@@ -1416,6 +1416,7 @@ def test_a_storage_profile_that_cant_be_read_gives_no_locations_and_a_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The refusal then stands, and the log says why the profile wasn't used."""
+    # The workstation names a profile, and the farm call fails.
     caplog.set_level("WARNING")
     client: FakeStorageProfiles = FakeStorageProfiles([], error=RuntimeError("expired"))
     read: Callable[[str], str] = workstation({"settings.storage_profile_id": "sp-1"})

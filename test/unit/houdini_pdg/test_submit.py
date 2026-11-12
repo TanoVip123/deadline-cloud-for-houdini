@@ -712,6 +712,7 @@ def _add_service_node(network: FakeNetwork, source: str, *inputs: FakeNode) -> F
     ``source`` says where Service shows: PDG's own cook type, or only the Cook Type parm,
     as just after the artist sets it.
     """
+    # A TOP node and its PDG node, with Service set in one of the two places.
     hom: FakeNode = network.topnet.add(FakeNode("/obj/topnet1/server"), *inputs)
     pdg_node: FakePdgNode = FakePdgNode(name="server", command="hython serve.py", hom=hom)
     if source == "pdg":

@@ -1169,6 +1169,7 @@ def test_an_output_folder_under_the_working_directorys_top_level_folder_passes(
     scene: FakeHou,
 ) -> None:
     """They share /opt, so the job's root is /opt, and the queue's storage profile isn't read."""
+    # Both under /opt, so the folder is kept and the farm is never asked.
     profile: _StorageProfile = _StorageProfile()
     node: FakeNode = _folder_node("/opt/pdgm1/cooks/shot", "/opt/pdgm1/pdg-extra")
     settings: SchedulerSettings = read_scheduler_settings(node, read_local_locations=profile)
