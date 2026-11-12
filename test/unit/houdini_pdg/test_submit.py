@@ -534,7 +534,9 @@ def test_a_refused_submit_sends_its_advisories_to_the_warning_tab(scene: FakeHou
     assert "sim:" in text and "outside the working directory" in text
     (warning,) = tab.warned
     assert warning.startswith(f"{os.environ['HIP']}: The scene is in ")
-    assert "'/tmp/elsewhere'" in warning
+    # Windows puts the current drive on a rooted path that has none, and uses backslashes.
+    drive: str = os.path.splitdrive(os.getcwd())[0]
+    assert f"'{drive}{os.sep}tmp{os.sep}elsewhere'" in warning
     assert tab.shown == [text] and tab.events == ["dirty", "popup", "stop"]
 
 
