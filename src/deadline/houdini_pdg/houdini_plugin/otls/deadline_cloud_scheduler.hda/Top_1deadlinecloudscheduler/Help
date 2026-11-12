@@ -196,7 +196,11 @@ Output Directories:
     Folders outside the working directory that tasks write to. Each task
     uploads what it writes there, so the steps below and Deadline Cloud
     Monitor can fetch it. A folder that holds the working directory, or is
-    inside it, stops the cook.
+    inside it, stops the cook. So does a folder that shares no top-level
+    folder with the working directory, such as /tmp/out with a working
+    directory under /opt, or one on another drive. Put it under the same
+    top-level folder, or ask your farm admin to add a LOCAL location for each
+    to the queue's storage profile.
 
 == Host Requirements ==
 
