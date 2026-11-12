@@ -515,6 +515,29 @@ def test_submits_advisories_go_on_the_warning_tab_once(scene: FakeHou, confirmed
         assert tab.warned == [details] and tab.shown == []
 
 
+def test_a_refused_submit_sends_its_advisories_to_the_warning_tab(scene: FakeHou) -> None:
+    """A refused Submit showed only its refusals, so the advisory naming their cause was lost.
+
+    With the working directory away from the scene, sim's $HIP output is refused, and the
+    scene-directory advisory must go on the Warning tab in the same cook start as the error.
+    """
+    # The working directory is not the scene's folder, and sim writes under $HIP.
+    network: FakeNetwork = _network()
+    network.scheduler_node.set_parm("working_dir", "/tmp/elsewhere")
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    graph: Any = network.context.schedulers["deadlinecloudscheduler1"].dependency_graph[0]
+    (sim_item,) = [item for item in graph if item.node.name == "sim"]
+    sim_item.expectedOutputFiles = [(os.environ["HIP"] + "/geo/sim.bgeo.sc", "file/geo")]
+    tab: _ErrorTab = _ErrorTab(network, scene)
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    text: str = scene.messages.calls[-1][0]
+    assert "sim:" in text and "outside the working directory" in text
+    (warning,) = tab.warned
+    assert warning.startswith(f"{os.environ['HIP']}: The scene is in ")
+    assert "'/tmp/elsewhere'" in warning
+    assert tab.shown == [text] and tab.events == ["dirty", "popup", "stop"]
+
+
 _ALL: Tuple[str, ...] = ("wedge1", "sim", "render", "partition", "montage")
 
 
