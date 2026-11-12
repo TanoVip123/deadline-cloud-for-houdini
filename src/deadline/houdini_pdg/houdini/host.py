@@ -660,27 +660,23 @@ def _parm(node: Any, name: str, default: Any, *, as_text: bool) -> Any:
     """The parm's value, or ``default`` when the node lacks it. An unreadable parm raises ``CookSetupError``."""
     parm: Any = node.parm(name)
     if parm is None:
-        _report_missing(node, name, default)
+        # Log once per node and parm that the parm is missing, and which default is used.
+        key: Tuple[str, str] = (_path_of(node), name)
+        with _reported_lock:
+            first: bool = key not in _reported_missing
+            _reported_missing.add(key)
+        if first:
+            _logger.warning(
+                "Node %s has no '%s' parm, so it uses the default, %r. Recreate the node to get it.",
+                key[0] or "?",
+                name,
+                default,
+            )
         return hou.text.expandString(default) if as_text else default
     try:
         return parm.evalAsString() if as_text else parm.eval()
     except Exception as e:
         raise CookSetupError(f"The '{name}' parm cannot be read: {e}") from e
-
-
-def _report_missing(node: Any, name: str, default: Any) -> None:
-    """Log once per node and parm that the parm is missing, and which default is used."""
-    key: Tuple[str, str] = (_path_of(node), name)
-    with _reported_lock:
-        if key in _reported_missing:
-            return
-        _reported_missing.add(key)
-    _logger.warning(
-        "Node %s has no '%s' parm, so it uses the default, %r. Recreate the node to get it.",
-        key[0] or "?",
-        name,
-        default,
-    )
 
 
 def _absolute(path: str) -> str:
