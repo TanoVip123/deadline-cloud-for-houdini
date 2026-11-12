@@ -329,7 +329,7 @@ def test_a_scene_walk_that_fails_after_the_generate_still_gets_a_verdict(
     """
     # render's node gives a name that can't be turned into text, after a full generate.
     network: FakeNetwork = _network()
-    network.node("render").hom.name = lambda: _Unprintable()  # type: ignore[method-assign]
+    network.node("render").hom.name = _Unprintable  # type: ignore[method-assign]
     _generated(network, {"sim": 1, "render": 1, "montage": 1})
     assert submit(network.scheduler_node, get_setting=_workstation) is True
     assert "Steps: 3, tasks: 3" in scene.messages.calls[0][0]

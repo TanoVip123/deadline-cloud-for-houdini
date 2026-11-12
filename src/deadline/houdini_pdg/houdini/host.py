@@ -333,6 +333,7 @@ class HoudiniPdgHost:
         try:
             names |= _names_of(self.scheduler_node())
         except CookSetupError:
+            # With no node to read, the scheduler's own name is the only one an override can use.
             pass
         return _clear_own_overrides(infos, graph_nodes, frozenset(name for name in names if name))
 
