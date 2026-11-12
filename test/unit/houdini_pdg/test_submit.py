@@ -140,17 +140,20 @@ def test_a_network_that_does_not_cook_on_this_scheduler_is_refused(
 
 
 def test_the_confirmation_shows_the_jobs_settings_and_any_warning(scene: FakeHou) -> None:
-    """The artist confirms what will run, and a waived refusal is shown, not hidden."""
+    """The artist confirms what will run, and a waived refusal is shown, not hidden.
+
+    Priority 0 is a valid value, so it must show as 0 and not fall back to the default 50.
+    """
     network: FakeNetwork = _with_items(
         build_network(
             COOKING_EXAMPLE,
-            scheduler_parms={"working_dir": "$HIP", "validate_graph": 0, "priority": 70},
+            scheduler_parms={"working_dir": "$HIP", "validate_graph": 0, "priority": 0},
         )
     )
     assert submit(network.scheduler_node, get_setting=_workstation) is True
     text: str = scene.messages.calls[0][0]
     # With no name parm the job takes the scene's file name.
-    assert "Job name: shot.hip" in text and "Priority: 70" in text
+    assert "Job name: shot.hip" in text and "Priority: 0\n" in text
     assert "Farm: farm-1" in text and "Queue: queue-1" in text
     assert "python1" in scene.messages.options[0]["details"]
 
