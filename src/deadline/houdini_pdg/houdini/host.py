@@ -451,7 +451,7 @@ def read_scheduler_settings(
     """The cook's settings from the scheduler node's parms. An absent parm takes its default.
 
     ``read_local_locations`` gives the queue's LOCAL storage profile paths, and is called only
-    for an output folder that shares just a root with the working directory. Call it on the
+    for an output folder that shares only "/" with the working directory. Call it on the
     main thread.
     """
     # The working directory must be a real, absolute path.
@@ -483,7 +483,7 @@ def _read_output_directories(
 
     A node from before the tab has none. Raises ``CookSetupError`` naming the parm of a
     folder with an unset variable, one that overlaps the working directory or another
-    folder, one that is a drive or home directory, or one that shares only a root with the
+    folder, one that is a drive or home directory, or one that shares only "/" with the
     working directory when no LOCAL storage profile location gives each its own.
     """
     folders: Dict[str, Set[str]] = {}
@@ -529,8 +529,8 @@ def _read_output_directories(
             "record each file in the inner one twice. Keep only the outer folder."
         )
     _refuse_unbounded(folders)
-    # Job attachments group paths by top-level folder, so here the job's root would be "/" or a
-    # drive, which a worker maps for every path. A LOCAL location for each side keeps them apart.
+    # Job attachments would root the job at "/", and a worker's "/" rule maps node paths such as
+    # /obj/pyro too. A LOCAL location for each side keeps them apart.
     apart: Dict[str, Set[str]] = {
         folder: parms
         for folder, parms in folders.items()
@@ -546,9 +546,9 @@ def _read_output_directories(
     )
     if together:
         raise CookSetupError(
-            f"The output folder in {', '.join(together)} shares no top-level folder with the "
-            f"working directory '{working_dir}', so the job's attachments would be rooted at the "
-            "whole drive or '/', and the workers couldn't find the scene's nodes. Put the folder "
+            f"The output folder in {', '.join(together)} shares only '/' with the working "
+            f"directory '{working_dir}', so the job's attachments would be rooted at '/', and "
+            "the workers couldn't find the scene's nodes. Put the folder "
             "under the same top-level folder as the working directory, or ask your farm admin to "
             "add a LOCAL location for each to the queue's storage profile."
         )
@@ -556,27 +556,23 @@ def _read_output_directories(
 
 
 def _shares_only_a_root(path: str, other: str, paths: ModuleType = os.path) -> bool:
-    """Whether two absolute paths have nothing in common but a root, or are on different drives.
+    """Whether two absolute POSIX paths have nothing in common but "/".
 
-    ``paths`` is ``os.path``, or ``ntpath`` in a test of Windows rules.
+    A Windows drive or share root never counts, because a worker's rule for it can't match a
+    node path. ``paths`` is ``os.path``, or ``ntpath`` in a test of Windows rules.
     """
     try:
         common: str = paths.commonpath([paths.normcase(path), paths.normcase(other)])
     except ValueError:
-        # Windows raises this for paths on different drives.
-        return True
-    return paths.dirname(common) == common
+        # Windows raises this for paths on different drives, which job attachments root apart.
+        return False
+    return common == "/"
 
 
-def _find_local_location(path: str, locations: Sequence[str], paths: ModuleType = os.path) -> str:
-    """The longest of ``locations`` that holds ``path``, as job attachments pick it, or ``""``.
-
-    ``paths`` is ``os.path``, or ``ntpath`` in a test of Windows rules.
-    """
+def _find_local_location(path: str, locations: Sequence[str]) -> str:
+    """The longest of ``locations`` that holds ``path``, as job attachments pick it, or ``""``."""
     holding: List[str] = [
-        location
-        for location in locations
-        if _is_below(_path_key(path, paths), _path_key(location, paths), paths)
+        location for location in locations if _is_below(_path_key(path), _path_key(location))
     ]
     return max(holding, key=len, default="")
 

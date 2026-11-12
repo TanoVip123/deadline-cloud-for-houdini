@@ -266,7 +266,8 @@ def test_an_output_folder_in_another_top_level_folder_stops_submit_before_the_ge
 ) -> None:
     """On the farm the job got "/" as its root, so every task failed to find its node.
 
-    The workstation names no storage profile here, so nothing can keep the two apart.
+    The workstation names no storage profile here, so nothing can keep the two apart. On
+    Windows the two paths share a drive, which isn't refused, so no popup names the folder.
     """
     # The working directory under /opt and the extra output folder under /tmp.
     network: FakeNetwork = _network()
@@ -274,6 +275,10 @@ def test_an_output_folder_in_another_top_level_folder_stops_submit_before_the_ge
     node.set_parm("working_dir", "/opt/studio/cooks/shot")
     node.set_parm("output_directories", 1)
     node.set_parm("output_dir1", "/tmp/pdg-extra", kind="FileReference")
+    if os.name == "nt":
+        submit(node, get_setting=_workstation)
+        assert all("output_dir1" not in text for text, _buttons in scene.messages.calls)
+        return
     assert submit(node, get_setting=_workstation) is False
     ((text, buttons),) = scene.messages.calls
     assert f"{node.path()}/output_dir1" in text and "top-level folder" in text and buttons == ()
