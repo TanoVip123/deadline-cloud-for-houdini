@@ -1192,6 +1192,8 @@ def test_an_output_folder_under_the_working_directorys_top_level_folder_passes(
         # One side alone gives that side its own root, and the other side then gets its own.
         (("/opt/studio",), True),
         (("/tmp",), True),
+        # A "/" location holds only the folder, because the working directory's is longer.
+        (("/opt/studio", "/"), True),
         # One location over both still leaves "/" as the root.
         (("/",), False),
         ((), False),
