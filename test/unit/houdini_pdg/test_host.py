@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import ntpath
 import os
 import re
 import sys
@@ -31,6 +32,7 @@ from .houdini_fakes import (
 
 from deadline.houdini_pdg.errors import CookSetupError, PayloadTransferError
 from deadline.houdini_pdg.graph import NodeInfo
+from deadline.houdini_pdg.houdini import host as host_module
 from deadline.houdini_pdg.houdini.host import (
     HoudiniPdgHost,
     cook_set_names,
@@ -1123,6 +1125,123 @@ def test_an_output_directory_at_home_is_refused_naming_its_parm(
     _set_list_parm(node, "output_directories", "output_dir", [str(tmp_path / "home")])
     with pytest.raises(CookSetupError, match="output_dir1"):
         read_scheduler_settings(node)
+
+
+class _StorageProfile:
+    """The queue's LOCAL storage profile locations, counting how often they are read."""
+
+    def __init__(self, *locations: str) -> None:
+        self.locations: Tuple[str, ...] = locations
+        self.reads: int = 0
+
+    def __call__(self) -> Tuple[str, ...]:
+        self.reads += 1
+        return self.locations
+
+
+def _folder_node(working_dir: str, folder: str) -> FakeNode:
+    """A scheduler node with ``working_dir`` and one extra output folder."""
+    node: FakeNode = _settings_node(working_dir=working_dir)
+    _set_list_parm(node, "output_directories", "output_dir", [folder])
+    return node
+
+
+def test_an_output_folder_in_another_top_level_folder_is_refused_naming_the_fix(
+    scene: FakeHou,
+) -> None:
+    """Job attachments would make "/" the job's root, so a worker maps every path, node paths too.
+
+    On Windows the two paths land on one drive, so the shared root is that drive.
+    """
+    # The working directory under /opt and the folder under /tmp, with no storage profile.
+    profile: _StorageProfile = _StorageProfile()
+    node: FakeNode = _folder_node("/opt/pdgm1/cooks/shot", "/tmp/pdg-extra")
+    with pytest.raises(CookSetupError) as raised:
+        read_scheduler_settings(node, read_local_locations=profile)
+    text: str = str(raised.value)
+    assert f"{SCHEDULER_PATH}/output_dir1" in text
+    assert os.path.abspath("/tmp/pdg-extra") in text
+    assert "same top-level folder as the working directory" in text
+    assert "storage profile" in text and profile.reads == 1
+
+
+def test_an_output_folder_under_the_working_directorys_top_level_folder_passes(
+    scene: FakeHou,
+) -> None:
+    """They share /opt, so the job's root is /opt, and the queue's storage profile isn't read."""
+    profile: _StorageProfile = _StorageProfile()
+    node: FakeNode = _folder_node("/opt/pdgm1/cooks/shot", "/opt/pdgm1/pdg-extra")
+    settings: SchedulerSettings = read_scheduler_settings(node, read_local_locations=profile)
+    assert settings.output_directories == (os.path.abspath("/opt/pdgm1/pdg-extra"),)
+    assert profile.reads == 0
+
+
+@pytest.mark.parametrize(
+    "locations, passes",
+    [
+        (("/opt/pdgm1", "/tmp"), True),
+        # The longest location wins, as in the library, so these still split the two.
+        (("/opt", "/opt/pdgm1", "/tmp/pdg-extra"), True),
+        # One side alone, or one location over both, still leaves "/" as the root.
+        (("/opt/pdgm1",), False),
+        (("/tmp",), False),
+        (("/",), False),
+        ((), False),
+    ],
+)
+def test_a_storage_profile_location_for_each_side_lets_the_folder_through(
+    scene: FakeHou, locations: Tuple[str, ...], passes: bool
+) -> None:
+    """A LOCAL location for each side makes job attachments give each its own root."""
+    node: FakeNode = _folder_node("/opt/pdgm1/cooks/shot", "/tmp/pdg-extra")
+
+    def read() -> SchedulerSettings:
+        profile: _StorageProfile = _StorageProfile(*(os.path.abspath(p) for p in locations))
+        return read_scheduler_settings(node, read_local_locations=profile)
+
+    if passes:
+        assert read().output_directories == (os.path.abspath("/tmp/pdg-extra"),)
+    else:
+        with pytest.raises(CookSetupError, match="output_dir1"):
+            read()
+
+
+@pytest.mark.parametrize(
+    "working_dir, folder, apart",
+    [
+        # Another drive, or only the drive root in common, as job attachments would key it.
+        (r"C:\proj\shot", r"D:\pdg-extra", True),
+        (r"C:\proj\shot", r"C:\temp\pdg-extra", True),
+        (r"\\server\share\shot", r"\\server\share\pdg-extra", True),
+        # A shared top-level folder, whatever its case, is enough.
+        (r"C:\proj\shot", r"c:\PROJ\pdg-extra", False),
+    ],
+)
+def test_on_windows_a_folder_sharing_only_a_drive_with_the_working_directory_is_apart(
+    working_dir: str, folder: str, apart: bool
+) -> None:
+    """Windows paths are judged with Windows rules, where a drive or a share is the root."""
+    assert host_module._shares_only_a_root(working_dir, folder, ntpath) is apart
+
+
+def test_on_windows_a_storage_profile_location_matches_whatever_its_case() -> None:
+    """Windows ignores case, so C:\\Proj is the location that holds c:\\proj\\shot."""
+    locations: Tuple[str, ...] = (r"C:\Proj", r"c:\proj\shot\deep", r"D:\out")
+    assert host_module._find_local_location(r"c:\proj\shot", locations, ntpath) == r"C:\Proj"
+    assert host_module._find_local_location(r"E:\x", locations, ntpath) == ""
+
+
+def test_the_cook_start_refuses_a_folder_in_another_top_level_folder(
+    scene: FakeHou, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cook reads its settings through the host, so a TOP Cook is refused like Submit."""
+    # A workstation config with no storage profile, so nothing is asked of the farm.
+    monkeypatch.setenv("DEADLINE_CONFIG_FILE_PATH", str(tmp_path / "deadline" / "config"))
+    network: FakeNetwork = build_network(PYRO_BONFIRE)
+    network.scheduler_node.set_parm("working_dir", "/opt/pdgm1/cooks/shot")
+    _set_list_parm(network.scheduler_node, "output_directories", "output_dir", ["/tmp/pdg-extra"])
+    with pytest.raises(CookSetupError, match="output_dir1.*top-level folder"):
+        HoudiniPdgHost(network.scheduler()).read_settings()
 
 
 def test_the_host_reads_the_requirements_from_its_scheduler_node(scene: FakeHou) -> None:

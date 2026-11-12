@@ -1366,6 +1366,63 @@ def test_a_queue_without_job_attachments_cannot_cook(
         submitter_module._queue_job_attachments(FARM, QUEUE, client=FakeDeadline(attachments))
 
 
+class FakeStorageProfiles:
+    """A Deadline Cloud client whose ``get_storage_profile_for_queue`` returns ``locations``, or raises."""
+
+    def __init__(self, locations: List[Dict[str, str]], error: Optional[Exception] = None) -> None:
+        self._locations: List[Dict[str, str]] = locations
+        self._error: Optional[Exception] = error
+        self.calls: List[Tuple[str, str, str]] = []
+
+    def get_storage_profile_for_queue(
+        self, farmId: str, queueId: str, storageProfileId: str
+    ) -> Dict[str, Any]:
+        """The profile as the service returns it."""
+        self.calls.append((farmId, queueId, storageProfileId))
+        if self._error is not None:
+            raise self._error
+        return {
+            "storageProfileId": storageProfileId,
+            "displayName": "Studio",
+            "osFamily": "LINUX",
+            "fileSystemLocations": self._locations,
+        }
+
+
+def test_the_storage_profile_gives_only_its_local_locations() -> None:
+    """A SHARED location isn't uploaded at all, so only a LOCAL one gives a path its own root."""
+    client: FakeStorageProfiles = FakeStorageProfiles(
+        [
+            {"name": "Work", "path": "/opt/pdgm1", "type": "LOCAL"},
+            {"name": "Assets", "path": "/mnt/assets", "type": "SHARED"},
+            {"name": "Tmp", "path": "/tmp", "type": "LOCAL"},
+        ]
+    )
+    read: Callable[[str], str] = workstation({"settings.storage_profile_id": "sp-1"})
+    found: Tuple[str, ...] = submitter_module.read_local_storage_locations(read, client=client)
+    assert found == ("/opt/pdgm1", "/tmp")
+    # The same farm, queue and profile the job is created with.
+    assert client.calls == [(FARM, QUEUE, "sp-1")]
+
+
+def test_with_no_storage_profile_nothing_is_asked_of_the_farm() -> None:
+    """The library uploads with no profile then, so there are no locations to read."""
+    client: FakeStorageProfiles = FakeStorageProfiles([])
+    assert submitter_module.read_local_storage_locations(workstation(), client=client) == ()
+    assert client.calls == []
+
+
+def test_a_storage_profile_that_cant_be_read_gives_no_locations_and_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The refusal then stands, and the log says why the profile wasn't used."""
+    caplog.set_level("WARNING")
+    client: FakeStorageProfiles = FakeStorageProfiles([], error=RuntimeError("expired"))
+    read: Callable[[str], str] = workstation({"settings.storage_profile_id": "sp-1"})
+    assert submitter_module.read_local_storage_locations(read, client=client) == ()
+    assert any("sp-1" in r.getMessage() and "expired" in r.getMessage() for r in caplog.records)
+
+
 def test_the_nodes_output_directories_join_the_working_directory_in_the_bundle(
     tmp_path: Path,
 ) -> None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import logging
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -44,6 +45,8 @@ from .errors import (
 )
 from .graph import PDG_DIR_TOKEN, PDG_TOKEN_PREFIX, GraphSnapshot, StepSpec
 from .ports import PdgHost, SceneFiles
+
+_logger: logging.Logger = logging.getLogger(__name__)
 
 _SESSION_ENVIRONMENT: str = "PdgSession"
 _OVERRIDE_ENVIRONMENT: str = "OverrideAdaptor"
@@ -561,3 +564,36 @@ def _queue_job_attachments(farm_id: str, queue_id: str, *, client: Any = None) -
             "work item's data there, so choose a queue that has one."
         )
     return bucket, root_prefix
+
+
+def read_local_storage_locations(
+    get_setting: Callable[[str], str] = get_workstation_setting, *, client: Any = None
+) -> Tuple[str, ...]:
+    """The paths of the LOCAL locations in the workstation's storage profile, or ``()`` with none.
+
+    The farm, queue and profile are the ones the job is created with. ``client`` is a Deadline
+    Cloud client, made from the workstation's credentials when absent. A failed read is logged.
+    """
+    from deadline.client import api
+
+    # Job attachments read this setting too when they create the job, and with none use no profile.
+    profile_id: str = get_setting("settings.storage_profile_id")
+    if not profile_id:
+        return ()
+    try:
+        deadline: Any = client if client is not None else api.get_boto3_client("deadline")
+        profile: Dict[str, Any] = deadline.get_storage_profile_for_queue(
+            farmId=get_setting("defaults.farm_id"),
+            queueId=get_setting("defaults.queue_id"),
+            storageProfileId=profile_id,
+        )
+    except Exception as error:
+        _logger.warning("Could not read storage profile %s: %s", profile_id, error)
+        return ()
+    # Only a LOCAL location gives a path its own root. A SHARED one isn't uploaded at all.
+    locations: Tuple[str, ...] = tuple(
+        location["path"]
+        for location in profile.get("fileSystemLocations", ())
+        if location.get("type") == "LOCAL"
+    )
+    return locations

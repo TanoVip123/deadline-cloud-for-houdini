@@ -43,7 +43,7 @@ from ..errors import (
 )
 from ..graph import GraphSnapshot, NodeInfo, find_ancestors_among, synthesize
 from ..ports import ItemOutcome, ItemState, SceneFiles, T, WorkItemHandle
-from ..submitter import farm_problem, get_workstation_setting
+from ..submitter import farm_problem, get_workstation_setting, read_local_storage_locations
 from ..scene_reads import (
     ReadReport,
     SceneReads,
@@ -443,10 +443,16 @@ def _clear_outputs(item: WorkItemHandle) -> None:
 # -- settings -----------------------------------------------------------------
 
 
-def read_scheduler_settings(node: Any) -> SchedulerSettings:
+def read_scheduler_settings(
+    node: Any,
+    *,
+    read_local_locations: Callable[[], Sequence[str]] = read_local_storage_locations,
+) -> SchedulerSettings:
     """The cook's settings from the scheduler node's parms. An absent parm takes its default.
 
-    Call it on the main thread.
+    ``read_local_locations`` gives the queue's LOCAL storage profile paths, and is called only
+    for an output folder that shares just a root with the working directory. Call it on the
+    main thread.
     """
     # The working directory must be a real, absolute path.
     working_dir: str = _make_absolute(
@@ -466,16 +472,19 @@ def read_scheduler_settings(node: Any) -> SchedulerSettings:
         working_dir=working_dir,
         debug_level=_read_debug_level(node),
         validate_graph=bool(_parm(node, _VALIDATE_GRAPH_PARM, 1, as_text=False)),
-        output_directories=_read_output_directories(node, working_dir),
+        output_directories=_read_output_directories(node, working_dir, read_local_locations),
     )
 
 
-def _read_output_directories(node: Any, working_dir: str) -> Tuple[str, ...]:
+def _read_output_directories(
+    node: Any, working_dir: str, read_local_locations: Callable[[], Sequence[str]]
+) -> Tuple[str, ...]:
     """The Job Attachments tab's output folders, absolute, each checked against the working directory.
 
     A node from before the tab has none. Raises ``CookSetupError`` naming the parm of a
     folder with an unset variable, one that overlaps the working directory or another
-    folder, or one that is a drive or home directory.
+    folder, one that is a drive or home directory, or one that shares only a root with the
+    working directory when no LOCAL storage profile location gives each its own.
     """
     folders: Dict[str, Set[str]] = {}
     for index in range(1, int(_parm(node, "output_directories", 0, as_text=False)) + 1):
@@ -520,7 +529,56 @@ def _read_output_directories(node: Any, working_dir: str) -> Tuple[str, ...]:
             "record each file in the inner one twice. Keep only the outer folder."
         )
     _refuse_unbounded(folders)
+    # Job attachments group paths by top-level folder, so here the job's root would be "/" or a
+    # drive, which a worker maps for every path. A LOCAL location for each side keeps them apart.
+    apart: Dict[str, Set[str]] = {
+        folder: parms
+        for folder, parms in folders.items()
+        if _shares_only_a_root(folder, working_dir)
+    }
+    locations: Sequence[str] = read_local_locations() if apart else ()
+    home: str = _find_local_location(working_dir, locations)
+    together: List[str] = sorted(
+        f"{parm} ('{folder}')"
+        for folder, parms in apart.items()
+        if not home or _find_local_location(folder, locations) in ("", home)
+        for parm in parms
+    )
+    if together:
+        raise CookSetupError(
+            f"The output folder in {', '.join(together)} shares no top-level folder with the "
+            f"working directory '{working_dir}', so the job's attachments would be rooted at the "
+            "whole drive or '/', and the workers couldn't find the scene's nodes. Put the folder "
+            "under the same top-level folder as the working directory, or ask your farm admin to "
+            "add a LOCAL location for each to the queue's storage profile."
+        )
     return tuple(sorted(folders))
+
+
+def _shares_only_a_root(path: str, other: str, paths: ModuleType = os.path) -> bool:
+    """Whether two absolute paths have nothing in common but a root, or are on different drives.
+
+    ``paths`` is ``os.path``, or ``ntpath`` in a test of Windows rules.
+    """
+    try:
+        common: str = paths.commonpath([paths.normcase(path), paths.normcase(other)])
+    except ValueError:
+        # Windows raises this for paths on different drives.
+        return True
+    return paths.dirname(common) == common
+
+
+def _find_local_location(path: str, locations: Sequence[str], paths: ModuleType = os.path) -> str:
+    """The longest of ``locations`` that holds ``path``, as job attachments pick it, or ``""``.
+
+    ``paths`` is ``os.path``, or ``ntpath`` in a test of Windows rules.
+    """
+    holding: List[str] = [
+        location
+        for location in locations
+        if _is_below(_path_key(path, paths), _path_key(location, paths), paths)
+    ]
+    return max(holding, key=len, default="")
 
 
 #: Each hardware field of the tab: its parm stem, the library's field stem, and the
@@ -1338,7 +1396,9 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         if farm:
             raise CookSetupError(farm)
         # The node's tabs are read next, so a bad value is shown before anything is generated.
-        settings: SchedulerSettings = read_scheduler_settings(node)
+        settings: SchedulerSettings = read_scheduler_settings(
+            node, read_local_locations=lambda: read_local_storage_locations(read)
+        )
         requirements: Optional[Dict[str, Any]] = read_host_requirements(node)
         inputs: List[Tuple[str, str]] = read_listed_inputs(node)
         cook_set: Optional[FrozenSet[str]] = _find_cook_set(context, display)
