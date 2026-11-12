@@ -1420,6 +1420,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             if services.refusals:
                 display.dirtyAllWorkItems(False)
             raise GraphRefusedError(before_generate)
+
         # Generate the display node's items, so every check sees the job the cook would
         # submit, and stop at the first step that passes a task quota.
         def stop(verdict: Verdict) -> bool:
