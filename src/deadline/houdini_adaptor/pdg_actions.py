@@ -42,12 +42,11 @@ try:
     from openjd.adaptor_runtime_client import PathMappingRule
 
     from deadline.houdini_pdg.graph import PDG_DIR_TOKEN
-    from deadline.houdini_pdg.ports import Clock, OutputFile, TaskAddress, TaskStorage
+    from deadline.houdini_pdg.ports import OutputFile, TaskAddress, TaskStorage
 except ImportError:
     from adaptor_runtime_client import PathMappingRule  # type: ignore[import-not-found,no-redef]
     from houdini_pdg.graph import PDG_DIR_TOKEN  # type: ignore[import-not-found,no-redef]
     from houdini_pdg.ports import (  # type: ignore[import-not-found,no-redef]
-        Clock,
         OutputFile,
         TaskAddress,
         TaskStorage,
@@ -354,8 +353,7 @@ class PdgWorkItemRunner:
     Each item runs with the session's environment plus its own values, and nothing is kept between items.
     """
 
-    def __init__(self, *, clock: Clock) -> None:
-        self._clock: Clock = clock
+    def __init__(self) -> None:
         self._baseline: Dict[str, str] = dict(os.environ)
 
     def run_work_item(self, args: Dict[str, Any]) -> None:

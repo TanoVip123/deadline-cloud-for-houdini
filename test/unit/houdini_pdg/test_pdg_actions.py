@@ -39,7 +39,6 @@ from deadline.houdini_adaptor.pdg_actions import (
     download_pdg_work_item,
     publish_pdg_outputs,
 )
-from deadline.houdini_pdg.cook import SystemClock
 from deadline.houdini_pdg.errors import PayloadTransferError
 from deadline.houdini_pdg.graph import PDG_DIR_TOKEN
 from deadline.houdini_pdg.ports import OutputFile, TaskAddress, TaskStorage
@@ -698,7 +697,7 @@ class Session:
 
     def __init__(self, storage: TaskStorage) -> None:
         self.storage: TaskStorage = storage
-        self.runner: PdgWorkItemRunner = PdgWorkItemRunner(clock=SystemClock())
+        self.runner: PdgWorkItemRunner = PdgWorkItemRunner()
         self.output: str = ""
 
     def run(self, item_args: Dict[str, Any]) -> int:
@@ -814,7 +813,7 @@ def test_an_item_that_cannot_be_downloaded_fails_before_anything_runs(
     }
     out: io.StringIO = io.StringIO()
     with contextlib.redirect_stdout(out):
-        PdgWorkItemRunner(clock=SystemClock()).run_work_item(client_args)
+        PdgWorkItemRunner().run_work_item(client_args)
     assert "Traceback" in out.getvalue() and "ropfetch1_7.json.gz" in out.getvalue()
     assert out.getvalue().rstrip().endswith(f"{EXIT_CODE_MARKER}1")
 
@@ -1091,8 +1090,7 @@ _FAKE_HOUDINI: Dict[str, str] = {
 _CLIENT: str = """
 import json, sys
 from deadline.houdini_adaptor.pdg_actions import PdgWorkItemRunner
-from deadline.houdini_pdg.cook import SystemClock
-runner = PdgWorkItemRunner(clock=SystemClock())
+runner = PdgWorkItemRunner()
 with open(sys.argv[1]) as f:
     items = json.load(f)
 for item in items:
@@ -1342,7 +1340,7 @@ def test_a_silent_command_reports_what_it_wrote_in_an_output_directory(
     out: io.StringIO = io.StringIO()
     with contextlib.redirect_stdout(out):
         client_args, outputs_file = download_pdg_work_item(storage, ADDRESS, item_args, rules)
-        PdgWorkItemRunner(clock=SystemClock()).run_work_item(json.loads(json.dumps(client_args)))
+        PdgWorkItemRunner().run_work_item(json.loads(json.dumps(client_args)))
     publish_pdg_outputs(storage, ADDRESS, outputs_file)
     assert storage.published == [(ADDRESS, [OutputFile("/studio/renders/beauty/b.1.exr", "")])]
 
@@ -1357,7 +1355,7 @@ def _run_item(command: str, item_args: Dict[str, Any], rules: List[RuntimeRule])
     out: io.StringIO = io.StringIO()
     with contextlib.redirect_stdout(out):
         client_args, outputs_file = download_pdg_work_item(storage, ADDRESS, item_args, rules)
-        runner: PdgWorkItemRunner = PdgWorkItemRunner(clock=SystemClock())
+        runner: PdgWorkItemRunner = PdgWorkItemRunner()
         runner.run_work_item(json.loads(json.dumps(client_args)))
     # The adaptor publishes only after the item exits 0.
     if EXIT_CODE_MARKER + "0" in out.getvalue():
