@@ -18,6 +18,7 @@ from .houdini_fakes import (
     FakeHou,
     FakeNetwork,
     FakeNode,
+    FakePdgNode,
     OperationFailed,
     build_network,
     install_hou,
@@ -611,6 +612,48 @@ def test_an_error_on_a_node_the_display_node_does_not_cook_does_not_stop_submit(
     _generated(network, {"sim": 1, "render": 1})
     network.node("montage").hom.node_errors = ["An error from an earlier cook."]
     assert submit(network.scheduler_node, get_setting=_workstation) is True
+
+
+def _add_inner_step(
+    network: FakeNetwork, subnet: FakeNode, name: str, *inputs: FakeNode
+) -> FakeNode:
+    """Add a step called ``name`` inside ``subnet``, wired to ``inputs``, with its own PDG node."""
+    # PDG names a node inside a subnet by the subnet's name and its own.
+    inner: FakeNode = subnet.add(FakeNode(f"{subnet.path()}/{name}"), *inputs)
+    pdg_inner: FakePdgNode = FakePdgNode(
+        name=f"{subnet.name()}_{name}", command=f"hython {name}.py", hom=inner
+    )
+    inner.pdg_node = pdg_inner
+    network.context.nodes.append(pdg_inner)
+    return inner
+
+
+def test_a_displayed_subnet_cooks_its_display_node_and_the_steps_above_it(
+    scene: FakeHou,
+) -> None:
+    """A subnet has no PDG node, so the checks start from its own display node.
+
+    Starting from nothing would check every node, and refuse the steps the cook never
+    reaches for having no items: ``stray`` inside the subnet and ``side`` outside it.
+    """
+    # side hangs off the wedge, and the subnet outputs inner, wired to montage, beside stray.
+    network: FakeNetwork = _network()
+    side: FakeNode = network.topnet.add(
+        FakeNode("/obj/topnet1/side"), network.node("wedge1").hom
+    )
+    side.pdg_node = FakePdgNode(name="side", command="hython side.py", hom=side)
+    network.context.nodes.append(side.pdg_node)
+    subnet: FakeNode = network.topnet.add(FakeNode("/obj/topnet1/subnet1"))
+    subnet.display = _add_inner_step(network, subnet, "inner", network.node("montage").hom)
+    network.node("subnet1_inner").workItems = [None]
+    _add_inner_step(network, subnet, "stray")
+    network.topnet.display = subnet
+    _generated(network, {"sim": 1, "render": 1, "montage": 1, "subnet1_inner": 1})
+    # Submit counts the four cooked steps and never names side or stray.
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    text: str = scene.messages.calls[0][0]
+    assert "side" not in text and "stray" not in text
+    assert "Steps: 4, tasks: 4" in text
 
 
 def test_a_step_with_no_items_below_nodes_with_items_is_still_refused_as_too_early(
