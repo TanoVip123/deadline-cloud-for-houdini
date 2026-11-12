@@ -47,6 +47,7 @@ from ..submitter import farm_problem, get_workstation_setting
 from ..scene_reads import (
     ReadReport,
     SceneReads,
+    VARIABLE_PATTERN,
     _depends_on_work_item,
     _has_root,
     _is_below,
@@ -727,17 +728,13 @@ def _graph_nodes(context: Any) -> List[Any]:
     return list(nodes or ())
 
 
-# ``$NAME`` or ``${NAME}``.
-_VARIABLE: "re.Pattern[str]" = re.compile(r"\$\{(\w+)\}|\$(\w+)")
-
-
 def _expand_variables(text: str) -> str:
     """``text`` with Houdini's variables expanded. Raises for a variable Houdini does not define.
 
     The test is the session's own expansion, not the environment, so ``$F4`` and ``$T``
     count as defined. An unknown variable gives nothing or stays as typed, which breaks a path.
     """
-    for braced, bare in _VARIABLE.findall(text):
+    for braced, bare in VARIABLE_PATTERN.findall(text):
         name: str = braced or bare
         if str(hou.text.expandString("$" + name)) in ("", "$" + name):
             raise KeyError(name)

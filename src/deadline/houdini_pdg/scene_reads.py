@@ -104,7 +104,8 @@ _PORTABLE_PREFIX: Pattern[str] = re.compile(
 )
 
 # ``$NAME`` or ``${NAME}``: group 1 holds the braced name, group 2 the bare one.
-_VARIABLE: Pattern[str] = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+# Shared so a read and its check agree on which text is a variable.
+VARIABLE_PATTERN: Pattern[str] = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 
 
 @dataclass(frozen=True)
@@ -586,7 +587,7 @@ def _attribute_variables(
         # Only writes are judged: a read that names a variable is not recorded.
         if not (read.is_output or read.is_file_cache_write) or read.step not in exported:
             continue
-        for braced, bare in _VARIABLE.findall(read.raw or ""):
+        for braced, bare in VARIABLE_PATTERN.findall(read.raw or ""):
             variable: str = braced or bare
             attribute: Optional[str] = exported[read.step].get(variable.casefold())
             # A carried attribute counts only when the session expands ``$NAME`` to nothing.

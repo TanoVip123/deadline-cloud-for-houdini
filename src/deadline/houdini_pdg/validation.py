@@ -32,6 +32,7 @@ from .scene_reads import (
     ReadReport,
     ReadVerdict,
     SceneRead,
+    VARIABLE_PATTERN,
     _depends_on_work_item,
     _has_root,
     _is_below,
@@ -229,9 +230,6 @@ def _skipped() -> Verdict:
 
 # -- paths --------------------------------------------------------------------
 
-#: ``$NAME`` or ``${NAME}``.
-_VARIABLE: "re.Pattern[str]" = re.compile(r"\$\{(\w+)\}|\$(\w+)")
-
 _OUTSIDE_JOB_FOLDERS: str = "outside the working directory and every output folder"
 _UNEXPANDED_VARIABLE: str = "unexpanded variable"
 
@@ -279,7 +277,7 @@ def _expand(path: str, env: Optional[Mapping[str, str]]) -> str:
         name: str = match.group(1) or match.group(2)
         return source.get(name, match.group(0))
 
-    return _VARIABLE.sub(replace, path)
+    return VARIABLE_PATTERN.sub(replace, path)
 
 
 def environment_with_hip(hip_file: str) -> Dict[str, str]:

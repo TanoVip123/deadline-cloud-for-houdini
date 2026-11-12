@@ -13,7 +13,14 @@ import re
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Set, Tuple
 
 from ..graph import DeclaredFile, NodeInfo, RawItem
-from ..scene_reads import IGNORE_PARMS, IGNORE_VALUE_PREFIXES, SceneRead, SceneReads, is_output_parm
+from ..scene_reads import (
+    IGNORE_PARMS,
+    IGNORE_VALUE_PREFIXES,
+    VARIABLE_PATTERN,
+    SceneRead,
+    SceneReads,
+    is_output_parm,
+)
 
 _logger: logging.Logger = logging.getLogger(__name__)
 
@@ -734,10 +741,6 @@ _FILE_CACHE: str = "filecache::2.0"
 # ``chs('file')`` or ``chs("file")`` in an expression: the File Cache's stock ``sopoutput``.
 _COPIES_FILE: "re.Pattern[str]" = re.compile(r"""\bchs\(\s*["']file["']\s*\)""")
 
-# ``$NAME`` or ``${NAME}``: group 1 holds the braced name, group 2 the bare one.
-_VARIABLE: "re.Pattern[str]" = re.compile(r"\$\{(\w+)\}|\$(\w+)")
-
-
 # ``$OS`` and ``${OS}``: the name of the node that holds the parm.
 _OS_VARIABLE: "re.Pattern[str]" = re.compile(r"\$\{OS\}|\$OS(?!\w)")
 
@@ -754,7 +757,7 @@ def _undefined_variables(
     # Each variable is expanded alone, so one unknown name can't hide another.
     found: Dict[str, None] = {}
     named: str = _OS_VARIABLE.sub(lambda _: owner, raw) if owner else raw
-    for braced, bare in _VARIABLE.findall(named):
+    for braced, bare in VARIABLE_PATTERN.findall(named):
         name: str = braced or bare
         try:
             expand("$" + name)
