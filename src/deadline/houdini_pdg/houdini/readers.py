@@ -751,6 +751,7 @@ def _undefined_variables(
     """
     if expand is None:
         return ()
+    # Each variable is expanded alone, so one unknown name can't hide another.
     found: Dict[str, None] = {}
     named: str = _OS_VARIABLE.sub(lambda _: owner, raw) if owner else raw
     for braced, bare in _VARIABLE.findall(named):
