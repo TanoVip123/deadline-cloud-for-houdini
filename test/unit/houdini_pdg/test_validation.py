@@ -712,6 +712,32 @@ def test_a_surviving_step_that_needs_a_dropped_one_is_refused() -> None:
     assert _subjects(verdict, RefusalScenario.STEP_WITHOUT_ITEMS) == {"b"}
 
 
+@pytest.mark.parametrize(
+    "cause, scenario",
+    [
+        ({"cook_type": "Service"}, RefusalScenario.SERVICE_NODE),
+        ({"scheduler_override": "../localscheduler1"}, RefusalScenario.MULTIPLE_SCHEDULERS),
+    ],
+)
+def test_a_service_or_overridden_step_with_no_items_gets_one_refusal(
+    cause: Dict[str, Any], scenario: RefusalScenario
+) -> None:
+    """A Service step with no items got two extra refusals, for itself and the step below it.
+
+    The step's own refusal already says why it has no items, so it is the only one.
+    """
+    # karma has no items for the cause, and overlay and late sit below it.
+    nodes: List[NodeInfo] = [
+        _node("geo"),
+        _node("karma", ["geo"], count=0, in_cook_set=True, **cause),
+        _node("overlay", ["karma"], in_cook_set=True),
+        _node("late", ["karma"], count=0, in_cook_set=True),
+    ]
+    verdict: Verdict = validate(_ctx(nodes))
+    assert _subjects(verdict, scenario) == {"karma"}
+    assert not _subjects(verdict, RefusalScenario.STEP_WITHOUT_ITEMS)
+
+
 def test_a_step_whose_only_dropped_producer_is_dynamic_is_not_refused_for_it() -> None:
     """A dynamic producer already has its own refusal, so its consumer gets no second one."""
     # dyn is dynamic and has no items, and b depends on it. The cause is dyn being
@@ -1419,6 +1445,28 @@ def test_a_node_set_to_write_files_is_not_refused_for_existing_outputs() -> None
         _ctx(nodes, working_dir=WORKING_DIR, env={}, exists=lambda path: True)
     )
     assert not _subjects(verdict, RefusalScenario.CACHED_OUTPUTS)
+
+
+@pytest.mark.parametrize("cache_mode", [None, "Automatic", "Read Files"])
+def test_files_on_disk_are_described_as_pdg_takes_them_from_cache(
+    cache_mode: Optional[str],
+) -> None:
+    """The message says what PDG does with an item whose outputs exist, as measured in Houdini.
+
+    With Automatic or Read Files, PDG marks the item cooked from cache and never offers it
+    to this scheduler. Nothing waits on the item forever.
+    """
+    # One item whose output exists, in each mode that reads results from disk.
+    nodes: List[NodeInfo] = _with_outputs(
+        [_node("cache", count=1, cache_mode=cache_mode)], "__PDG_DIR__/geo"
+    )
+    verdict: Verdict = validate(
+        _ctx(nodes, working_dir=WORKING_DIR, env={}, exists=lambda path: True)
+    )
+    (refusal,) = [r for r in verdict.refusals if r.scenario is RefusalScenario.CACHED_OUTPUTS]
+    assert "Automatic or Read Files" in refusal.detail
+    assert "never offers it to this scheduler" in refusal.detail
+    assert "forever" not in refusal.detail
 
 
 def test_cached_output_returns_an_empty_string_when_nothing_is_on_disk() -> None:
@@ -2203,6 +2251,38 @@ def test_a_runtime_input_that_cannot_be_resolved_here_is_not_tested(path: str) -
 def _absolute(*parts: str) -> str:
     """An absolute path on every platform: on Windows, a path with no drive is not absolute."""
     return os.path.abspath(os.path.join(os.sep, *parts))
+
+
+def test_a_missing_file_two_steps_reach_through_one_node_is_refused_once() -> None:
+    """Two steps that walk the same node read its parm twice, and the artist sees one refusal.
+
+    The subject names the node and not the step, so a second copy only repeats it.
+    """
+    # Steps a and b both reach one node whose parm names a file that isn't on disk.
+    nodes: List[NodeInfo] = [_node("a"), _node("b")]
+    snapshot: GraphSnapshot = synthesize(nodes)
+    missing: str = _absolute("nonexistent", "Mandril.pic")
+    reads: List[SceneRead] = [
+        SceneRead(step=step, node_path="/obj/sparks/adjust", parm="cmap", raw=missing, path=missing)
+        for step in ("a", "b")
+    ]
+    report: ReadReport = match_reads(snapshot, reads, WORKING_DIR)
+    verdict: Verdict = validate(
+        _ctx(
+            nodes,
+            snapshot=snapshot,
+            reads=report,
+            working_dir=WORKING_DIR,
+            exists=lambda path: False,
+        )
+    )
+    # A list, not a set, so a repeated refusal shows up.
+    refused: List[Refusal] = [
+        refusal
+        for refusal in verdict.refusals
+        if refusal.scenario is RefusalScenario.LOCAL_FILE_UNREACHABLE
+    ]
+    assert [refusal.subject for refusal in refused] == ["/obj/sparks/adjust parm 'cmap'"]
 
 
 def test_a_read_outside_the_cook_that_is_not_on_disk_is_refused() -> None:

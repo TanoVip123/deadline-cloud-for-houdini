@@ -69,3 +69,14 @@ def test_submit_is_the_last_parm_of_shared_job_settings_and_nothing_follows_the_
     tab: str = NODE_SCRIPT[start : NODE_SCRIPT.index("\n    }\n", start)]
     entries: List[Tuple[str, str]] = re.findall(r'\n        (\w+)\s*\{\s*name\s+"(\w+)"', tab)
     assert entries == [("groupsimple", "folder0"), ("groupsimple", "folder1"), ("parm", "submit")]
+
+
+@pytest.mark.parametrize(
+    "parm", ["priority", "failed_tasks_limit", "task_retry_limit", "max_worker_count"]
+)
+def test_the_job_number_parms_are_plain_integer_fields(parm: str) -> None:
+    """The artist types these counts, and a slider made them hard to set exactly."""
+    # Each count is an integer parm whose slider is turned off.
+    block: str = _parms(NODE_SCRIPT)[parm]
+    assert re.search(r"type\s+integer", block)
+    assert re.search(r'parmtag\s*\{\s*"sidefx::slider"\s+"none"\s*\}', block), parm

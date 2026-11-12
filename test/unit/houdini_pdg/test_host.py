@@ -858,6 +858,21 @@ def test_an_unsaved_or_new_scene_is_refused(
     assert scene.messages.calls == [] and scene.hip_file.saves == 0
 
 
+@pytest.mark.parametrize("new, refused", [(False, False), (True, True)])
+def test_with_no_ui_only_a_never_saved_scene_is_refused(
+    scene: FakeHou, new: bool, refused: bool
+) -> None:
+    """hython reports unsaved changes even right after a save, and no artist is editing the scene.
+
+    A scene that was never saved has no file for a worker to load, UI or not.
+    """
+    # hython says the scene has changes, whether or not it was ever saved.
+    scene.hip_file.new, scene.hip_file.unsaved, scene.ui = new, True, False
+    assert [r.scenario for r in _verdict(build_network(PYRO_BONFIRE)).refusals] == (
+        [RefusalScenario.UNSAVED_SCENE] if refused else []
+    )
+
+
 def _auto_save_network(auto_save: int) -> FakeNetwork:
     """A Pyro Bonfire network whose scheduler node has the auto-save toggle set to ``auto_save``."""
     return build_network(
