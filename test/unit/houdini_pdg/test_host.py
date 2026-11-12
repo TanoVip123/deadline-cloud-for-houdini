@@ -1155,7 +1155,7 @@ def test_an_output_folder_in_another_top_level_folder_is_refused_naming_the_fix(
     """
     # The working directory under /opt and the folder under /tmp, with no storage profile.
     profile: _StorageProfile = _StorageProfile()
-    node: FakeNode = _folder_node("/opt/pdgm1/cooks/shot", "/tmp/pdg-extra")
+    node: FakeNode = _folder_node("/opt/studio/cooks/shot", "/tmp/pdg-extra")
     with pytest.raises(CookSetupError) as raised:
         read_scheduler_settings(node, read_local_locations=profile)
     text: str = str(raised.value)
@@ -1171,20 +1171,20 @@ def test_an_output_folder_under_the_working_directorys_top_level_folder_passes(
     """They share /opt, so the job's root is /opt, and the queue's storage profile isn't read."""
     # Both under /opt, so the folder is kept and the farm is never asked.
     profile: _StorageProfile = _StorageProfile()
-    node: FakeNode = _folder_node("/opt/pdgm1/cooks/shot", "/opt/pdgm1/pdg-extra")
+    node: FakeNode = _folder_node("/opt/studio/cooks/shot", "/opt/studio/pdg-extra")
     settings: SchedulerSettings = read_scheduler_settings(node, read_local_locations=profile)
-    assert settings.output_directories == (os.path.abspath("/opt/pdgm1/pdg-extra"),)
+    assert settings.output_directories == (os.path.abspath("/opt/studio/pdg-extra"),)
     assert profile.reads == 0
 
 
 @pytest.mark.parametrize(
     "locations, passes",
     [
-        (("/opt/pdgm1", "/tmp"), True),
+        (("/opt/studio", "/tmp"), True),
         # The longest location wins, as in the library, so these still split the two.
-        (("/opt", "/opt/pdgm1", "/tmp/pdg-extra"), True),
+        (("/opt", "/opt/studio", "/tmp/pdg-extra"), True),
         # One side alone, or one location over both, still leaves "/" as the root.
-        (("/opt/pdgm1",), False),
+        (("/opt/studio",), False),
         (("/tmp",), False),
         (("/",), False),
         ((), False),
@@ -1194,7 +1194,7 @@ def test_a_storage_profile_location_for_each_side_lets_the_folder_through(
     scene: FakeHou, locations: Tuple[str, ...], passes: bool
 ) -> None:
     """A LOCAL location for each side makes job attachments give each its own root."""
-    node: FakeNode = _folder_node("/opt/pdgm1/cooks/shot", "/tmp/pdg-extra")
+    node: FakeNode = _folder_node("/opt/studio/cooks/shot", "/tmp/pdg-extra")
 
     def read() -> SchedulerSettings:
         profile: _StorageProfile = _StorageProfile(*(os.path.abspath(p) for p in locations))
@@ -1239,7 +1239,7 @@ def test_the_cook_start_refuses_a_folder_in_another_top_level_folder(
     # A workstation config with no storage profile, so nothing is asked of the farm.
     monkeypatch.setenv("DEADLINE_CONFIG_FILE_PATH", str(tmp_path / "deadline" / "config"))
     network: FakeNetwork = build_network(PYRO_BONFIRE)
-    network.scheduler_node.set_parm("working_dir", "/opt/pdgm1/cooks/shot")
+    network.scheduler_node.set_parm("working_dir", "/opt/studio/cooks/shot")
     _set_list_parm(network.scheduler_node, "output_directories", "output_dir", ["/tmp/pdg-extra"])
     with pytest.raises(CookSetupError, match="output_dir1.*top-level folder"):
         HoudiniPdgHost(network.scheduler()).read_settings()

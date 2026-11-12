@@ -1393,14 +1393,14 @@ def test_the_storage_profile_gives_only_its_local_locations() -> None:
     """A SHARED location isn't uploaded at all, so only a LOCAL one gives a path its own root."""
     client: FakeStorageProfiles = FakeStorageProfiles(
         [
-            {"name": "Work", "path": "/opt/pdgm1", "type": "LOCAL"},
+            {"name": "Work", "path": "/opt/studio", "type": "LOCAL"},
             {"name": "Assets", "path": "/mnt/assets", "type": "SHARED"},
             {"name": "Tmp", "path": "/tmp", "type": "LOCAL"},
         ]
     )
     read: Callable[[str], str] = workstation({"settings.storage_profile_id": "sp-1"})
     found: Tuple[str, ...] = submitter_module.read_local_storage_locations(read, client=client)
-    assert found == ("/opt/pdgm1", "/tmp")
+    assert found == ("/opt/studio", "/tmp")
     # The same farm, queue and profile the job is created with.
     assert client.calls == [(FARM, QUEUE, "sp-1")]
 

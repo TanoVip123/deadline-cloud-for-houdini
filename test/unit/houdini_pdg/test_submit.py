@@ -271,7 +271,7 @@ def test_an_output_folder_in_another_top_level_folder_stops_submit_before_the_ge
     # The working directory under /opt and the extra output folder under /tmp.
     network: FakeNetwork = _network()
     node: Any = network.scheduler_node
-    node.set_parm("working_dir", "/opt/pdgm1/cooks/shot")
+    node.set_parm("working_dir", "/opt/studio/cooks/shot")
     node.set_parm("output_directories", 1)
     node.set_parm("output_dir1", "/tmp/pdg-extra", kind="FileReference")
     assert submit(node, get_setting=_workstation) is False
