@@ -485,6 +485,30 @@ def test_a_failed_asset_scan_still_returns_the_hip(
     assert "may be missing on the workers" in caplog.text
 
 
+def test_the_two_warnings_an_artist_may_read_carry_the_traceback(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warning without its traceback hides which Houdini call failed, so it can't be fixed."""
+    # An item whose outputs can't be cleared, and a scene Houdini can't scan for references.
+    monkeypatch.setattr(sys.modules["hou"], "fileReferences", _raise(RuntimeError("no scene")))
+    host: HoudiniPdgHost = HoudiniPdgHost(build_network(PYRO_BONFIRE).scheduler())
+    with caplog.at_level(logging.WARNING):
+        host.notify(handle(native=FakeNativeItem(raises=True)), ItemOutcome(ItemState.STARTED))
+        host.scene_files()
+    # Each warning keeps the RuntimeError that caused it.
+    prefixes: Tuple[str, str] = (
+        "Could not clear the earlier outputs",
+        "The scene's assets could not be scanned",
+    )
+    causes: Dict[str, Any] = {
+        prefix: record.exc_info[0] if record.exc_info else None
+        for record in caplog.records
+        for prefix in prefixes
+        if record.getMessage().startswith(prefix)
+    }
+    assert causes == dict.fromkeys(prefixes, RuntimeError)
+
+
 def test_the_integrations_own_libraries_are_not_attached_and_expanded_libraries_are_directories(
     scene: FakeHou, tmp_path: Path
 ) -> None:
