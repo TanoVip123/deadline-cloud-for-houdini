@@ -105,18 +105,14 @@ class _Named:
 class _Template:
     """A ``hou.ParmTemplate``: String with a string type, or another type."""
 
-    def __init__(self, kind: str, tags: Optional[Dict[str, str]] = None) -> None:
+    def __init__(self, kind: str) -> None:
         self._kind: str = kind
-        self._tags: Dict[str, str] = dict(tags or {})
 
     def type(self) -> _Named:
         return _Named("String" if self._kind else "Int")
 
     def stringType(self) -> _Named:
         return _Named(self._kind)
-
-    def tags(self) -> Dict[str, str]:
-        return dict(self._tags)
 
 
 class FakeParm:
@@ -128,7 +124,6 @@ class FakeParm:
         name: str,
         value: Any,
         kind: str = "",
-        tags: Optional[Dict[str, str]] = None,
         menu: Sequence[str] = (),
         labels: Sequence[str] = (),
     ) -> None:
@@ -136,7 +131,6 @@ class FakeParm:
         self._name: str = name
         self.value: Any = value
         self.kind: str = kind
-        self.tags: Dict[str, str] = dict(tags or {})
         self.sets: List[Any] = []
         #: A menu parm's tokens. Houdini's eval gives the chosen index, and evalAsString the token.
         self.menu: Tuple[str, ...] = tuple(menu)
@@ -153,7 +147,7 @@ class FakeParm:
         return self._node
 
     def parmTemplate(self) -> _Template:
-        return _Template(self.kind, self.tags)
+        return _Template(self.kind)
 
     def eval(self) -> Any:
         # A parm set to an exception stands for one whose expression fails.
@@ -175,9 +169,6 @@ class FakeParm:
     def unexpandedString(self) -> str:
         return str(self.value)
 
-    def expression(self) -> str:
-        raise RuntimeError("no channel expression")
-
     def set(self, value: Any) -> None:
         self.sets.append(value)
         self.value = value
@@ -191,7 +182,6 @@ class FakeNode:
         path: str,
         *,
         parms: Optional[Dict[str, Any]] = None,
-        files: Optional[Dict[str, str]] = None,
         category: str = "Top",
         type_name: str = "node",
     ) -> None:
@@ -204,9 +194,6 @@ class FakeNode:
         self._parms: Dict[str, FakeParm] = {
             name: FakeParm(self, name, value) for name, value in (parms or {}).items()
         }
-        # File-reference parms, which the scene walk and the ROP's scan read.
-        for name, value in (files or {}).items():
-            self._parms[name] = FakeParm(self, name, value, kind="FileReference")
         self.pdg_node: Any = None
         self.context: Any = None
         self.child_category: str = "Top"
@@ -274,12 +261,11 @@ class FakeNode:
         name: str,
         value: Any,
         kind: str = "",
-        tags: Optional[Dict[str, str]] = None,
         menu: Sequence[str] = (),
         labels: Sequence[str] = (),
     ) -> FakeParm:
         """Add or replace a parm, and return it. A ``menu`` makes it an ordinal menu set to ``value``."""
-        parm: FakeParm = FakeParm(self, name, value, kind, tags, menu, labels)
+        parm: FakeParm = FakeParm(self, name, value, kind, menu, labels)
         self._parms[name] = parm
         return parm
 
