@@ -222,7 +222,9 @@ def test_a_refused_start_sends_its_advisories_to_the_warning_tab(scene: FakeHou)
     (warning,) = [call[1] for call in scheduler.calls if call[0] == "cookWarning"]
     assert "render:" in error and "The scene is in" not in error
     assert warning.startswith(f"{os.environ['HIP']}: The scene is in ")
-    assert "'/tmp/elsewhere'" in warning
+    # Windows puts the current drive on a rooted path that has none, and uses backslashes.
+    drive: str = os.path.splitdrive(os.getcwd())[0]
+    assert f"'{drive}{os.sep}tmp{os.sep}elsewhere'" in warning
 
 
 def test_a_start_that_fails_on_a_bad_setting_still_returns_true(scene: FakeHou) -> None:
