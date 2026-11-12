@@ -638,9 +638,7 @@ def test_a_displayed_subnet_cooks_its_display_node_and_the_steps_above_it(
     """
     # side hangs off the wedge, and the subnet outputs inner, wired to montage, beside stray.
     network: FakeNetwork = _network()
-    side: FakeNode = network.topnet.add(
-        FakeNode("/obj/topnet1/side"), network.node("wedge1").hom
-    )
+    side: FakeNode = network.topnet.add(FakeNode("/obj/topnet1/side"), network.node("wedge1").hom)
     side.pdg_node = FakePdgNode(name="side", command="hython side.py", hom=side)
     network.context.nodes.append(side.pdg_node)
     subnet: FakeNode = network.topnet.add(FakeNode("/obj/topnet1/subnet1"))

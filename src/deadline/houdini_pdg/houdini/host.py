@@ -335,7 +335,7 @@ class HoudiniPdgHost:
             names |= _names_of(self.scheduler_node())
         except CookSetupError:
             pass
-        return _own_overrides_cleared(infos, graph_nodes, frozenset(name for name in names if name))
+        return _clear_own_overrides(infos, graph_nodes, frozenset(name for name in names if name))
 
 
 def run_pre_cook_checks(
@@ -449,7 +449,9 @@ def read_scheduler_settings(node: Any) -> SchedulerSettings:
     Call it on the main thread.
     """
     # The working directory must be a real, absolute path.
-    working_dir: str = _absolute(_parm(node, _WORKING_DIR_PARM, _WORKING_DIR_DEFAULT, as_text=True))
+    working_dir: str = _make_absolute(
+        _parm(node, _WORKING_DIR_PARM, _WORKING_DIR_DEFAULT, as_text=True)
+    )
     if not working_dir:
         raise CookSetupError(
             f"The '{_WORKING_DIR_PARM}' parm is empty. Set it to the directory the cook "
@@ -462,7 +464,7 @@ def read_scheduler_settings(node: Any) -> SchedulerSettings:
         )
     return SchedulerSettings(
         working_dir=working_dir,
-        debug_level=_debug_level(node),
+        debug_level=_read_debug_level(node),
         validate_graph=bool(_parm(node, _VALIDATE_GRAPH_PARM, 1, as_text=False)),
         output_directories=_read_output_directories(node, working_dir),
     )
@@ -487,7 +489,7 @@ def _read_output_directories(node: Any, working_dir: str) -> Tuple[str, ...]:
             raise CookSetupError(
                 f"The '{parm_path}' parm names a variable that is not set: '{value}'."
             )
-        folders.setdefault(_absolute(value), set()).add(parm_path)
+        folders.setdefault(_make_absolute(value), set()).add(parm_path)
     # A task's scan walks the working directory and each folder, so an overlap records files twice.
     working: str = _absolute_key(working_dir)
     overlapping: List[str] = sorted(
@@ -635,7 +637,7 @@ def _build_requirement(build: Callable[[], T], parms: str) -> T:
         ) from e
 
 
-def _debug_level(node: Any) -> int:
+def _read_debug_level(node: Any) -> int:
     """The debug level: the environment variable when it is valid, else the parm."""
     override: str = os.environ.get(_DEBUG_LEVEL_ENV, "").strip()
     valid: bool = bool(re.fullmatch(_WHOLE_NUMBER, override)) and int(override) in _DEBUG_LEVELS
@@ -677,7 +679,7 @@ def _parm(node: Any, name: str, default: Any, *, as_text: bool) -> Any:
         raise CookSetupError(f"The '{name}' parm cannot be read: {e}") from e
 
 
-def _absolute(path: str) -> str:
+def _make_absolute(path: str) -> str:
     """``path`` made absolute and normalized, or ``""`` for an empty path."""
     stripped: str = (path or "").strip()
     return os.path.normpath(os.path.abspath(os.path.expanduser(stripped))) if stripped else ""
@@ -688,7 +690,9 @@ def _absolute_key(path: str, paths: ModuleType = os.path) -> str:
     return _path_key(paths.abspath(paths.expanduser(path.strip())), paths)
 
 
-def _without(found: Iterable[str], drop: Iterable[str], paths: ModuleType = os.path) -> Set[str]:
+def _drop_listed_paths(
+    found: Iterable[str], drop: Iterable[str], paths: ModuleType = os.path
+) -> Set[str]:
     """``found`` less each path that names a file in ``drop``, however each is spelled."""
     dropped: Set[str] = {_absolute_key(path, paths) for path in drop if path.strip()}
     return {path for path in found if _absolute_key(path, paths) not in dropped}
@@ -743,10 +747,10 @@ def _expand_variables(text: str) -> str:
 
 def _has_queued_item(node: Any) -> bool:
     """Whether PDG has queued one of the node's items in this cook."""
-    for item in _attr(node, "workItems") or ():
-        if readers._enum_name(_attr(item, "state")) in _QUEUED_STATES:
-            return True
-    return False
+    return any(
+        readers._enum_name(_attr(item, "state")) in _QUEUED_STATES
+        for item in _attr(node, "workItems") or ()
+    )
 
 
 def _names_of(node: Any) -> Set[str]:
@@ -759,7 +763,7 @@ def _names_of(node: Any) -> Set[str]:
     return {name for name in names if name}
 
 
-def _own_overrides_cleared(
+def _clear_own_overrides(
     infos: Sequence[NodeInfo], graph_nodes: Iterable[Any], own_names: AbstractSet[str]
 ) -> Tuple[NodeInfo, ...]:
     """Clear an override that names this scheduler, because it changes nothing.
@@ -830,7 +834,7 @@ def _collect_scene_files(node: Any) -> SceneFiles:
     # The artist's own files and folders join the scan, each owned by its parm.
     for path, parm in read_listed_inputs(node):
         found.setdefault(path, set()).add(parm)
-    paths: Set[str] = _without(found, {hip_file} | _integration_libraries())
+    paths: Set[str] = _drop_listed_paths(found, {hip_file} | _integration_libraries())
     # The listed inputs were checked when they were read, so only the scan's are checked here.
     _refuse_unbounded({path: found[path] for path in paths if path in scanned})
     # Job attachments rejects a directory listed as a file. An asset library can
@@ -866,7 +870,7 @@ def read_listed_inputs(node: Any) -> List[Tuple[str, str]]:
             if not raw:
                 continue
             pattern: str = _houdini_time_vars_to_glob(raw)
-            expanded: str = _absolute(str(hou.text.expandString(pattern)))
+            expanded: str = _make_absolute(str(hou.text.expandString(pattern)))
             matched: List[str] = sorted(glob.glob(expanded)) if pattern != raw else [expanded]
             owner: str = _path_of(parm) or f"{entry}{index}"
             existing: List[str] = [path for path in matched if kind(path)]
@@ -876,7 +880,7 @@ def read_listed_inputs(node: Any) -> List[Tuple[str, str]]:
                     f"{'file' if kind is os.path.isfile else 'folder'}. Fix the path, or "
                     "remove the entry."
                 )
-            found.extend((_absolute(path), owner) for path in existing)
+            found.extend((_make_absolute(path), owner) for path in existing)
     # A listed home folder would hash all of it, the same as a scene parm naming it.
     owners: Dict[str, Set[str]] = {}
     for path, owner in found:
@@ -901,7 +905,7 @@ def _integration_libraries() -> Set[str]:
             node_type: Any = hou.nodeType(getattr(hou, category)(), name)
             definition: Any = node_type.definition() if node_type is not None else None
             if definition is not None:
-                libraries.add(_absolute(str(definition.libraryFilePath())))
+                libraries.add(_make_absolute(str(definition.libraryFilePath())))
         except Exception:
             _logger.debug("Could not find the library of node type '%s'.", name, exc_info=True)
     return libraries
@@ -959,9 +963,9 @@ def _scan_scene_assets(node: Any) -> Dict[str, Set[str]]:
         evaluated: str = os.path.expanduser(hou.text.expandString(pattern).strip())
         if not _has_root(evaluated) or "$" in evaluated:
             continue
-        expanded: str = _absolute(evaluated)
+        expanded: str = _make_absolute(evaluated)
         matched: List[str] = (
-            [_absolute(path) for path in glob.glob(expanded)]
+            [_make_absolute(path) for path in glob.glob(expanded)]
             if pattern != ref
             else ([expanded] if os.path.exists(expanded) else [])
         )
@@ -1083,7 +1087,7 @@ def _check_network(
         )
         return Verdict(), GraphSnapshot(steps=())
     graph_nodes: List[Any] = _graph_nodes(context)
-    infos: Tuple[NodeInfo, ...] = _own_overrides_cleared(
+    infos: Tuple[NodeInfo, ...] = _clear_own_overrides(
         readers.node_infos(graph_nodes, dependency_graph, cook_set), graph_nodes, _names_of(node)
     )
     snapshot: GraphSnapshot = synthesize(infos)
@@ -1185,7 +1189,7 @@ def _get_or_create_graph_context(node: Any) -> Any:
 def _saved_hip_file() -> str:
     """The saved ``.hip``, absolute, or ``""`` for a scene that has no file yet."""
     hip: str = str(hou.hipFile.path() or "")
-    return _absolute(hip) if hip else ""
+    return _make_absolute(hip) if hip else ""
 
 
 # -- duck typing --------------------------------------------------------------
