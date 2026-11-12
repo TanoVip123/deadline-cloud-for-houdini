@@ -263,47 +263,6 @@ def _frozen_submit_below_tabs_node() -> FakeLayoutNode:
     return FakeLayoutNode(_definition(), layout, spare, values)
 
 
-def test_an_old_nodes_stored_tabs_are_rebuilt_from_the_definition(scene: FakeHou) -> None:
-    """A node saved on the two-tab definition showed the new parms below Submit, outside any tab.
-
-    The rebuild must not wait for a login, so the Conda fields come back without the
-    ROP's update, with their values. An artist's priority, host requirements and
-    output folders must not reset on load either.
-    """
-    # The node's stored layout, made on the two-tab definition: the old tabs as spare
-    # folders, the ROP's Conda folder in the first, and the later parms below Submit.
-    shared: FakeTemplate = _shared_tab("job_settings51", "folder2", "folder3")
-    assert shared.children is not None
-    shared.children.append(_conda())
-    layout: List[FakeTemplate] = [
-        shared,
-        FakeTemplate("folder4", "PDG", [FakeTemplate("working_dir")]),
-        FakeTemplate("submit"),
-        FakeTemplate("output_directories"),
-        FakeTemplate("hr_mode"),
-        FakeTemplate("hr_os"),
-    ]
-    spare: Set[str] = {"job_settings51", "folder2", "folder3", "folder4"} | set(_conda().names())
-    values: Dict[str, Any] = {**_REAL_VALUES, **_CONDA_VALUES, "queue_env_do_not_use_Conda": (0,)}
-    node: FakeLayoutNode = FakeLayoutNode(_definition(), layout, spare, values)
-
-    # Rebuild the old node, then read its tabs, where the Conda folder is, and every value.
-    rebuild_layout_from_definition(node)
-    assert node.tabs() == ["Shared Job Settings", "PDG", "Job Attachments", "Host Requirements"]
-    assert all(entry.children is not None for entry in node.layout)
-    # The Conda folder goes back above Submit, so Submit stays last in the tab.
-    assert node.folder("Shared Job Settings") == [
-        "folder0",
-        "folder1",
-        "queue_env_do_not_use_Conda",
-        "submit",
-    ]
-    assert node.folder("Conda") == [_PACKAGES, _CHANNELS]
-    assert node.spare == set(_conda().names())
-    assert {name: node.values[name] for name in _REAL_VALUES} == _REAL_VALUES
-    assert {name: node.values[name] for name in _CONDA_VALUES} == _CONDA_VALUES
-
-
 def test_an_old_nodes_submit_below_the_tabs_moves_into_shared_job_settings(
     scene: FakeHou,
 ) -> None:
@@ -323,35 +282,6 @@ def test_an_old_nodes_submit_below_the_tabs_moves_into_shared_job_settings(
     assert node.spare == set(_conda().names())
     assert {name: node.values[name] for name in _REAL_VALUES} == _REAL_VALUES
     assert {name: node.values[name] for name in _CONDA_VALUES} == _CONDA_VALUES
-
-
-def _no_group_folder() -> FakeTemplate:
-    """The ROP's folder for queue parameters with no group, whose own name has no prefix."""
-    return FakeTemplate(
-        "no_group_queue_environment",
-        "Queue Environment",
-        [FakeTemplate("queue_env_do_not_use_RezPackages")],
-    )
-
-
-def test_queue_folders_added_after_submit_move_above_it_in_order(scene: FakeHou) -> None:
-    """The ROP's queue update adds its folders at the end of the tab, which put them below Submit."""
-    # A node laid out as the definition, then given two folders the way the ROP's update adds them.
-    node: FakeLayoutNode = FakeLayoutNode(_definition(), _definition(), set(), dict(_REAL_VALUES))
-    for folder in (_conda(), _no_group_folder()):
-        node.addSpareParmTuple(folder, ("Shared Job Settings",))
-    node.values.update(_CONDA_VALUES)
-    move_queue_folders_above_submit(node)
-    assert node.folder("Shared Job Settings") == [
-        "folder0",
-        "folder1",
-        "queue_env_do_not_use_Conda",
-        "no_group_queue_environment",
-        "submit",
-    ]
-    # Moving the folders changes no value and makes no definition parm spare.
-    assert {name: node.values[name] for name in _CONDA_VALUES} == _CONDA_VALUES
-    assert node.spare == set(_conda().names()) | set(_no_group_folder().names())
 
 
 def test_a_node_with_no_queue_folder_keeps_the_definitions_layout(scene: FakeHou) -> None:

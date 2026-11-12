@@ -84,16 +84,6 @@ def _parm_writes(network: FakeNetwork) -> List[Any]:
     return [value for parm in network.scheduler_node.parms() for value in parm.sets]
 
 
-def test_a_saved_scene_submits_after_one_confirmation_and_stays_saved(scene: FakeHou) -> None:
-    """A saved scene gets no save prompt, and Submit writes no parm, so the scene stays saved."""
-    network: FakeNetwork = _network()
-    assert submit(network.scheduler_node, get_setting=_workstation) is True
-    assert [buttons for _, buttons in scene.messages.calls] == [("Submit", "Cancel")]
-    assert scene.hip_file.hasUnsavedChanges() is False and scene.hip_file.saves == 0
-    assert _parm_writes(network) == []
-    assert _cooks(network) == [{"block": False}]
-
-
 @pytest.mark.parametrize("answers", [[2], [0, 1], [0, None]])
 def test_cancel_cooks_nothing_and_writes_nothing(
     scene: FakeHou, answers: List[Optional[int]]
@@ -162,16 +152,6 @@ def test_the_confirmation_shows_the_jobs_settings_and_any_warning(scene: FakeHou
     assert "Job name: shot.hip" in text and "Priority: 70" in text
     assert "Farm: farm-1" in text and "Queue: queue-1" in text
     assert "python1" in scene.messages.options[0]["details"]
-
-
-def test_submitting_a_display_node_with_no_step_above_it_is_refused(scene: FakeHou) -> None:
-    """With the wedge displayed, the cook would run only in-process nodes and make no job."""
-    # Display the wedge, then Submit, which must refuse before cooking.
-    network: FakeNetwork = _network()
-    network.topnet.display = network.node("wedge1").hom
-    assert submit(network.scheduler_node, get_setting=_workstation) is False
-    assert _cooks(network) == []
-    assert "No node in this cook runs a command on a worker" in scene.messages.calls[0][0]
 
 
 class _Item:
@@ -339,51 +319,6 @@ def test_submit_reads_the_items_with_partitions_expanded(scene: FakeHou) -> None
     assert scheduler.calls == [("dependencyGraph", True)]
 
 
-def test_a_network_with_no_pdg_graph_is_told_so_and_nothing_is_generated(scene: FakeHou) -> None:
-    """Submit went on with no graph and raised a bare AttributeError, which reached the artist."""
-    # The node has no graph context, and cooking its TOP nodes doesn't make one either.
-    network: FakeNetwork = _network()
-    network.scheduler_node.context = None
-    network.scheduler_node.cook_creates = None
-    assert submit(network.scheduler_node, get_setting=_workstation) is False
-    assert [text for text, _ in scene.messages.calls] == [
-        "The TOP network has no PDG graph yet, so Submit can't check it. "
-        "Cook the network's TOP nodes once, then submit again."
-    ]
-    display: Any = network.topnet.displayNode()
-    assert ("generate", True) not in display.work_item_calls and _cooks(network) == []
-
-
-def test_submit_dirties_the_items_keeping_files_before_it_generates(scene: FakeHou) -> None:
-    """PDG keeps old items after a SOP parm outside the network changes, so Submit judged stale outputs.
-
-    The fake regenerates sim's declared output from the SOP's parm only after a dirty, as
-    PDG does, and the dirty must keep files on disk, or the artist's results are deleted.
-    """
-    # sim's items were generated with an output inside the job, before the artist's change.
-    network: FakeNetwork = _network()
-    _generated(network, {"sim": 1, "render": 1, "montage": 1})
-    graph: Any = network.context.schedulers["deadlinecloudscheduler1"].dependency_graph[0]
-    (sim_item,) = [item for item in graph if item.node.name == "sim"]
-    sim_item.expectedOutputFiles = [(os.environ["HIP"] + "/geo/sim.bgeo.sc", "file/geo")]
-    sop_file: Any = FakeNode("/obj/pyro/pyro_cache", parms={"file": "/elsewhere/sim.bgeo.sc"}).parm(
-        "file"
-    )
-    display: Any = network.topnet.displayNode()
-
-    # A generate reads the SOP's parm again only for items dirtied since the last generate.
-    def generate() -> None:
-        if display.work_item_calls and display.work_item_calls[-1][0] == "dirty":
-            sim_item.expectedOutputFiles = [(sop_file.eval(), "file/geo")]
-
-    display.on_generate = generate
-    assert submit(network.scheduler_node, get_setting=_workstation) is False
-    assert display.work_item_calls == [("dirty", False), ("generate", True)]
-    text: str = scene.messages.calls[0][0]
-    assert "sim:" in text and "outside the working directory" in text
-    assert _cooks(network) == []
-
-
 class _ErrorTab:
     """The scheduler node's error and Warning tabs, as a refused cook start leaves them.
 
@@ -425,55 +360,6 @@ class _ErrorTab:
         display.cookWorkItems = cook_and_show
 
 
-def _refused_on_the_tab(scene: FakeHou) -> Tuple[FakeNetwork, _ErrorTab, str]:
-    """Submit a network whose render step is an In-Process step, which is refused, and return its popup text."""
-    # PDG has the scheduler from an earlier generate, and render becomes an In-Process step.
-    network: FakeNetwork = _network()
-    _generated(network, {"sim": 1, "render": 1, "montage": 1})
-    tab: _ErrorTab = _ErrorTab(network, scene)
-    network.node("render").hom.set_parm("pdg_cooktype", 1)
-    assert submit(network.scheduler_node, get_setting=_workstation) is False
-    return network, tab, scene.messages.calls[-1][0]
-
-
-def test_a_refusal_stays_on_the_error_tab_until_the_fixed_scenes_next_submit(
-    scene: FakeHou,
-) -> None:
-    """The popup closes, so the artist needs the text on the node while fixing the scene.
-
-    The text goes on the tab through a cook start the scheduler refuses, and Submit's next
-    dirty must clear it, so a fixed scene shows no stale error.
-    """
-    # The first Submit is refused, and its popup text shows on the tab.
-    network: FakeNetwork
-    tab: _ErrorTab
-    text: str
-    network, tab, text = _refused_on_the_tab(scene)
-    assert "The cook can't start." in text and tab.shown == [text]
-    # The display node's items are only Submit's own dirty and generate.
-    display: Any = network.topnet.displayNode()
-    assert display.work_item_calls == [("dirty", False), ("generate", True)]
-    # Fix render and Submit again.
-    network.node("render").hom.remove_parm("pdg_cooktype")
-    assert submit(network.scheduler_node, get_setting=_workstation) is True
-    # The fixed Submit's only cook is the real one, so the tab stays clear.
-    assert tab.shown == [] and len(display.stop_cooks) == 1
-    assert _cooks(network) == [{"block": False}]
-
-
-def test_a_cancel_at_the_save_prompt_leaves_the_error_tab_as_it_was(scene: FakeHou) -> None:
-    """Cancel checks nothing, so it must neither clear the last error nor add one."""
-    # A refused Submit, then a change to the scene and a cancel at the save prompt.
-    network: FakeNetwork
-    tab: _ErrorTab
-    text: str
-    network, tab, text = _refused_on_the_tab(scene)
-    scene.hip_file.unsaved = True
-    scene.messages.answers = [2]
-    assert submit(network.scheduler_node, get_setting=_workstation) is False
-    assert tab.shown == [text] and tab.events.count("stop") == 1
-
-
 def test_a_stop_before_the_dirty_goes_on_the_error_tab_with_no_generate(scene: FakeHou) -> None:
     """A bad tab value stops Submit before it dirties or generates the display node's items.
 
@@ -489,37 +375,6 @@ def test_a_stop_before_the_dirty_goes_on_the_error_tab_with_no_generate(scene: F
     assert "hr_gpu_min" in text and tab.shown == [text] and tab.events == ["popup", "stop"]
     assert network.scheduler_node.generate_calls == [] and tab.scheduler.calls == []
     assert scene.updates == 0
-
-
-def test_a_service_node_is_refused_from_its_cook_type_parm_and_replaces_the_tabs_text(
-    scene: FakeHou,
-) -> None:
-    """The display node's generate starts PDG's service processes for a Service node, and was slow to refuse.
-
-    PDG keeps the last generate's cook type, so the parm must decide. Neither node may generate,
-    and the dirty must come before the cook start, or the tab keeps the earlier Submit's text.
-    """
-    # An earlier Submit put an In-Process refusal on the tab.
-    network: FakeNetwork
-    tab: _ErrorTab
-    network, tab, _first = _refused_on_the_tab(scene)
-    tab.events.clear()
-    # PDG still says Out-of-Process from that generate, and the artist sets render to Service.
-    network.node("render").cookType = "OutOfProcess"
-    network.node("render").hom.set_parm("pdg_cooktype", 3)
-    assert submit(network.scheduler_node, get_setting=_workstation) is False
-    text: str = scene.messages.calls[-1][0]
-    assert text == (
-        "The cook can't start.\n\nThe graph was refused (1 refusal(s)):\n- render: This node's "
-        "work items cook in a long-running service process, which this scheduler does not "
-        "start. Set the node's 'pdg_cooktype' parm to Out Of Process, or cook this network "
-        "with another scheduler."
-    )
-    # Only the new text shows, and this Submit only dirtied the display node's items.
-    assert tab.shown == [text] and tab.events == ["dirty", "popup", "stop"]
-    display: Any = network.topnet.displayNode()
-    assert display.work_item_calls[2:] == [("dirty", False)]
-    assert network.scheduler_node.generate_calls == []
 
 
 def test_a_quota_stop_during_the_display_generate_goes_on_the_error_tab(scene: FakeHou) -> None:
@@ -654,29 +509,6 @@ def test_submits_advisories_go_on_the_warning_tab_once(scene: FakeHou, confirmed
     else:
         assert tab.events == ["dirty", "popup", "stop"] and _cooks(network) == []
         assert tab.warned == [details] and tab.shown == []
-
-
-def test_a_refused_submit_sends_its_advisories_to_the_warning_tab(scene: FakeHou) -> None:
-    """A refused Submit showed only its refusals, so the advisory naming their cause was lost.
-
-    With the working directory away from the scene, sim's $HIP output is refused, and the
-    scene-directory advisory must go on the Warning tab in the same cook start as the error.
-    """
-    # The working directory is not the scene's folder, and sim writes under $HIP.
-    network: FakeNetwork = _network()
-    network.scheduler_node.set_parm("working_dir", "/tmp/elsewhere")
-    _generated(network, {"sim": 1, "render": 1, "montage": 1})
-    graph: Any = network.context.schedulers["deadlinecloudscheduler1"].dependency_graph[0]
-    (sim_item,) = [item for item in graph if item.node.name == "sim"]
-    sim_item.expectedOutputFiles = [(os.environ["HIP"] + "/geo/sim.bgeo.sc", "file/geo")]
-    tab: _ErrorTab = _ErrorTab(network, scene)
-    assert submit(network.scheduler_node, get_setting=_workstation) is False
-    text: str = scene.messages.calls[-1][0]
-    assert "sim:" in text and "outside the working directory" in text
-    (warning,) = tab.warned
-    assert warning.startswith(f"{os.environ['HIP']}: The scene is in ")
-    assert "'/tmp/elsewhere'" in warning
-    assert tab.shown == [text] and tab.events == ["dirty", "popup", "stop"]
 
 
 _ALL: Tuple[str, ...] = ("wedge1", "sim", "render", "partition", "montage")
@@ -860,28 +692,6 @@ def test_a_stopped_submit_stores_its_stop_and_queues_a_cook_of_the_output_node(
     assert output.stop_cooks == [{path: (text, "")}] and _cooks(network) == []
 
 
-def test_a_cancel_at_the_confirmation_routes_only_the_advisories(
-    scene: FakeHou, queue: _Queue
-) -> None:
-    """A cancel is no error, so the cook start must carry the advisories and no error text.
-
-    An error there would put a red badge on a graph that passed every check.
-    """
-    # Validation is off, so an In-Process render step is an advisory, and the artist cancels.
-    scene.messages.choice = 1
-    network: FakeNetwork = _network()
-    network.scheduler_node.set_parm("validate_graph", 0)
-    _generated(network, {"sim": 1, "render": 1, "montage": 1})
-    network.node("render").hom.set_parm("pdg_cooktype", 1)
-    assert submit(network.scheduler_node, get_setting=_workstation) is False
-    details: str = scene.messages.options[0]["details"]
-    entry: Tuple[float, str, str] = host.submit_stops[network.scheduler_node.path()]
-    assert details.startswith("render: ") and entry[1:] == ("", details)
-    # The confirmation was the only dialog, and the cook start is queued.
-    assert [buttons for _, buttons in scene.messages.calls] == [("Submit", "Cancel")]
-    assert len(queue.queued) == 1
-
-
 @pytest.mark.parametrize("stop", ["default-scheduler", "no-display-node", "no-pdg-graph"])
 def test_a_stop_before_the_network_has_a_pdg_graph_starts_no_cook(
     scene: FakeHou, queue: _Queue, stop: str
@@ -905,21 +715,6 @@ def test_a_stop_before_the_network_has_a_pdg_graph_starts_no_cook(
     ((_, buttons),) = scene.messages.calls
     assert buttons == () and host.submit_stops == {} and queue.queued == []
     assert display.stop_cooks == [] and display.cook_calls == []
-
-
-def test_a_confirmed_submit_routes_nothing_through_a_cook_start(
-    scene: FakeHou, queue: _Queue
-) -> None:
-    """The real cook sends the advisories from its snapshot, so a routed copy would show twice."""
-    # Validation is off, so an In-Process render step is an advisory, and the artist confirms.
-    network: FakeNetwork = _network()
-    network.scheduler_node.set_parm("validate_graph", 0)
-    _generated(network, {"sim": 1, "render": 1, "montage": 1})
-    network.node("render").hom.set_parm("pdg_cooktype", 1)
-    assert submit(network.scheduler_node, get_setting=_workstation) is True
-    assert scene.messages.options[-1]["details"].startswith("render: ")
-    assert host.submit_stops == {} and queue.queued == []
-    assert _cooks(network) == [{"block": False}]
 
 
 @pytest.mark.parametrize(

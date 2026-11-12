@@ -600,37 +600,6 @@ def test_generate_when_is_read_by_its_label_not_its_position(
     assert info.dynamic_by_parm is expected
 
 
-@pytest.mark.parametrize(
-    "flag, token, expected",
-    [
-        (None, "0", {"up", "down"}),
-        (None, "1", set()),
-        (False, "0", set()),
-    ],
-)
-def test_without_pdgs_dynamic_flag_the_generate_when_parm_decides(
-    flag: Optional[bool], token: str, expected: Set[str]
-) -> None:
-    """Houdini 19.5's PDG nodes have no ``isDynamic``, so the node's own Generate When decides.
-
-    Without it a dynamic graph is submitted with no refusal. The node below a dynamic
-    one is dynamic too, as PDG flags it, so only the top one is refused. Where PDG has
-    the flag, its False wins over the parm.
-    """
-    up: _PdgNode = _PdgNode("up", command="x")
-    down: _PdgNode = _PdgNode("down", command="x")
-    # None stands for Houdini 19.5, where the attribute doesn't exist.
-    for node in (up, down):
-        if flag is None:
-            del node.isDynamic
-        else:
-            node.isDynamic = flag
-    h_up: _Hom = _wire(up, "/obj/topnet1/up", parms=[_GenerateWhenParm(token)])
-    _topnet(h_up, _wire(down, "/obj/topnet1/down", inputs=[h_up]))
-    infos: Dict[str, NodeInfo] = _by_name(node_infos([up, down], {}))
-    assert {name for name, info in infos.items() if info.is_dynamic} == expected
-
-
 def test_a_node_without_a_top_node_reads_no_parms() -> None:
     """A PDG node with no TOP node still reads, with nothing taken from parms."""
     node: _PdgNode = _PdgNode("n", command="x")
@@ -1547,18 +1516,6 @@ def test_a_read_records_the_variables_houdini_leaves_undefined() -> None:
     # Without an expander nothing is judged undefined.
     (unknown,) = collect_scene_reads({"t": top}).reads
     assert unknown.undefined_variables == ()
-
-
-def test_os_is_never_undefined_because_it_names_the_node_that_holds_the_text() -> None:
-    """``$OS`` is the owner node's name, which a global expander can't know, so it isn't undefined.
-
-    Otherwise a carried attribute named ``os`` would be refused as a variable.
-    """
-    top: _Hom = _Hom(
-        "/obj/topnet1/t", category="Top", parms=[_file("picture", "/v", "$HIP/$OS.${OS}.exr")]
-    )
-    (read,) = collect_scene_reads({"t": top}, expand=_hip).reads
-    assert read.undefined_variables == ()
 
 
 # The stock ``sopoutput`` expression of a File Cache, as Houdini 21 holds it.

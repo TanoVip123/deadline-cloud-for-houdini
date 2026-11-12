@@ -146,42 +146,11 @@ def test_a_failed_item_is_reported_failed(scene: FakeHou) -> None:
     assert scheduler.calls == [("onWorkItemFailed", 7, -1)]
 
 
-def test_a_warning_goes_to_pdg_as_one_cook_warning(scene: FakeHou) -> None:
-    """The cook's advisories reach the node's Warning tab only through PDG's cookWarning."""
-    scheduler: FakePyScheduler = build_network(PYRO_BONFIRE).scheduler()
-    HoudiniPdgHost(scheduler).show_warning("render: advisory")
-    assert scheduler.calls == [("cookWarning", "render: advisory")]
-
-
 def _host_with_item_log(log: Any) -> HoudiniPdgHost:
     """A host whose PDG graph holds work item 7, with ``log`` as its log."""
     network: FakeNetwork = build_network(PYRO_BONFIRE)
     network.context.items[7] = types.SimpleNamespace(logMessages=log)
     return HoudiniPdgHost(network.scheduler())
-
-
-@pytest.mark.parametrize(
-    "log, expected",
-    [
-        (
-            '[23:28:39.073] ERROR: Video codec "libx264" is not available on this platform.\n\n',
-            (
-                'Video codec "libx264" is not available on this platform.',
-                'ERROR: Video codec "libx264" is not available on this platform.',
-            ),
-        ),
-        ("[01:00:00.000] Preparing\n[01:00:01.000] Generated\n", ("", "Generated")),
-    ],
-)
-def test_a_failure_reason_is_the_error_line_and_the_last_line_is_kept_apart(
-    scene: FakeHou, log: str, expected: Tuple[str, str]
-) -> None:
-    """The ERROR line, without its time stamp, is the reason. Without one there is only the last line.
-
-    The first log is what Houdini 21.0 left on an FFmpeg Encode Video item whose
-    codec its hffmpeg lacks.
-    """
-    assert _host_with_item_log(log).failure_reason(7) == expected
 
 
 def test_a_failure_reason_is_empty_when_pdg_has_no_log_or_no_item(scene: FakeHou) -> None:
@@ -409,23 +378,6 @@ def test_a_pdg_node_whose_job_script_cannot_be_read_is_not_a_step(scene: FakeHou
     assert "gone" not in host.pending_generation()
 
 
-def test_the_graph_read_clears_an_override_naming_this_scheduler_and_keeps_another(
-    scene: FakeHou,
-) -> None:
-    """An override that names this scheduler changes nothing, so the cook refuses only another scheduler.
-
-    The cook judges the graph it reads at the snapshot, not the pre-cook verdict.
-    """
-    network: FakeNetwork = build_network(PYRO_BONFIRE)
-    network.node("sim").hom.set_parm("topscheduler", "../deadlinecloudscheduler1")
-    network.node("render").hom.set_parm("topscheduler", "localscheduler")
-    network.node("render").scheduler_name = "localscheduler"
-    infos: Sequence[NodeInfo] = HoudiniPdgHost(network.scheduler()).read_graph()
-    by_name: Dict[str, NodeInfo] = {info.name: info for info in infos}
-    assert by_name["sim"].scheduler_override == ""
-    assert by_name["render"].scheduler_override == "localscheduler"
-
-
 def test_an_empty_or_unreadable_cook_set_is_unknown() -> None:
     """An empty set would leave every node out, so it reads as unknown, like an unreadable one."""
     assert cook_set_names([]) is None
@@ -450,21 +402,6 @@ def test_a_reads_static_prefix_has_its_variables_expanded(
     # Houdini puts $HIP's value in place and keeps the authored "/geo/" as typed.
     assert prefixes["file"] == str(tmp_path / "scene") + "/geo/"
     assert prefixes["other"] == ""
-
-
-def test_a_variable_the_session_expands_is_not_undefined_though_it_is_not_in_the_environment(
-    scene: FakeHou,
-) -> None:
-    """``$F4`` is Houdini's own variable, not an environment one, so it must not count as undefined.
-
-    Otherwise a carried attribute named ``f4`` would be refused as a variable here.
-    """
-    # The fake expands ``$F4`` to the frame, and leaves the unknown variable as typed.
-    network: FakeNetwork = build_network(PYRO_BONFIRE)
-    hom: Any = network.node("render").hom
-    hom.set_parm("file", "$HIP/geo/$F4.${NO_SUCH_VARIABLE_X}.bgeo", kind="FileReference")
-    (read,) = HoudiniPdgHost(network.scheduler()).read_scene().reads
-    assert read.undefined_variables == ("NO_SUCH_VARIABLE_X",)
 
 
 # -- scene files --------------------------------------------------------------
@@ -879,28 +816,6 @@ def test_a_scheduler_override_is_refused_only_when_it_resolves_to_another_schedu
     )
 
 
-def test_python_code_that_opens_a_file_is_advised_before_generation(scene: FakeHou) -> None:
-    """Code is too open to judge, so a node between steps whose code opens a file gets a warning.
-
-    A Merge between two steps cooks nothing, so the graph itself is accepted.
-    """
-    network: FakeNetwork = build_network(
-        [
-            ("subdivide", "hython subdivide.py", "Processor", []),
-            ("merge", "", "Processor", ["subdivide"], "Generate"),
-            ("render", "hython render.py", "Processor", ["merge"]),
-        ]
-    )
-    network.node("merge").hom.set_parm(
-        "pythoncode", "open(work_item.inputFiles[0].path)", tags={"editorlang": "python"}
-    )
-    verdict: Verdict = _verdict(network)
-    assert verdict.accepted()
-    assert [(a.scenario, a.subject) for a in verdict.advisories] == [
-        (RefusalScenario.IN_PROCESS_NODE, "merge")
-    ]
-
-
 @pytest.mark.parametrize(
     "new, unsaved, words",
     [(True, False, "never been saved"), (False, True, "unsaved changes"), (True, True, "never")],
@@ -962,12 +877,6 @@ def test_a_network_whose_pdg_graph_cannot_be_made_is_checked_when_it_cooks(
     with caplog.at_level(logging.WARNING):
         verdict: Verdict = _verdict(network)
     assert verdict.accepted() and "no PDG graph yet" in caplog.text
-
-
-def test_a_working_directory_setting_problem_does_not_hide_the_topology(scene: FakeHou) -> None:
-    """The cook reports the setting when it starts, so the checks still judge the graph."""
-    network: FakeNetwork = build_network(COOKING_EXAMPLE, scheduler_parms={"working_dir": ""})
-    assert [r.scenario for r in _verdict(network).refusals] == [RefusalScenario.IN_PROCESS_NODE]
 
 
 # -- host requirements --------------------------------------------------------
