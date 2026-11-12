@@ -868,7 +868,7 @@ def test_a_plain_service_node_is_refused_with_the_cook_type_remedy() -> None:
     ids=["service", "command server"],
 )
 def test_a_service_node_is_refused_only_when_it_may_be_in_the_cook(
-    in_cook_set: Optional[bool], refused: bool, kind: Dict[str, str]
+    in_cook_set: Optional[bool], refused: bool, kind: Dict[str, Any]
 ) -> None:
     """A Service node the cook never reaches starts nothing, so refusing it would stop a good job.
 
