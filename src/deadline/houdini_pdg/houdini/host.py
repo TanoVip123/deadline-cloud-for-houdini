@@ -405,8 +405,9 @@ def watch_task_counts(context: Any, stop: Callable[[Verdict], bool]) -> Any:
                 return
             counts[name] = len(_attr(node, "workItems") or ())
             verdict: Verdict = check_generated_counts(counts)
-            stopped[0] = bool(verdict.refusals) and stop(verdict)
-            canceling: bool = stopped[0]
+            # Report a quota once per cook, even when the cook doesn't stop for it.
+            stopped[0] = bool(verdict.refusals)
+            canceling: bool = stopped[0] and stop(verdict)
         # PDG is inside its own generation here, so another thread cancels it.
         if canceling:
             threading.Thread(target=lambda: _call(context, "cancelCook"), daemon=True).start()
