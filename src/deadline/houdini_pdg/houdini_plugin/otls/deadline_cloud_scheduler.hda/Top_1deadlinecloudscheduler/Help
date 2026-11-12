@@ -53,22 +53,24 @@ check that fails starts nothing and creates no job.
   node cooks in the background, and the cook puts the warnings on this node's
   Warning tab. Click __Cancel__, and Submit puts them there itself. The job uses the settings on this
   node, and Submit doesn't change them, except that Always Save turns on
-  automatic saving. When a check fails, Submit shows why in a popup. When the
-  check that fails runs on the work items Submit generated, Submit also puts
-  the same text on this node's error tab, and any warnings on its Warning
-  tab, so you can read them again while you fix the scene. The red error
-  badge appears at your next click in the network editor. A node whose Cook
-  Type is Service is refused before that
-  generate, because the generate would start its service processes. Its text
-  also goes on the error tab once PDG has this scheduler from an earlier
-  generate in the session. Any other problem found before that generate
-  finishes, such as a bad tab value or a step over a quota, shows only in the
-  popup. A generate that was canceled or that failed on a node leaves steps
-  with no work items and errors on the nodes. Submit stops, and puts its text
-  on the error tab too. The node errors can show a moment after the popup.
-  Fix them, then submit again. When no node has an error yet, the text names
-  the steps with no work items, because those steps may also make no items
-  with their current settings.
+  automatic saving. When a check fails, Submit shows why in a popup. Once
+  the TOP network has its PDG graph, Submit also puts the same text on this
+  node's error tab, and any warnings on its Warning tab, so you can read
+  them again while you fix the scene. The red error badge appears at your
+  next click in the network editor. Submit does this for every check after
+  it has the graph: a farm or queue that isn't set, a bad value on this
+  node's tabs, a node whose Cook Type is Service, a step or job over a
+  Deadline Cloud quota, a generate that didn't finish, and every check on
+  the generated work items. Only the checks before it has the graph show in
+  the popup alone: the TOP network's Default TOP Scheduler isn't this node,
+  the network has no display node, or it has no PDG graph yet. A Service
+  node is refused before the generate, because the generate would start its
+  service processes. A generate that was canceled or that failed on a node
+  leaves steps with no work items and errors on the nodes. Submit stops, and
+  puts its text on the error tab too. The node errors can show a moment
+  after the popup. Fix them, then submit again. When no node has an error
+  yet, the text names the steps with no work items, because those steps may
+  also make no items with their current settings.
 
 Some checks need the generated work items, so the cook runs every check again
 before it submits the job. Results stay on the farm: download them with
