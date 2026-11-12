@@ -59,11 +59,12 @@ check that fails starts nothing and creates no job.
   them again while you fix the scene. The red error badge appears at your
   next click in the network editor. Submit does this for every check after
   it has the graph: a farm or queue that isn't set, a bad value on this
-  node's tabs, a node whose Cook Type is Service, a step or job over a
-  Deadline Cloud quota, a generate that didn't finish, and every check on
-  the generated work items. Only the checks before it has the graph show in
-  the popup alone: the TOP network's Default TOP Scheduler isn't this node,
-  the network has no display node, or it has no PDG graph yet. A Service
+  node's tabs, a node whose Cook Type is Service, more steps or
+  dependencies than Deadline Cloud allows, a generate that didn't finish,
+  and every check on the generated work items. Only these show in the popup
+  alone: the TOP network's Default TOP Scheduler isn't this node, the
+  network has no display node, it has no PDG graph yet, or a step or the
+  job passes a Deadline Cloud task quota while Submit generates. A Service
   node is refused before the generate, because the generate would start its
   service processes. A generate that was canceled or that failed on a node
   leaves steps with no work items and errors on the nodes. Submit stops, and

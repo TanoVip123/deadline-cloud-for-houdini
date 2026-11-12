@@ -1364,7 +1364,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     the node's tabs and any Service node, then a generate and every check on its items,
     then one confirmation, then a cook of the display node. Each step raises the problem
     it finds, and one place shows it in a popup and, once the network has a PDG graph, on the
-    node's error tab.
+    node's error tab. A task quota stop during the generate is shown in the popup only.
     """
     from deadline.client.exceptions import UserInitiatedCancel
 
@@ -1373,6 +1373,9 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
     # through a cook start. Before that, a cook could run on another scheduler or build the graph.
     display: Any = None
     context: Any = None
+    # A task quota stop is shown in the popup only. The cook start after its canceled
+    # generate fails before onStartCook, so the stop would never reach the tabs.
+    popup_only: bool = False
     try:
         # The save prompt comes first, so the artist answers it before anything else.
         prompt_to_save(node)
@@ -1435,6 +1438,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         finally:
             _call(context, "removeEventHandler", handler)
         if over_quota:
+            popup_only = True
             raise GraphRefusedError(over_quota[0])
         # A canceled or failed generate still returns. Part of a graph can't be judged, so Submit stops.
         unfinished: str = _explain_unfinished_generate(graph_nodes, infos, cook_set)
@@ -1466,7 +1470,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
             else (str(stopped), "")
         )
         # Once there's a PDG graph, the tabs keep the text after the popup closes.
-        if context is not None:
+        if context is not None and not popup_only:
             _show_on_node_tabs(node, display, text, advisories)
         else:
             _show(text)

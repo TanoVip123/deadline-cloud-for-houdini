@@ -401,10 +401,13 @@ def test_a_stop_before_the_dirty_goes_on_the_error_tab_with_no_generate(scene: F
     assert scene.updates == 0
 
 
-def test_a_quota_stop_during_the_display_generate_goes_on_the_error_tab(scene: FakeHou) -> None:
+def test_a_quota_stop_during_the_display_generate_is_shown_in_the_popup_only(
+    scene: FakeHou,
+) -> None:
     """A task quota cancels the display node's generate after Submit's dirty.
 
-    The stop goes on the tab through a refused cook start, with no generate of the scheduler node.
+    In Houdini the cook start after that cancel failed before onStartCook, so the stop never
+    reached the tab and stayed stored, where it could refuse a TOP Cook up to 30 s later.
     """
     # PDG has the scheduler, and sim generates one task more than a step may have.
     network: FakeNetwork = _network()
@@ -421,11 +424,12 @@ def test_a_quota_stop_during_the_display_generate_goes_on_the_error_tab(scene: F
     # Submit dirties, its generate stops at the quota, and the popup names the step.
     display.on_generate = generate
     assert submit(network.scheduler_node, get_setting=_workstation) is False
-    text: str = scene.messages.calls[0][0]
-    assert "sim: 10,001 tasks per step" in text and tab.shown == [text]
+    ((text, buttons),) = scene.messages.calls
+    assert "sim: 10,001 tasks per step" in text and buttons == ()
+    # No stop is stored and no cook start is asked for, so the tab stays as the dirty left it.
+    assert host.submit_stops == {} and display.stop_cooks == [] and display.cook_calls == []
+    assert tab.events == ["dirty", "popup"] and tab.shown == []
     assert display.work_item_calls[0] == ("dirty", False)
-    assert network.scheduler_node.generate_calls == [] and tab.scheduler.calls == []
-    assert scene.updates == 0
 
 
 @pytest.mark.parametrize(
@@ -476,10 +480,10 @@ def test_each_refused_submit_shows_its_own_text_on_the_error_tab(scene: FakeHou)
     assert network.scheduler_node.generate_calls == []
 
 
-def test_a_stop_before_or_during_the_display_generate_goes_on_the_error_tab(
+def test_a_later_quota_stop_clears_the_tab_of_an_earlier_stop(
     scene: FakeHou,
 ) -> None:
-    """A stop before the dirty, or a quota stop during the generate, goes on the tab too.
+    """A stop before the dirty goes on the tab, and a later quota stop leaves the tab cleared.
 
     Submit itself sends no cookError and asks for no UI update, because the cook start does it.
     """
@@ -503,7 +507,7 @@ def test_a_stop_before_or_during_the_display_generate_goes_on_the_error_tab(
     display.on_generate = generate
     assert submit(network.scheduler_node, get_setting=_workstation) is False
     second: str = scene.messages.calls[-1][0]
-    assert "sim: 10,001 tasks per step" in second and tab.shown == [second]
+    assert "sim: 10,001 tasks per step" in second and tab.shown == []
     # Neither stop generated the scheduler node or sent anything to it from Submit.
     assert network.scheduler_node.generate_calls == [] and tab.scheduler.calls == []
     assert scene.updates == 0
