@@ -1320,9 +1320,7 @@ def submit(node: Any, *, get_setting: Optional[Callable[[str], str]] = None) -> 
         # The save prompt comes first, so the artist answers it before anything else.
         prompt_to_save(node)
         network: Any = node.parent()
-        problem: str = _default_scheduler_problem(node, network)
-        if problem:
-            raise CookSetupError(problem)
+        _check_default_scheduler(node, network)
         display = network.displayNode()
         if display is None:
             raise CookSetupError(
@@ -1506,17 +1504,16 @@ def _find_cook_set(context: Any, display: Any) -> Optional[FrozenSet[str]]:
     return frozenset(starts.union(*(ancestors.get(start, set()) for start in starts))) or None
 
 
-def _default_scheduler_problem(node: Any, network: Any) -> str:
-    """Why the network would not cook on ``node``, or ``""`` when its default scheduler is ``node``."""
+def _check_default_scheduler(node: Any, network: Any) -> None:
+    """Raise ``CookSetupError`` unless the network's Default TOP Scheduler is ``node``."""
     # The network parm names its default scheduler, relative to the network.
     parm: Any = network.parm("topscheduler") if network is not None else None
     target: Any = network.node(parm.eval()) if parm is not None and parm.eval() else None
-    if target is not None and target.path() == node.path():
-        return ""
-    return (
-        f"The TOP network's Default TOP Scheduler is not {node.path()}, so the network would "
-        "cook on another scheduler. Set the network's Default TOP Scheduler to this node."
-    )
+    if target is None or target.path() != node.path():
+        raise CookSetupError(
+            f"The TOP network's Default TOP Scheduler is not {node.path()}, so the network would "
+            "cook on another scheduler. Set the network's Default TOP Scheduler to this node."
+        )
 
 
 def _show_on_node_tabs(node: Any, display: Any, error: str, advisories: str) -> None:
