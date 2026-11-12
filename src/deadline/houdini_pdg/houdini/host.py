@@ -328,16 +328,15 @@ class HoudiniPdgHost:
         infos: Tuple[NodeInfo, ...] = readers.node_infos(
             graph_nodes, dependency_graph, cook_set, only_items_in_cook=True
         )
-        return _own_overrides_cleared(infos, graph_nodes, self._own_names())
-
-    def _own_names(self) -> FrozenSet[str]:
-        """Every name an override may use for this scheduler."""
+        # Every name an override may use for this scheduler, even when its node can't be found.
         names: Set[str] = {_name(self._scheduler)}
         try:
             names |= _names_of(self.scheduler_node())
         except CookSetupError:
             pass
-        return frozenset(name for name in names if name)
+        return _own_overrides_cleared(
+            infos, graph_nodes, frozenset(name for name in names if name)
+        )
 
 
 def run_pre_cook_checks(
