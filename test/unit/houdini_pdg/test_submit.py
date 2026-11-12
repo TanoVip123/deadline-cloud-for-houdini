@@ -706,6 +706,57 @@ def test_a_displayed_subnet_cooks_its_display_node_and_the_steps_above_it(
     assert "Steps: 4, tasks: 4" in text
 
 
+def _add_service_node(network: FakeNetwork, source: str, *inputs: FakeNode) -> FakePdgNode:
+    """Add a node called ``server``, wired to ``inputs``, whose cook type is Service.
+
+    ``source`` says where Service shows: PDG's own cook type, or only the Cook Type parm,
+    as just after the artist sets it.
+    """
+    hom: FakeNode = network.topnet.add(FakeNode("/obj/topnet1/server"), *inputs)
+    pdg_node: FakePdgNode = FakePdgNode(name="server", command="hython serve.py", hom=hom)
+    if source == "pdg":
+        pdg_node.cookType = 3
+    else:
+        hom.set_parm("pdg_cooktype", 3)
+    hom.pdg_node = pdg_node
+    network.context.nodes.append(pdg_node)
+    return pdg_node
+
+
+@pytest.mark.parametrize("source", ["pdg", "parm"])
+def test_a_service_node_the_display_node_does_not_cook_does_not_stop_submit(
+    scene: FakeHou, source: str
+) -> None:
+    """The cook never generates it, so no service process starts, and refusing it blocked the job."""
+    # server is wired to nothing, so the display node montage doesn't cook it.
+    network: FakeNetwork = _network()
+    _add_service_node(network, source)
+    _generated(network, {"sim": 1, "render": 1, "montage": 1})
+    assert submit(network.scheduler_node, get_setting=_workstation) is True
+    text: str = scene.messages.calls[0][0]
+    assert text.startswith("Submit this TOP network") and "server" not in text
+
+
+def test_a_service_node_above_the_display_node_stops_submit_before_the_generate(
+    scene: FakeHou,
+) -> None:
+    """The display node's generate would start its service processes, so Submit stops first.
+
+    Only the Cook Type parm says Service, as just after the artist sets it.
+    """
+    # server sits between render and the display node, so the cook reaches it.
+    network: FakeNetwork = _network()
+    _add_service_node(network, "parm", network.node("render").hom)
+    network.topnet.display = network.topnet.add(
+        FakeNode("/obj/topnet1/out"), network.node("server").hom
+    )
+    display: Any = network.topnet.displayNode()
+    assert submit(network.scheduler_node, get_setting=_workstation) is False
+    text: str = scene.messages.calls[0][0]
+    assert "server: This node's work items cook in a long-running service process" in text
+    assert ("generate", True) not in display.work_item_calls and _cooks(network) == []
+
+
 def test_a_step_with_no_items_below_nodes_with_items_is_still_refused_as_too_early(
     scene: FakeHou,
 ) -> None:

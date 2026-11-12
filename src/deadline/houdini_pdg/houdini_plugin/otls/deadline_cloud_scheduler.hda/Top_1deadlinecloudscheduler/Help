@@ -65,8 +65,9 @@ check that fails starts nothing and creates no job.
   alone: the TOP network's Default TOP Scheduler isn't this node, the
   network has no display node, it has no PDG graph yet, or a step or the
   job passes a Deadline Cloud task quota while Submit generates. A Service
-  node is refused before the generate, because the generate would start its
-  service processes. A generate that was canceled or that failed on a node
+  node that the display node cooks is refused before the generate, because
+  the generate would start its service processes. A Service node the display
+  node doesn't cook is skipped, because nothing starts it. A generate that was canceled or that failed on a node
   leaves steps with no work items and errors on the nodes. Submit stops, and
   puts its text on the error tab too. The node errors can show a moment
   after the popup. Fix them, then submit again. When no node has an error

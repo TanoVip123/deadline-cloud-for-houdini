@@ -857,6 +857,28 @@ def test_a_plain_service_node_is_refused_with_the_cook_type_remedy() -> None:
     assert "Out Of Process" in refusal.remedy
 
 
+@pytest.mark.parametrize(
+    "in_cook_set, refused",
+    [(False, False), (True, True), (None, True)],
+    ids=["outside the cook", "in the cook", "cook set unknown"],
+)
+@pytest.mark.parametrize(
+    "kind",
+    [{"cook_type": "Service"}, {"node_type_name": "houdiniserver"}],
+    ids=["service", "command server"],
+)
+def test_a_service_node_is_refused_only_when_it_may_be_in_the_cook(
+    in_cook_set: Optional[bool], refused: bool, kind: Dict[str, str]
+) -> None:
+    """A Service node the cook never reaches starts nothing, so refusing it would stop a good job.
+
+    When the cook set isn't known, the node may be in it, so it is still refused.
+    """
+    nodes: List[NodeInfo] = [_node("server", in_cook_set=in_cook_set, **kind), _node("render")]
+    found: Set[str] = _subjects(validate(_ctx(nodes)), RefusalScenario.SERVICE_NODE)
+    assert found == ({"server"} if refused else set())
+
+
 def test_a_node_that_overrides_the_scheduler_is_refused() -> None:
     """A node whose topscheduler is set sends part of the cook to another job, so it is refused."""
     # Any override left here points at another scheduler, because the host clears a

@@ -970,14 +970,15 @@ def check_service_nodes(ctx: ValidationContext) -> Verdict:
 
     A command server left on Out-of-Process still becomes a step whose task holds
     a worker until it times out, so the node type is a second signal and its
-    remedy never offers that cook type.
+    remedy never offers that cook type. A node known to be outside the cook starts
+    nothing, so it's skipped. One that may be in it, because the cook set isn't known, is not.
     """
     refusals: List[Refusal] = []
     for node in ctx.nodes:
         server: bool = _is_command_server(node)
         # A node is a service node by either signal: its cook type is Service, or
         # its type is a command server whatever the cook type says.
-        if not server and node.cook_type != _SERVICE:
+        if (not server and node.cook_type != _SERVICE) or node.in_cook_set is False:
             continue
         # A command server and a plain service node take different remedies, and a
         # command server must never be told to switch to Out-of-Process, because
