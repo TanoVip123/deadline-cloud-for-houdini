@@ -198,6 +198,14 @@ def test_a_failure_reason_is_empty_when_pdg_has_no_log_or_no_item(scene: FakeHou
     assert HoudiniPdgHost(broken).failure_reason(7) == ("", "")
 
 
+def test_a_failure_reason_keeps_an_error_line_whole_after_its_first_error_word(
+    scene: FakeHou,
+) -> None:
+    """Only the first "ERROR:" starts the reason, so a message that quotes another keeps its end."""
+    log: str = "[01:00:00.000] ERROR: render failed: ERROR: out of memory\n"
+    assert _host_with_item_log(log).failure_reason(7)[0] == "render failed: ERROR: out of memory"
+
+
 def test_serialize_returns_the_json_pdg_writes_for_a_job(scene: FakeHou) -> None:
     """The payload is PDG's own JSON, with the global attributes a worker needs."""
     host: HoudiniPdgHost = HoudiniPdgHost(build_network(PYRO_BONFIRE).scheduler())
@@ -659,6 +667,23 @@ def test_absent_parms_take_their_defaults_and_are_logged_once(
     assert len(missing) == 4
     for parm in ("'working_dir'", "'debug_level'", "'validate_graph'", "'output_directories'"):
         assert any(parm in m for m in missing), parm
+
+
+def test_a_missing_parm_is_logged_at_its_first_read_naming_the_node(
+    scene: FakeHou, caplog: Any
+) -> None:
+    """The artist reads the first warning to learn which node to recreate, and later reads add none."""
+    node: FakeNode = FakeNode("/obj/topnet1/scheduler_from_an_old_scene")
+    with caplog.at_level(logging.WARNING):
+        read_scheduler_settings(node)
+    first: List[str] = [r.getMessage() for r in caplog.records if "has no" in r.getMessage()]
+    assert len(first) == 4
+    assert all(m.startswith("Node /obj/topnet1/scheduler_from_an_old_scene has no") for m in first)
+    # A second read of the same node logs nothing new.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        read_scheduler_settings(node)
+    assert not [r for r in caplog.records if "has no" in r.getMessage()]
 
 
 def test_a_valid_debug_level_variable_wins_and_only_an_invalid_one_is_reported(
