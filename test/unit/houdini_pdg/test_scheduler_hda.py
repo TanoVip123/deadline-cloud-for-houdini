@@ -91,3 +91,30 @@ def test_the_job_number_parms_are_plain_integer_fields(parm: str) -> None:
     block: str = _parms(NODE_SCRIPT)[parm]
     assert re.search(r"type\s+integer", block)
     assert re.search(r'parmtag\s*\{\s*"sidefx::slider"\s+"none"\s*\}', block), parm
+
+
+@pytest.mark.parametrize("parm", ["login", "logout", "settings"])
+def test_the_login_logout_and_settings_buttons_are_hidden(parm: str) -> None:
+    """On macOS the login dialog can crash Houdini, so the node hides them as the ROP does."""
+    # A parm is hidden when its block carries the ``invisible`` flag.
+    block: str = _parms(NODE_SCRIPT)[parm]
+    assert re.search(r"^\s*invisible\s*$", block, re.M), parm
+
+
+@pytest.mark.parametrize("parm", ["update_queue_parameters", "submit"])
+def test_update_queue_parameters_and_submit_stay_visible(parm: str) -> None:
+    """The artist still needs these two buttons after logging in outside Houdini."""
+    # Neither block carries the ``invisible`` flag.
+    block: str = _parms(NODE_SCRIPT)[parm]
+    assert not re.search(r"^\s*invisible\s*$", block, re.M), parm
+
+
+def test_no_hidden_parm_joins_a_visible_one() -> None:
+    """A hidden parm that joins the next one could change how the visible button is laid out."""
+    # Walk the parms in file order, and check what each hidden, joined parm joins.
+    blocks: List[Tuple[str, str]] = list(_parms(NODE_SCRIPT).items())
+    for (name, block), (next_name, next_block) in zip(blocks, blocks[1:]):
+        hidden: bool = bool(re.search(r"^\s*invisible\s*$", block, re.M))
+        joined: bool = bool(re.search(r"^\s*joinnext\s*$", block, re.M))
+        if hidden and joined:
+            assert re.search(r"^\s*invisible\s*$", next_block, re.M), (name, next_name)

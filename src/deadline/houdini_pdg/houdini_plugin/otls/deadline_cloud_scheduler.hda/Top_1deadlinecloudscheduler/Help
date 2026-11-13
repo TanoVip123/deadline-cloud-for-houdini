@@ -24,6 +24,14 @@ as this version of the node does, and keeps the queue's parameters, such as its
 Conda packages, with their values. Any other spare parameter on the node is
 removed too, because it can't be told apart from an older version's tabs.
 
+== Logging in ==
+
+The node has no Login button. Log in outside Houdini, with Deadline Cloud
+Monitor or by running `deadline auth login` in a terminal. To change the
+default farm and queue, run `deadline config gui`. Then click
+__Update Queue Parameters__ on the Shared Job Settings tab, so the node shows
+the farm and queue and refreshes the queue's parameters.
+
 == Cooking ==
 
 You can start a cook in two ways. Both run the same checks first, and a
@@ -120,19 +128,6 @@ Farm:
 Queue:
     #id: queue
     The default queue of the AWS Deadline Cloud workstation configuration.
-
-Login:
-    #id: login
-    Log in to AWS Deadline Cloud.
-
-Logout:
-    #id: logout
-    Log out of AWS Deadline Cloud.
-
-Settings:
-    #id: settings
-    Change the AWS Deadline Cloud workstation configuration shared by all
-    tools, including the default farm and queue.
 
 Update Queue Parameters:
     #id: update_queue_parameters

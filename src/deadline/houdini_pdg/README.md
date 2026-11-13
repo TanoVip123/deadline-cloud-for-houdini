@@ -43,7 +43,7 @@ To remove the scheduler, delete the package file and restart Houdini.
 ## Cooking
 
 1. Create the scheduler in your TOP network and make it the network's Default TOP Scheduler.
-2. On the node, log in and check the farm and queue, as on the Deadline Cloud ROP. The farm and queue are your workstation's defaults.
+2. Log in with Deadline Cloud Monitor or `deadline auth login`, then click **Update Queue Parameters** on the node and check the farm and queue. The farm and queue are your workstation's defaults, which you can change with `deadline config gui`.
 3. Start the cook in one of two ways:
    * **Cook** the network, as with any scheduler. The cook is refused if the scene has unsaved changes; or
    * click **Submit** on the node. It saves unsaved changes first, or asks you to, then runs the checks and shows one confirmation with the farm, queue, job name, priority, and working directory. Submit there starts the cook. The job uses the settings stored on the node.

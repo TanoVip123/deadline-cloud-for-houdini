@@ -512,6 +512,25 @@ def test_a_failed_queue_read_names_its_cause(
         _connect(build_network(PYRO_BONFIRE), FakeCloud(queue=[error]), tmp_path)
 
 
+@pytest.mark.parametrize(
+    "error, remedy",
+    [
+        (NoCredentialsError(), "`deadline auth login`"),
+        (_client_error("ResourceNotFoundException"), "`deadline config gui`"),
+    ],
+)
+def test_a_login_or_queue_error_names_a_remedy_outside_the_node(
+    scene: FakeHou, tmp_path: Path, error: Exception, remedy: str
+) -> None:
+    """The node hides Login and Settings, so the message must point to a tool the artist can use."""
+    # Read the refusal, then check it names the outside tool and none of the hidden buttons.
+    with pytest.raises(CookSetupError) as raised:
+        _connect(build_network(PYRO_BONFIRE), FakeCloud(queue=[error]), tmp_path)
+    message: str = str(raised.value)
+    assert remedy in message
+    assert "Login button" not in message and "Deadline Cloud settings" not in message
+
+
 def test_an_error_the_library_says_needs_a_login_asks_for_one(
     scene: FakeHou, tmp_path: Path
 ) -> None:
