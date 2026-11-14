@@ -28,9 +28,9 @@ removed too, because it can't be told apart from an older version's tabs.
 
 You choose the farm, queue and default storage profile at the top of this
 node's parameters, in the same lists the Deadline Cloud ROP shows. A choice
-is saved to your workstation's AWS Deadline Cloud settings at once, so the
-ROP and every scheduler node use it too. After you pick a farm or a queue,
-the node's Farm and Queue labels and the queue's parameters update.
+is saved to the AWS Deadline Cloud workstation configuration at once, so
+the ROP and every scheduler node use it too. After you pick a farm or a
+queue, the node's Farm and Queue labels and the queue's parameters update.
 
 The lists load only while you're logged in. If you aren't, the line under
 the lists says so. Log in with Deadline Cloud Monitor or by running

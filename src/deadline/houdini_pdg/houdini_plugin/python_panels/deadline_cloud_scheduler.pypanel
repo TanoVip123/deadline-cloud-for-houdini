@@ -30,14 +30,16 @@ def onCreateInterface():
     widget = QtWidgets.QWidget()
     layout = QtWidgets.QVBoxLayout(widget)
     layout.addWidget(QtWidgets.QLabel(load_error))
-    editor = hou.qt.ParmDialog(node, showTitleBar=False)
+    editor = hou.qt.ParmDialog(node)
     layout.addWidget(editor)
     return widget
 
 
 def onNodePathChanged(node):
-    if editor is not None and node is not None:
-        editor.setNode(node)
+    # Only a scheduler node's parms belong under the farm and queue lists.
+    if editor is None or node is None or node.type().name() != "deadlinecloudscheduler":
+        return
+    editor.setNode(node)
 ]]></script>
     <showInParametersPane optype="Top/deadlinecloudscheduler"/>
     <help><![CDATA[]]></help>

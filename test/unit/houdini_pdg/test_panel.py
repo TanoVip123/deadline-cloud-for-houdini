@@ -87,7 +87,6 @@ class FakeParmDialog(FakeWidget):
         if FakeParmDialog.error is not None:
             raise FakeParmDialog.error
         self.node: Any = node
-        self.options: Dict[str, Any] = kwargs
 
     def setNode(self, node: Any) -> None:
         self.node = node
@@ -104,6 +103,7 @@ class FakeSettingsWidget(FakeWidget):
     """deadline-cloud's ``DeadlineCloudSettingsWidget``, recording each refresh."""
 
     error: Optional[Exception] = None
+    refresh_error: Optional[Exception] = None
     refreshes: List[bool] = []
 
     def __init__(self, *, parent: Any = None) -> None:
@@ -118,6 +118,9 @@ class FakeSettingsWidget(FakeWidget):
 
     def refresh_setting_controls(self, deadline_authorized: bool) -> None:
         FakeSettingsWidget.refreshes.append(deadline_authorized)
+        # A test can make a refresh fail, as a broken config file would.
+        if FakeSettingsWidget.refresh_error is not None:
+            raise FakeSettingsWidget.refresh_error
 
 
 class FakeAuthStatus:
@@ -198,7 +201,9 @@ class Fakes:
 @pytest.fixture(autouse=True)
 def _reset_fake_classes() -> None:
     """Every test starts with widgets that build, and no recorded refreshes."""
+    # The fakes keep these on the class, so one test's failure can't leak into the next.
     FakeSettingsWidget.error = None
+    FakeSettingsWidget.refresh_error = None
     FakeSettingsWidget.refreshes = []
     FakeParmDialog.error = None
 
@@ -233,9 +238,8 @@ def test_the_panel_shows_the_widget_then_the_status_line_then_the_node_parms(fak
         FakeParmDialog,
     ]
     assert widget.children[2] is editor and editor.node is node
-    # A long error wraps instead of widening the pane, and the editor adds no second title bar.
+    # A long error wraps instead of widening the pane.
     assert widget.children[1].wraps
-    assert editor.options == {"showTitleBar": False}
 
 
 def test_builds_make_no_network_call_and_register_the_pump_once(fakes: Fakes) -> None:
@@ -329,6 +333,20 @@ def test_a_failed_node_update_shows_in_the_status_line_and_raises_nothing(fakes:
     assert _read_status_line(widget) == ""
 
 
+def test_a_refresh_that_fails_after_a_login_change_shows_in_the_status_line(fakes: Fakes) -> None:
+    """The login signal calls the refresh from a Qt slot, so its error must not raise into Houdini."""
+    # A good build, then a refresh that fails when the login changes.
+    fakes.auth.api_availability = False
+    widget: Any
+    editor: Any
+    widget, editor = fakes.panel.create_panel(FakeNode())
+    FakeSettingsWidget.refresh_error = RuntimeError("bad config file")
+    fakes.auth.api_availability = True
+    fakes.auth.api_availability_changed.emit()
+    assert "bad config file" in _read_status_line(widget)
+    assert widget.children[-1] is editor
+
+
 def test_a_widget_that_fails_to_build_still_leaves_the_node_parms(fakes: Fakes) -> None:
     """The panel replaces the parm pane, so losing the dropdowns must not lose Submit too."""
     # The widget's constructor fails, and the status line and the parms remain.
@@ -387,6 +405,16 @@ class FakePaneTab:
         return self._node
 
 
+class FakeTypedNode:
+    """A node of one type, as Houdini hands it to ``onNodePathChanged``."""
+
+    def __init__(self, type_name: str) -> None:
+        self._type: Any = types.SimpleNamespace(name=lambda: type_name)
+
+    def type(self) -> Any:
+        return self._type
+
+
 def _run_script(node: Any, modules: Dict[str, Any]) -> Dict[str, Any]:
     """Run the pypanel's script as Houdini does, over ``modules``, and return its names."""
     # Houdini runs the script in its own namespace, with ``kwargs`` naming the pane tab.
@@ -398,9 +426,10 @@ def _run_script(node: Any, modules: Dict[str, Any]) -> Dict[str, Any]:
     return namespace
 
 
-def test_the_script_builds_the_panel_and_follows_the_selected_node() -> None:
-    """The script hands the node to the panel module, and later nodes go to the same editor."""
-    editor: FakeParmDialog = FakeParmDialog("first")
+def test_the_script_builds_the_panel_and_follows_only_scheduler_nodes() -> None:
+    """Later scheduler nodes go to the same editor, and other node types never reach it."""
+    first: FakeTypedNode = FakeTypedNode("deadlinecloudscheduler")
+    editor: FakeParmDialog = FakeParmDialog(first)
     # A stand-in panel module that records the node it was handed.
     built: List[Any] = []
 
@@ -411,14 +440,16 @@ def test_the_script_builds_the_panel_and_follows_the_selected_node() -> None:
     panel: types.ModuleType = types.ModuleType(_PANEL_MODULE)
     panel.create_panel = create_panel  # type: ignore[attr-defined]
     fakes: Fakes = Fakes()
-    script: Dict[str, Any] = _run_script("first", {"hou": fakes.hou, _PANEL_MODULE: panel})
+    script: Dict[str, Any] = _run_script(first, {"hou": fakes.hou, _PANEL_MODULE: panel})
     assert script["onCreateInterface"]() == "panel"
-    assert built == ["first"]
-    script["onNodePathChanged"]("second")
-    assert editor.node == "second"
-    # Houdini can report no node, and the editor keeps showing the last one.
+    assert built == [first]
+    second: FakeTypedNode = FakeTypedNode("deadlinecloudscheduler")
+    script["onNodePathChanged"](second)
+    assert editor.node is second
+    # A node of another type, or no node, leaves the editor on the last scheduler node.
+    script["onNodePathChanged"](FakeTypedNode("box"))
     script["onNodePathChanged"](None)
-    assert editor.node == "second"
+    assert editor.node is second
 
 
 def test_a_panel_module_that_fails_to_import_leaves_the_node_parms_and_one_error_line() -> None:
@@ -441,8 +472,9 @@ def test_a_panel_module_that_fails_to_import_leaves_the_node_parms_and_one_error
     assert [type(child) for child in widget.children] == [FakeLabel, FakeParmDialog]
     assert _PANEL_MODULE in widget.children[0].text()
     assert widget.children[1].node == "node"
-    script["onNodePathChanged"]("other")
-    assert widget.children[1].node == "other"
+    other: FakeTypedNode = FakeTypedNode("deadlinecloudscheduler")
+    script["onNodePathChanged"](other)
+    assert widget.children[1].node is other
 
 
 def _list_imports(path: str) -> List[str]:
