@@ -476,8 +476,8 @@ def _queue_error(
         )
     if "ResourceNotFound" in _error_code(error):
         return CookSetupError(
-            f"Queue {queue_id} on farm {farm_id} was not found. Choose a farm and queue in the "
-            "node's Deadline Cloud settings."
+            f"Queue {queue_id} on farm {farm_id} was not found. Choose a farm and queue at the "
+            "top of the scheduler node's parameters."
         )
     # Some credential providers raise their own errors, so ask the library.
     if clients.needs_login():
