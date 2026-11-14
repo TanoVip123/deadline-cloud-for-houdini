@@ -15,13 +15,14 @@ except Exception as error:
     load_error = f"The Deadline Cloud farm and queue panel didn't load: {error}"
 
 # The parameter editor this pane shows, so a new selection goes to it.
-_state = {"editor": None}
+editor = None
 
 
 def onCreateInterface():
+    global editor
     node = kwargs["paneTab"].currentNode()
     if create_panel is not None:
-        widget, _state["editor"] = create_panel(node)
+        widget, editor = create_panel(node)
         return widget
     # Without the panel module, show the node's parms under one error line.
     from hutil.Qt import QtWidgets
@@ -29,14 +30,14 @@ def onCreateInterface():
     widget = QtWidgets.QWidget()
     layout = QtWidgets.QVBoxLayout(widget)
     layout.addWidget(QtWidgets.QLabel(load_error))
-    _state["editor"] = hou.qt.ParmDialog(node, showTitleBar=False)
-    layout.addWidget(_state["editor"])
+    editor = hou.qt.ParmDialog(node, showTitleBar=False)
+    layout.addWidget(editor)
     return widget
 
 
 def onNodePathChanged(node):
-    if _state["editor"] is not None and node is not None:
-        _state["editor"].setNode(node)
+    if editor is not None and node is not None:
+        editor.setNode(node)
 ]]></script>
     <showInParametersPane optype="Top/deadlinecloudscheduler"/>
     <help><![CDATA[]]></help>

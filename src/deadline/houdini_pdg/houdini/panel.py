@@ -16,13 +16,15 @@ from deadline.client.ui.widgets import DeadlineCloudSettingsWidget
 from qtpy.QtCore import QCoreApplication  # type: ignore
 from qtpy.QtWidgets import QLabel, QVBoxLayout, QWidget  # type: ignore
 
-LOGIN_TEXT: str = (
-    "Log in with Deadline Cloud Monitor or `deadline auth login`, "
-    "then press the refresh button next to Farm."
-)
-CHECKING_TEXT: str = "Checking your Deadline Cloud login."
 # The status line for each login state. None means deadline-cloud is still checking.
-_LOGIN_STATUS_TEXT: Dict[Optional[bool], str] = {True: "", False: LOGIN_TEXT, None: CHECKING_TEXT}
+_LOGIN_STATUS_TEXT: Dict[Optional[bool], str] = {
+    True: "",
+    False: (
+        "Log in with Deadline Cloud Monitor or `deadline auth login`, "
+        "then press the refresh button next to Farm."
+    ),
+    None: "Checking your Deadline Cloud login.",
+}
 
 
 def _pump_qt_events() -> None:
@@ -42,15 +44,16 @@ class SchedulerPanel(QWidget):
     def __init__(self, node: Any) -> None:
         super().__init__()
         self._node: Any = node
+        # The status line, and Houdini's own editor for the node's parms, which always show.
         self._status: Any = QLabel("")
         self._status.setWordWrap(True)
+        self.editor: Any = hou.qt.ParmDialog(node, showTitleBar=False)
         layout: Any = QVBoxLayout(self)
         # A widget that fails costs only the dropdowns, never the parms.
-        self._settings: Optional[Any] = None
         try:
             # The slots are this panel's methods, so Qt drops them when Houdini drops the panel.
-            self._settings = DeadlineCloudSettingsWidget(parent=self)
-            self._settings.selection_changed.connect(self._update_node)
+            self._settings: Any = DeadlineCloudSettingsWidget(parent=self)
+            self._settings.selection_changed.connect(self._update_queue_parameters)
             for box in (
                 self._settings.farm_box,
                 self._settings.queue_box,
@@ -59,20 +62,17 @@ class SchedulerPanel(QWidget):
                 box.background_exception.connect(self._show_list_error)
             _AUTH_STATUS.api_availability_changed.connect(self._refresh_lists)
             layout.addWidget(self._settings)
+            self._refresh_lists()
         except Exception as error:
-            self._settings = None
             self._status.setText(f"The farm and queue lists couldn't be shown: {error}")
         layout.addWidget(self._status)
-        self.editor: Any = hou.qt.ParmDialog(node, showTitleBar=False)
         layout.addWidget(self.editor)
-        if self._settings is not None:
-            self._refresh_lists()
 
     def _refresh_lists(self) -> None:
         """Show the saved picks, and load the lists only while the Deadline Cloud API answers."""
         available: Optional[bool] = _AUTH_STATUS.api_availability
         try:
-            self._settings.refresh_setting_controls(available is True)  # type: ignore[union-attr]
+            self._settings.refresh_setting_controls(available is True)
             self._status.setText(_LOGIN_STATUS_TEXT[available])
         except Exception as error:
             self._status.setText(f"The farm and queue lists couldn't be refreshed: {error}")
@@ -81,7 +81,7 @@ class SchedulerPanel(QWidget):
         """Show a list that failed to load, since deadline-cloud shows no popup for it."""
         self._status.setText(f"{title} failed: {error}")
 
-    def _update_node(self) -> None:
+    def _update_queue_parameters(self) -> None:
         """Show the new farm and queue on the node, as its Update Queue Parameters button does."""
         # The update calls the API on the main thread, so an error here must not leave the slot.
         try:

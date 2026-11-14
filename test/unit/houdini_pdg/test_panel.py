@@ -137,15 +137,15 @@ class FakeNode:
 
     def __init__(self, error: Optional[Exception] = None) -> None:
         self.updates: List[Dict[str, Any]] = []
-        self._error: Optional[Exception] = error
+        self.error: Optional[Exception] = error
 
     def hdaModule(self) -> Any:
         return types.SimpleNamespace(update_queue_parameters_callback=self._update)
 
     def _update(self, kwargs: Dict[str, Any]) -> None:
         self.updates.append(kwargs)
-        if self._error is not None:
-            raise self._error
+        if self.error is not None:
+            raise self.error
 
 
 class Fakes:
@@ -213,7 +213,7 @@ def fakes() -> Iterator[Fakes]:
         yield state
 
 
-def _status(widget: FakeWidget) -> str:
+def _read_status_line(widget: FakeWidget) -> str:
     """The text of the panel's status line."""
     labels: List[FakeLabel] = [child for child in widget.children if isinstance(child, FakeLabel)]
     assert len(labels) == 1
@@ -262,7 +262,7 @@ def test_the_lists_load_once_the_api_is_available_and_again_when_it_changes(fake
     fakes.auth.api_availability = True
     fakes.auth.api_availability_changed.emit()
     assert FakeSettingsWidget.refreshes == [False, True]
-    assert _status(widget) == ""
+    assert _read_status_line(widget) == ""
     fakes.auth.api_availability = False
     fakes.auth.api_availability_changed.emit()
     assert FakeSettingsWidget.refreshes == [False, True, False]
@@ -273,13 +273,13 @@ def test_without_a_login_the_status_line_says_how_to_log_in(fakes: Fakes) -> Non
     fakes.auth.api_availability = False
     widget: Any
     widget, _ = fakes.panel.create_panel(FakeNode())
-    assert "Deadline Cloud Monitor" in _status(widget)
-    assert "deadline auth login" in _status(widget)
-    assert "refresh" in _status(widget)
+    assert "Deadline Cloud Monitor" in _read_status_line(widget)
+    assert "deadline auth login" in _read_status_line(widget)
+    assert "refresh" in _read_status_line(widget)
     # Logging in clears it.
     fakes.auth.api_availability = True
     fakes.auth.api_availability_changed.emit()
-    assert _status(widget) == ""
+    assert _read_status_line(widget) == ""
 
 
 def test_while_the_login_is_being_checked_the_status_line_says_so(fakes: Fakes) -> None:
@@ -288,8 +288,8 @@ def test_while_the_login_is_being_checked_the_status_line_says_so(fakes: Fakes) 
     widget: Any
     widget, _ = fakes.panel.create_panel(FakeNode())
     assert FakeSettingsWidget.refreshes == [False]
-    assert "Checking" in _status(widget)
-    assert "deadline auth login" not in _status(widget)
+    assert "Checking" in _read_status_line(widget)
+    assert "deadline auth login" not in _read_status_line(widget)
 
 
 @pytest.mark.parametrize("box", ["farm_box", "queue_box", "storage_profile_box"])
@@ -301,7 +301,8 @@ def test_a_list_error_shows_in_the_status_line(fakes: Fakes, box: str) -> None:
     # The combo sends its title and the error, as deadline-cloud's do.
     settings: FakeSettingsWidget = widget.children[0]
     getattr(settings, box).background_exception.emit("Refresh Farms list", RuntimeError("denied"))
-    assert "Refresh Farms list" in _status(widget) and "denied" in _status(widget)
+    status: str = _read_status_line(widget)
+    assert "Refresh Farms list" in status and "denied" in status
 
 
 def test_a_farm_or_queue_pick_updates_the_node_as_its_button_does(fakes: Fakes) -> None:
@@ -321,11 +322,11 @@ def test_a_failed_node_update_shows_in_the_status_line_and_raises_nothing(fakes:
     widget: Any
     widget, _ = fakes.panel.create_panel(node)
     widget.children[0].selection_changed.emit()
-    assert "expired token" in _status(widget)
+    assert "expired token" in _read_status_line(widget)
     # A later update that works clears the old error.
-    node._error = None
+    node.error = None
     widget.children[0].selection_changed.emit()
-    assert _status(widget) == ""
+    assert _read_status_line(widget) == ""
 
 
 def test_a_widget_that_fails_to_build_still_leaves_the_node_parms(fakes: Fakes) -> None:
@@ -338,7 +339,7 @@ def test_a_widget_that_fails_to_build_still_leaves_the_node_parms(fakes: Fakes) 
     widget, editor = fakes.panel.create_panel(node)
     assert [type(child) for child in widget.children] == [FakeLabel, FakeParmDialog]
     assert editor.node is node
-    assert "no farms module" in _status(widget)
+    assert "no farms module" in _read_status_line(widget)
 
 
 def test_a_parm_editor_that_fails_shows_the_error_and_raises_nothing(fakes: Fakes) -> None:
@@ -352,7 +353,7 @@ def test_a_parm_editor_that_fails_shows_the_error_and_raises_nothing(fakes: Fake
     assert isinstance(widget, FakeLabel) and "no editor" in widget.text()
 
 
-def _interface() -> ET.Element:
+def _read_interface() -> ET.Element:
     """The pypanel file's one interface."""
     interfaces: List[ET.Element] = ET.parse(_PYPANEL).getroot().findall("interface")
     assert len(interfaces) == 1
@@ -362,15 +363,14 @@ def _interface() -> ET.Element:
 def test_the_panel_file_names_the_scheduler_node_type_and_stays_out_of_the_menu() -> None:
     """A wrong optype shows the normal pane, and the ROP's name would replace the ROP's panel."""
     # The name is the panel's own, not the ROP's ``deadline_cloud``.
-    interface: ET.Element = _interface()
+    interface: ET.Element = _read_interface()
     assert interface.get("name") == "deadline_cloud_scheduler"
     # The optype must match the HDA's table and operator, so renaming the HDA breaks this test.
     with open(os.path.join(_HDA, "INDEX__SECTION"), encoding="utf8") as f:
-        index: Dict[str, str] = dict(
-            (line.split(":", 1)[0].strip(), line.split(":", 1)[1].strip())
-            for line in f
-            if ":" in line
-        )
+        index: Dict[str, str] = {
+            key.strip(): value.strip()
+            for key, value in (line.split(":", 1) for line in f if ":" in line)
+        }
     shown: Optional[ET.Element] = interface.find("showInParametersPane")
     assert shown is not None
     assert shown.get("optype") == f"{index['Table']}/{index['Operator']}"
@@ -390,7 +390,7 @@ class FakePaneTab:
 def _run_script(node: Any, modules: Dict[str, Any]) -> Dict[str, Any]:
     """Run the pypanel's script as Houdini does, over ``modules``, and return its names."""
     # Houdini runs the script in its own namespace, with ``kwargs`` naming the pane tab.
-    script: Optional[str] = _interface().findtext("script")
+    script: Optional[str] = _read_interface().findtext("script")
     assert script is not None
     namespace: Dict[str, Any] = {"kwargs": {"paneTab": FakePaneTab(node)}}
     with patch.dict(sys.modules, modules):
@@ -445,7 +445,7 @@ def test_a_panel_module_that_fails_to_import_leaves_the_node_parms_and_one_error
     assert widget.children[1].node == "other"
 
 
-def _imports(path: str) -> List[str]:
+def _list_imports(path: str) -> List[str]:
     """Every module a Python file imports, with relative imports resolved."""
     with open(path, encoding="utf8") as f:
         tree: ast.Module = ast.parse(f.read(), path)
@@ -476,5 +476,5 @@ def test_no_module_hython_loads_imports_the_panel() -> None:
     paths.append(os.path.join(_HDA, "Top_1deadlinecloudscheduler", "PythonModule"))
     # The scan must reach the registration module, or it proves nothing about the cook.
     assert any(path.endswith(os.path.join("deadlinecloud", "__init__.py")) for path in paths)
-    importers: List[str] = [path for path in paths if _PANEL_MODULE in _imports(path)]
+    importers: List[str] = [path for path in paths if _PANEL_MODULE in _list_imports(path)]
     assert importers == []
