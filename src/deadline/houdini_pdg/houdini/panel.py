@@ -47,7 +47,7 @@ class SchedulerPanel(QWidget):
         # The status line, and Houdini's own editor for the node's parms, which always show.
         self._status: Any = QLabel("")
         self._status.setWordWrap(True)
-        self.editor: Any = hou.qt.ParmDialog(node, showTitleBar=False)
+        self.editor: Any = hou.qt.ParmDialog(node)
         layout: Any = QVBoxLayout(self)
         # A widget that fails costs only the dropdowns, never the parms.
         try:
@@ -71,6 +71,7 @@ class SchedulerPanel(QWidget):
     def _refresh_lists(self) -> None:
         """Show the saved picks, and load the lists only while the Deadline Cloud API answers."""
         available: Optional[bool] = _AUTH_STATUS.api_availability
+        # The login signal calls this from a Qt slot, so an error must not leave it.
         try:
             self._settings.refresh_setting_controls(available is True)
             self._status.setText(_LOGIN_STATUS_TEXT[available])
