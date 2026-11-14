@@ -426,6 +426,11 @@ def _run_script(node: Any, modules: Dict[str, Any]) -> Dict[str, Any]:
     return namespace
 
 
+def _raise_no_login_status() -> Any:
+    """``getInstance`` failing, as a broken Qt or file watcher would make it."""
+    raise RuntimeError("no login status")
+
+
 def test_the_script_builds_the_panel_and_follows_only_scheduler_nodes() -> None:
     """Later scheduler nodes go to the same editor, and other node types never reach it."""
     first: FakeTypedNode = FakeTypedNode("deadlinecloudscheduler")
@@ -452,25 +457,43 @@ def test_the_script_builds_the_panel_and_follows_only_scheduler_nodes() -> None:
     assert editor.node is second
 
 
+def test_a_new_selection_after_the_parm_editor_failed_raises_nothing() -> None:
+    """With no editor, Houdini still calls ``onNodePathChanged`` on each click, which must not raise."""
+
+    # A stand-in panel module whose editor failed, so it returns only the error label.
+    def create_panel(node: Any) -> Tuple[str, None]:
+        return "label", None
+
+    panel: types.ModuleType = types.ModuleType(_PANEL_MODULE)
+    panel.create_panel = create_panel  # type: ignore[attr-defined]
+    fakes: Fakes = Fakes()
+    node: FakeTypedNode = FakeTypedNode("deadlinecloudscheduler")
+    script: Dict[str, Any] = _run_script(node, {"hou": fakes.hou, _PANEL_MODULE: panel})
+    assert script["onCreateInterface"]() == "label"
+    script["onNodePathChanged"](FakeTypedNode("deadlinecloudscheduler"))
+
+
 def test_a_panel_module_that_fails_to_import_leaves_the_node_parms_and_one_error_line() -> None:
     """A broken install must not cost the artist the node's parms and its Submit button."""
-    # The panel module fails to import, and Houdini's own Qt module is there.
+    # The real panel module fails as it loads, because the login status can't be made.
     fakes: Fakes = Fakes()
+    modules: Dict[str, Any] = fakes.modules()
+    modules["deadline.client.ui.deadline_authentication_status"].DeadlineAuthenticationStatus = (
+        types.SimpleNamespace(getInstance=_raise_no_login_status)
+    )
+    # Houdini's own Qt module is there for the fallback.
     qt: types.ModuleType = types.ModuleType("hutil.Qt")
     qt.QtWidgets = types.SimpleNamespace(  # type: ignore[attr-defined]
         QWidget=FakeWidget, QLabel=FakeLabel, QVBoxLayout=FakeLayout
     )
-    modules: Dict[str, Any] = {
-        "hou": fakes.hou,
-        "hutil": types.ModuleType("hutil"),
-        "hutil.Qt": qt,
-        _PANEL_MODULE: None,
-    }
-    script: Dict[str, Any] = _run_script("node", modules)
+    modules.update({"hutil": types.ModuleType("hutil"), "hutil.Qt": qt})
+    # The panel module isn't cached, so the script's import runs its load code.
     with patch.dict(sys.modules, modules):
+        sys.modules.pop(_PANEL_MODULE, None)
+        script: Dict[str, Any] = _run_script("node", modules)
         widget: Any = script["onCreateInterface"]()
     assert [type(child) for child in widget.children] == [FakeLabel, FakeParmDialog]
-    assert _PANEL_MODULE in widget.children[0].text()
+    assert "no login status" in widget.children[0].text()
     assert widget.children[1].node == "node"
     other: FakeTypedNode = FakeTypedNode("deadlinecloudscheduler")
     script["onNodePathChanged"](other)
