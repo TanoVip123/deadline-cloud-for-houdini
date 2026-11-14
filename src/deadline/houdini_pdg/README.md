@@ -34,7 +34,7 @@ The installer does not register the scheduler, so it does not appear in anyone's
    }
    ```
 
-   `hpath` makes Houdini find the scheduler type and its HDA. `PYTHONPATH` makes `deadline.houdini_pdg` importable inside Houdini. The node's buttons use the Deadline Cloud ROP's code, so the ROP submitter must be installed too.
+   `hpath` makes Houdini find the scheduler type, its HDA, and the panel that shows the farm and queue lists in the node's parameters. `PYTHONPATH` makes `deadline.houdini_pdg` importable inside Houdini. The node's buttons use the Deadline Cloud ROP's code, so the ROP submitter must be installed too.
 
 3. Restart Houdini. In a TOP network, open the Tab menu and check that **Deadline Cloud Scheduler (Experimental)** appears under Schedulers.
 
@@ -43,7 +43,7 @@ To remove the scheduler, delete the package file and restart Houdini.
 ## Cooking
 
 1. Create the scheduler in your TOP network and make it the network's Default TOP Scheduler.
-2. On the node, log in and check the farm and queue, as on the Deadline Cloud ROP. The farm and queue are your workstation's defaults.
+2. On the node, log in and choose the farm and queue in the lists at the top of the node's parameters, as on the Deadline Cloud ROP. The choice is saved as your workstation's defaults. You can also set them with `deadline config set defaults.farm_id <farm-id>` and `deadline config set defaults.queue_id <queue-id>`, then click **Update Queue Parameters**.
 3. Start the cook in one of two ways:
    * **Cook** the network, as with any scheduler. The cook is refused if the scene has unsaved changes; or
    * click **Submit** on the node. It saves unsaved changes first, or asks you to, then runs the checks and shows one confirmation with the farm, queue, job name, priority, and working directory. Submit there starts the cook. The job uses the settings stored on the node.
@@ -74,9 +74,9 @@ The scheduler does not download outputs to your workstation. Steps hand files to
 | `farm_job.py` | Releases each task when its inputs exist, and polls for results |
 | `cook.py` | Runs one cook, from PDG's start callback to its stop callback |
 | `diagnostics.py` | Writes each cook's debug directory and log |
-| `houdini/` | Reads PDG and Houdini objects, runs the checks before a cook starts, and runs the node's Submit button |
+| `houdini/` | Reads PDG and Houdini objects, runs the checks before a cook starts, and runs the node's Submit button. `panel.py` is the node's Parameters panel |
 | `houdini_plugin/` | The scheduler registration, and the HDA that gives the node its parms, icon, help, and Tab menu entry. Added to `hpath` by hand |
 
 The worker side lives in `src/deadline/houdini_adaptor/pdg_actions.py`. The Houdini adaptor starts Houdini once per worker session. A stock PDG job script cooks in that Houdini, with the item's scene loaded fresh, and any other command runs through a shell.
 
-Only `houdini/host.py` and the registration module import `hou` or `pdg`. Everything else imports without Houdini, so the unit tests run anywhere.
+Only `houdini/host.py`, `houdini/panel.py` and the registration module import `hou` or `pdg`. Only the node's Python panel imports `panel.py`, so hython and the cook never load it. Everything else imports without Houdini, so the unit tests run anywhere.

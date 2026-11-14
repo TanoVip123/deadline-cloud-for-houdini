@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. -->
+<pythonPanelDocument>
+  <!-- The Deadline Cloud Scheduler node's Parameters pane. The panel itself is the
+ deadline.houdini_pdg.houdini.panel module; this script only loads it. -->
+  <interface name="deadline_cloud_scheduler" label="Deadline Cloud Scheduler" icon="" showNetworkNavigationBar="false" help_url="">
+    <script><![CDATA[
+import hou
+
+try:
+    from deadline.houdini_pdg.houdini.panel import create_panel
+    load_error = ""
+except Exception as error:
+    create_panel = None
+    load_error = f"The Deadline Cloud farm and queue panel didn't load: {error}"
+
+# The parameter editor this pane shows, so a new selection goes to it.
+_state = {"editor": None}
+
+
+def onCreateInterface():
+    node = kwargs["paneTab"].currentNode()
+    if create_panel is not None:
+        widget, _state["editor"] = create_panel(node)
+        return widget
+    # Without the panel module, show the node's parms under one error line.
+    from hutil.Qt import QtWidgets
+
+    widget = QtWidgets.QWidget()
+    layout = QtWidgets.QVBoxLayout(widget)
+    layout.addWidget(QtWidgets.QLabel(load_error))
+    _state["editor"] = hou.qt.ParmDialog(node, showTitleBar=False)
+    layout.addWidget(_state["editor"])
+    return widget
+
+
+def onNodePathChanged(node):
+    if _state["editor"] is not None and node is not None:
+        _state["editor"].setNode(node)
+]]></script>
+    <showInParametersPane optype="Top/deadlinecloudscheduler"/>
+    <help><![CDATA[]]></help>
+  </interface>
+</pythonPanelDocument>
