@@ -24,17 +24,21 @@ as this version of the node does, and keeps the queue's parameters, such as its
 Conda packages, with their values. Any other spare parameter on the node is
 removed too, because it can't be told apart from an older version's tabs.
 
-== Logging in ==
+== Farm and queue ==
 
-Log in outside Houdini, with Deadline Cloud Monitor or by running
-`deadline auth login` in a terminal. Then click __Update Queue Parameters__ on
-the Shared Job Settings tab, so the node shows the farm and queue and
-refreshes the queue's parameters.
+You choose the farm, queue and default storage profile at the top of this
+node's parameters, in the same lists the Deadline Cloud ROP shows. A choice
+is saved to your workstation's AWS Deadline Cloud settings at once, so the
+ROP and every scheduler node use it too. After you pick a farm or a queue,
+the node's Farm and Queue labels and the queue's parameters update.
 
-__Settings__ on the same tab opens the AWS Deadline Cloud workstation
-settings, which don't include the farm and queue. To change the farm and
-queue, pick them in a Deadline Cloud ROP's parameters, where its submitter
-panel shows them, or run these commands in a terminal:
+The lists load only while you're logged in. If you aren't, the line under
+the lists says so. Log in outside Houdini, with Deadline Cloud Monitor or by
+running `deadline auth login` in a terminal, then press the refresh button
+next to Farm. A list that fails to load shows its error on the same line.
+
+You can also set the farm and queue in a terminal, and then click
+__Update Queue Parameters__:
 
 {{{
 deadline config set defaults.farm_id <farm-id>
@@ -138,10 +142,12 @@ Max Worker Count:
 Farm:
     #id: farm
     The default farm of the AWS Deadline Cloud workstation configuration.
+    Choose it in the Farm list at the top of the node's parameters.
 
 Queue:
     #id: queue
     The default queue of the AWS Deadline Cloud workstation configuration.
+    Choose it in the Queue list at the top of the node's parameters.
 
 Settings:
     #id: settings
