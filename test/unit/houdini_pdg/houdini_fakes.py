@@ -428,7 +428,7 @@ class FakeHou:
     file_references: List[Tuple[Any, str]] = field(default_factory=list)
     instances: List[Any] = field(default_factory=list)
     libraries: Dict[str, str] = field(default_factory=dict)
-    #: The ``hou.ui.triggerUpdate`` calls, which nothing should make.
+    #: The ``hou.ui.triggerUpdate`` calls. Only the Farm and Queue menus' redraw makes them.
     updates: int = 0
     #: The callbacks added with ``hou.ui.addSelectionCallback``, in order.
     selection_callbacks: List[Callable[[List[Any]], None]] = field(default_factory=list)

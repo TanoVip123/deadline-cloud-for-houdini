@@ -1372,6 +1372,13 @@ def _run_later_on_main_thread(job: Callable[[], None]) -> None:
     hdefereval.executeDeferred(job)
 
 
+def _redraw_menus() -> None:
+    """Have Houdini draw the Farm and Queue menu labels again, without setting a parm."""
+    # hython has no menus to draw.
+    if hou.isUIAvailable():
+        _call(hou.ui, "triggerUpdate")
+
+
 class FarmAndQueueMenus:
     """The lists behind the node's Farm and Queue menus, kept for the Houdini session.
 
@@ -1385,6 +1392,7 @@ class FarmAndQueueMenus:
         config: Any = deadline_config,
         start_thread: Callable[[Callable[[], None]], None] = _start_daemon_thread,
         run_later_on_main_thread: Callable[[Callable[[], None]], None] = _run_later_on_main_thread,
+        redraw_menus: Callable[[], None] = _redraw_menus,
     ) -> None:
         self._api: Any = api
         self._config: Any = config
@@ -1392,6 +1400,7 @@ class FarmAndQueueMenus:
         self._run_later_on_main_thread: Callable[[Callable[[], None]], None] = (
             run_later_on_main_thread
         )
+        self._redraw_menus: Callable[[], None] = redraw_menus
         # The lists, the ones loading, and each listed farm's region, shared with the threads.
         self._lock: threading.Lock = threading.Lock()
         self._lists: Dict[str, List[Tuple[str, str]]] = {}
@@ -1559,9 +1568,17 @@ class FarmAndQueueMenus:
             self._lists[key] = entries
             self._farm_regions.update(regions)
             self._loading.discard(key)
-        # Only the main thread may set a parm, so Queue shows the loaded queues from there.
+        # Only the main thread may set a parm or redraw, so the menus show the list from there.
+        self._run_later_on_main_thread(functools.partial(self._show_loaded_list, key))
+
+    def _show_loaded_list(self, key: str) -> None:
+        """Show the list just loaded for ``key`` in the menus. Runs on Houdini's main thread.
+
+        An unchanged parm doesn't redraw its menu's label, so the menus are redrawn here.
+        """
         if key != _FARMS:
-            self._run_later_on_main_thread(functools.partial(self._show_saved_queue, key))
+            self._show_saved_queue(key)
+        self._redraw_menus()
 
 
 #: The node's menus, shared by every scheduler node in the session.

@@ -117,12 +117,20 @@ class Menus:
         # The jobs stand in for the threads, and the deferred ones for Houdini's main thread.
         self.jobs: List[Callable[[], None]] = []
         self.deferred: List[Callable[[], None]] = []
+        # Each redraw records the Queue values of the watched nodes, to show what was set before it.
+        self.watched: List[FakeNode] = []
+        self.redraws: List[List[str]] = []
         self.menus: FarmAndQueueMenus = FarmAndQueueMenus(
             api=self.api,
             config=self.config,
             start_thread=self.jobs.append,
             run_later_on_main_thread=self.deferred.append,
+            redraw_menus=self.record_redraw,
         )
+
+    def record_redraw(self) -> None:
+        """Record a redraw of the menus, with the Queue value each watched node had then."""
+        self.redraws.append([node.parm("queue").evalAsString() for node in self.watched])
 
     def run_jobs(self) -> None:
         """Run the started jobs, as their threads would."""
@@ -218,7 +226,11 @@ def test_the_default_fetch_runs_in_a_background_daemon_thread(scene: FakeHou) ->
             ran.set()
             return FakeAuthenticationStatus.NEEDS_LOGIN
 
-    menus: FarmAndQueueMenus = FarmAndQueueMenus(api=RecordingApi(), config=FakeConfig(_SAVED))
+    # The main-thread jobs are kept, since a test has no hdefereval.
+    deferred: List[Callable[[], None]] = []
+    menus: FarmAndQueueMenus = FarmAndQueueMenus(
+        api=RecordingApi(), config=FakeConfig(_SAVED), run_later_on_main_thread=deferred.append
+    )
     menus.list_menu_items("farm")
     assert ran.wait(timeout=10)
     assert threads[0] is not threading.main_thread() and threads[0].daemon
@@ -382,6 +394,7 @@ def test_without_a_ui_nothing_is_fetched_or_watched(scene: FakeHou) -> None:
     menus.menus.load_lists()
     menus.menus.list_menu_items("farm")
     assert menus.jobs == [] and scene.selection_callbacks == []
+    assert menus.deferred == [] and menus.redraws == []
 
 
 def _item(type_name: str) -> Any:
@@ -587,3 +600,86 @@ def test_a_queue_that_already_shows_the_saved_queue_is_not_set_again(scene: Fake
     menus.run_deferred()
     assert unchanged.parm("queue").sets == []
     assert changed.parm("queue").sets == ["queue-a"]
+
+
+@pytest.mark.parametrize("parm", ["farm", "queue"])
+def test_a_loaded_list_queues_one_main_thread_job_that_redraws_the_menus_once(
+    scene: FakeHou, parm: str
+) -> None:
+    """Queue showed Loading... until clicked, since a list landing never told Houdini to redraw."""
+    # The fetch thread only queues the job, and the main thread's run of it redraws once.
+    menus: Menus = Menus(_SAVED)
+    menus.menus.list_menu_items(parm)
+    menus.run_jobs()
+    assert len(menus.deferred) == 1 and menus.redraws == []
+    menus.run_deferred()
+    assert len(menus.redraws) == 1
+
+
+def test_an_unchanged_queue_is_not_set_and_the_menus_still_redraw(scene: FakeHou) -> None:
+    """A set may mark a scene unsaved, so the label must update by a redraw, not by a set."""
+    # The node already holds the saved queue when its list lands.
+    menus: Menus = Menus(_SAVED)
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    scene.instances = [node]
+    menus.watched = [node]
+    menus.menus.list_menu_items("queue")
+    menus.run_jobs()
+    menus.run_deferred()
+    assert node.parm("queue").sets == []
+    assert menus.redraws == [["queue-a"]]
+
+
+def test_a_changed_queue_is_set_before_the_menus_redraw(scene: FakeHou) -> None:
+    """A redraw before the set would draw the old queue's label until the next redraw."""
+    # The node holds an old queue, so the job sets the saved one, then redraws.
+    menus: Menus = Menus(_SAVED)
+    node: FakeNode = FakeNode("farm-a", "queue-old")
+    scene.instances = [node]
+    menus.watched = [node]
+    menus.menus.list_menu_items("queue")
+    menus.run_jobs()
+    menus.run_deferred()
+    assert node.parm("queue").sets == ["queue-a"]
+    assert menus.redraws == [["queue-a"]]
+
+
+def _default_redraw_menus(scene: FakeHou) -> Tuple[FarmAndQueueMenus, List[Callable[[], None]]]:
+    """Menus with the default redraw, both lists loaded, and their main-thread jobs not yet run."""
+    # The fetch jobs run here, and the main-thread jobs are returned for the test to run.
+    jobs: List[Callable[[], None]] = []
+    deferred: List[Callable[[], None]] = []
+    menus: FarmAndQueueMenus = FarmAndQueueMenus(
+        api=FakeApi(),
+        config=FakeConfig(_SAVED),
+        start_thread=jobs.append,
+        run_later_on_main_thread=deferred.append,
+    )
+    menus.load_lists()
+    for job in jobs:
+        job()
+    return menus, deferred
+
+
+def test_the_default_redraw_asks_houdini_to_update_the_ui_and_sets_no_parm(
+    scene: FakeHou,
+) -> None:
+    """The default must make Houdini redraw the labels, and a parm set could mark the scene unsaved."""
+    # The node already shows the saved queue, so nothing but the redraws should happen.
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    scene.instances = [node]
+    _, deferred = _default_redraw_menus(scene)
+    for job in deferred:
+        job()
+    assert scene.updates == 2
+    assert node.parm("farm").sets == [] and node.parm("queue").sets == []
+
+
+def test_the_default_redraw_does_nothing_without_a_ui(scene: FakeHou) -> None:
+    """hython has no menus to redraw, and its hou.ui may be missing."""
+    # The lists load with a UI, and the UI is gone when the main-thread jobs run.
+    _, deferred = _default_redraw_menus(scene)
+    scene.ui = False
+    for job in deferred:
+        job()
+    assert scene.updates == 0
