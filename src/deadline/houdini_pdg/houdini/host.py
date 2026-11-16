@@ -9,6 +9,7 @@ there while Houdini's UI runs, so every scene read runs on the main thread.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import glob
 import logging
 import os
@@ -32,6 +33,8 @@ from typing import (
 
 import hou  # type: ignore[import-not-found]
 import pdg  # type: ignore[import-not-found]
+from deadline.client import api as deadline_api
+from deadline.client import config as deadline_config
 
 from ..errors import (
     CookSetupError,
@@ -1344,6 +1347,184 @@ def rebuild_layout_from_definition(node: Any) -> None:
     move_queue_folders_above_submit(node)
     for name, value in values.items():
         node.parmTuple(name).set(value)
+
+
+# -- the node's Farm and Queue menus -----------------------------------------
+
+#: The one entry a menu shows while its list loads, without a login, or with no farm saved.
+_LOADING: str = "Loading..."
+_LOG_IN: str = "Log in with Deadline Cloud Monitor or `deadline auth login`"
+_CHOOSE_A_FARM: str = "Choose a farm first"
+
+#: The key of the farm list. Each queue list is keyed by its farm's ID.
+_FARMS: str = ""
+
+
+def _start_daemon_thread(job: Callable[[], None]) -> None:
+    """Run ``job`` in a thread that doesn't keep Houdini from exiting."""
+    threading.Thread(target=job, daemon=True).start()
+
+
+class FarmAndQueueMenus:
+    """The lists behind the node's Farm and Queue menus, kept for the Houdini session.
+
+    A menu only reads a list. A missing list loads in a background thread, so Houdini's
+    main thread makes no AWS call. Each entry is an ``(id, label)`` pair.
+    """
+
+    def __init__(
+        self,
+        api: Any = deadline_api,
+        config: Any = deadline_config,
+        start_thread: Callable[[Callable[[], None]], None] = _start_daemon_thread,
+    ) -> None:
+        self._api: Any = api
+        self._config: Any = config
+        self._start_thread: Callable[[Callable[[], None]], None] = start_thread
+        # The lists, the ones loading, and each listed farm's region, shared with the threads.
+        self._lock: threading.Lock = threading.Lock()
+        self._lists: Dict[str, List[Tuple[str, str]]] = {}
+        self._loading: Set[str] = set()
+        self._farm_regions: Dict[str, str] = {}
+        self._watching_selection: bool = False
+
+    def list_menu_items(self, parm_name: str) -> List[str]:
+        """The ``farm`` or ``queue`` menu as Houdini wants it: each token, then its label.
+
+        A list that isn't loaded yet starts loading, and shows one entry until it is.
+        """
+        farm_id: str = get_workstation_setting("defaults.farm_id", self._config)
+        key: str = _FARMS if parm_name == "farm" else farm_id
+        # Queues are listed per farm, so with no farm there is nothing to load.
+        no_farm: bool = parm_name == "queue" and not farm_id
+        with self._lock:
+            loaded: Optional[List[Tuple[str, str]]] = None if no_farm else self._lists.get(key)
+        if loaded is None and not no_farm:
+            self._start_loading(key)
+        placeholder: str = _CHOOSE_A_FARM if no_farm else _LOADING
+        entries: List[Tuple[str, str]] = loaded if loaded is not None else [("", placeholder)]
+        # An entry with no ID keeps the saved ID as its token, so showing it changes no value.
+        saved: str = get_workstation_setting(f"defaults.{parm_name}_id", self._config)
+        items: List[str] = [
+            text for entry_id, label in entries for text in (entry_id or saved, label)
+        ]
+        return items
+
+    def load_lists(self, reload: bool = False) -> None:
+        """Start loading the farm list and the saved farm's queue list, unless they're loaded.
+
+        ``reload`` drops the loaded lists first, so a new login or profile shows its own.
+        """
+        with self._lock:
+            if reload:
+                self._lists.clear()
+            missing: List[str] = [
+                key
+                for key in (_FARMS, get_workstation_setting("defaults.farm_id", self._config))
+                if key not in self._lists
+            ]
+        for key in missing:
+            self._start_loading(key)
+
+    def save_pick(self, node: Any, parm_name: str, update: Callable[[], None]) -> None:
+        """Save the farm or queue picked in the node's menu as deadline-cloud does, then ``update``.
+
+        A pick of the saved one, or of an entry that isn't a listed ID, saves nothing.
+        """
+        picked: str = node.parm(parm_name).evalAsString()
+        saved: str = get_workstation_setting(f"defaults.{parm_name}_id", self._config)
+        key: str = (
+            _FARMS
+            if parm_name == "farm"
+            else get_workstation_setting("defaults.farm_id", self._config)
+        )
+        # Read under the lock the loading threads write with.
+        with self._lock:
+            listed: Set[str] = {entry_id for entry_id, _ in self._lists.get(key, []) if entry_id}
+            region: str = self._farm_regions.get(picked, "")
+        if picked == saved or picked not in listed:
+            node.parm(parm_name).set(saved)
+            return
+        # The same settings, in the same order, as deadline-cloud's select_farm and select_queue,
+        # whose controller needs Qt. A farm pick also reloads that farm's queues.
+        set_setting: Callable[[str, str], None] = self._config.set_setting
+        if parm_name == "farm":
+            set_setting("defaults.farm_id", picked)
+            if region:
+                set_setting("defaults.farm_region", region)
+            set_setting("defaults.queue_id", "")
+            with self._lock:
+                self._lists.pop(picked, None)
+        else:
+            set_setting("defaults.queue_id", picked)
+        set_setting("settings.storage_profile_id", "")
+        update()
+
+    def show_saved_ids(self, node: Any) -> None:
+        """Set the node's Farm and Queue to the saved IDs, which are the menus' tokens."""
+        for parm_name in ("farm", "queue"):
+            node.parm(parm_name).set(
+                get_workstation_setting(f"defaults.{parm_name}_id", self._config)
+            )
+
+    def _load_for_selected_scheduler(self, selection: List[Any]) -> None:
+        """Start the lists when a scheduler node is selected, so they're ready when its parms show."""
+        if any(_call(_call(item, "type"), "name") == _NODE_TYPE for item in selection):
+            self.load_lists()
+
+    def _start_loading(self, key: str) -> None:
+        """Start one thread that loads the list for ``key``, unless one is already loading it.
+
+        The first one also starts watching the selection, which needs Houdini's UI.
+        """
+        # hython loads scenes on the farm too, where nothing shows the lists.
+        if not hou.isUIAvailable():
+            return
+        with self._lock:
+            if key in self._loading:
+                return
+            self._loading.add(key)
+        if not self._watching_selection:
+            hou.ui.addSelectionCallback(self._load_for_selected_scheduler)
+            self._watching_selection = True
+        self._start_thread(functools.partial(self._load_list, key))
+
+    def _load_list(self, key: str) -> None:
+        """Load the farm list, or the queues of farm ``key``. Runs in a background thread."""
+        # Any error is shown as the menu's one entry, since a thread has nowhere to raise it.
+        entries: List[Tuple[str, str]]
+        regions: Dict[str, str]
+        try:
+            status: Any = self._api.check_authentication_status()
+            if status != self._api.AwsAuthenticationStatus.AUTHENTICATED:
+                entries, regions = [("", _LOG_IN)], {}
+            elif key == _FARMS:
+                farms: List[Dict[str, Any]] = self._api.list_farms()["farms"]
+                entries, regions = (
+                    [(farm["farmId"], farm["displayName"]) for farm in farms],
+                    {farm["farmId"]: farm["region"] for farm in farms},
+                )
+            else:
+                with self._lock:
+                    region: Optional[str] = self._farm_regions.get(key)
+                queues: List[Dict[str, Any]] = self._api.list_queues(farmId=key, region=region)[
+                    "queues"
+                ]
+                entries, regions = [
+                    (queue["queueId"], queue["displayName"]) for queue in queues
+                ], {}
+        except Exception as error:
+            entries, regions = [("", f"The list couldn't load: {error}")], {}
+        # The lists are sorted by name, ignoring case, as deadline-cloud's own lists are.
+        entries.sort(key=lambda entry: (entry[1].casefold(), entry[0]))
+        with self._lock:
+            self._lists[key] = entries
+            self._farm_regions.update(regions)
+            self._loading.discard(key)
+
+
+#: The node's menus, shared by every scheduler node in the session.
+farm_and_queue_menus: FarmAndQueueMenus = FarmAndQueueMenus()
 
 
 # -- the node's Submit button ------------------------------------------------

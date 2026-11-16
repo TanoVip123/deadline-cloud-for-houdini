@@ -476,8 +476,8 @@ def _queue_error(
         )
     if "ResourceNotFound" in _error_code(error):
         return CookSetupError(
-            f"Queue {queue_id} on farm {farm_id} was not found. Choose a farm and queue in a "
-            "Deadline Cloud ROP's parameters, or with `deadline config set defaults.farm_id "
+            f"Queue {queue_id} on farm {farm_id} was not found. Choose a farm and queue in the "
+            "scheduler node's Farm and Queue menus, or with `deadline config set defaults.farm_id "
             "<farm-id>` and `deadline config set defaults.queue_id <queue-id>`. If the farm is "
             "in another AWS Region, also run `deadline config set defaults.farm_region <region>` "
             "after setting the farm. Then click Update Queue Parameters and cook again."

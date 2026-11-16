@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -30,11 +31,13 @@ class FakeTemplate:
         label: str = "",
         children: Optional[List["FakeTemplate"]] = None,
         hidden: bool = False,
+        menu_script: str = "",
     ) -> None:
         self._name: str = name
         self._label: str = label or name
         self.children: Optional[List[FakeTemplate]] = children
         self._hidden: bool = hidden
+        self._menu_script: str = menu_script
 
     def name(self) -> str:
         return self._name
@@ -44,6 +47,9 @@ class FakeTemplate:
 
     def isHidden(self) -> bool:
         return self._hidden
+
+    def itemGeneratorScript(self) -> str:
+        return self._menu_script
 
     def type(self) -> str:
         return "Folder" if self.children is not None else "String"
@@ -253,15 +259,13 @@ def _conda() -> FakeTemplate:
 
 
 def _shared_tab(
-    name: str, properties: str, settings: str, hidden: Optional[Set[str]] = None
+    name: str, properties: str, settings: str, farm_and_queue: Optional[List[FakeTemplate]] = None
 ) -> FakeTemplate:
     """The Shared Job Settings tab, with its two inner folders of the definition's own parms.
 
-    The Farm and Queue labels named in ``hidden`` carry the hidden flag.
+    Farm and Queue are ``farm_and_queue``, or the plain labels an older node has.
     """
-    labels: List[FakeTemplate] = [
-        FakeTemplate(name, hidden=name in (hidden or set())) for name in ("farm", "queue")
-    ]
+    labels: List[FakeTemplate] = farm_and_queue or [FakeTemplate("farm"), FakeTemplate("queue")]
     return FakeTemplate(
         name,
         "Shared Job Settings",
@@ -284,23 +288,31 @@ def _four_tabs(shared: FakeTemplate, pdg: str, attachments: str, host: str) -> L
     ]
 
 
-def _hidden_in_node_script() -> Set[str]:
-    """The Farm and Queue labels that the node's script marks hidden."""
+def _farm_and_queue_in_node_script() -> List[FakeTemplate]:
+    """Farm and Queue as the node's script defines them: hidden or not, and with any menu script."""
+    # Read each parm's block, then its hidden flag and the text of its menu script, if any.
     blocks: Dict[str, str] = _parms(NODE_SCRIPT)
-    return {name for name in ("farm", "queue") if _flag(blocks[name], "invisible")}
+    templates: List[FakeTemplate] = []
+    for name in ("farm", "queue"):
+        menu: Optional["re.Match[str]"] = re.search(r"\bmenu\s*\{(.*?)\n\s*\}", blocks[name], re.S)
+        hidden: bool = _flag(blocks[name], "invisible")
+        templates.append(
+            FakeTemplate(name, hidden=hidden, menu_script=menu.group(1) if menu else "")
+        )
+    return templates
 
 
-def _current_tabs(hidden: Set[str]) -> List[FakeTemplate]:
-    """The current four tabs, with Submit last in Shared Job Settings and ``hidden`` labels hidden."""
-    shared: FakeTemplate = _shared_tab("job_settings", "folder0", "folder1", hidden)
+def _current_tabs(farm_and_queue: Optional[List[FakeTemplate]] = None) -> List[FakeTemplate]:
+    """The current four tabs, with Submit last in Shared Job Settings, and the given Farm and Queue."""
+    shared: FakeTemplate = _shared_tab("job_settings", "folder0", "folder1", farm_and_queue)
     assert shared.children is not None
     shared.children.append(FakeTemplate("submit"))
     return _four_tabs(shared, "job_settings_1", "job_settings_2", "host_requirements")
 
 
 def _definition() -> List[FakeTemplate]:
-    """The current definition's layout, with the labels' hidden flags read from the node's script."""
-    return _current_tabs(_hidden_in_node_script())
+    """The current definition's layout, with Farm and Queue read from the node's script."""
+    return _current_tabs(_farm_and_queue_in_node_script())
 
 
 #: The values of the definition's own parms, which must survive the rebuild.
@@ -416,8 +428,8 @@ def test_an_old_node_loads_with_login_and_logout_hidden_and_settings_shown(
     assert settings is not None
     hidden: Dict[str, bool] = {child.name(): child.isHidden() for child in settings.parmTemplates()}
     assert hidden == {
-        "farm": True,
-        "queue": True,
+        "farm": False,
+        "queue": False,
         "login": True,
         "logout": True,
         "settings": False,
@@ -425,20 +437,23 @@ def test_an_old_node_loads_with_login_and_logout_hidden_and_settings_shown(
     assert {name: node.values[name] for name in _CONDA_VALUES} == _CONDA_VALUES
 
 
-def _label_flags(node: FakeLayoutNode) -> Dict[str, bool]:
-    """Whether each label in the node's Deadline Cloud Settings folder is hidden."""
+def _farm_and_queue(node: FakeLayoutNode) -> Dict[str, Tuple[bool, bool]]:
+    """Whether Farm and Queue are hidden, and whether each has a menu script, on the node."""
     settings: Optional[FakeTemplate] = _find_folder(node.layout, "Deadline Cloud Settings")
     assert settings is not None
-    return {child.name(): child.isHidden() for child in settings.parmTemplates()}
+    return {
+        child.name(): (child.isHidden(), bool(child.itemGeneratorScript()))
+        for child in settings.parmTemplates()
+    }
 
 
 def _stored_current_tabs_node() -> FakeLayoutNode:
-    """A node made on the current tabs before the labels were hidden, with its layout stored.
+    """A node made on the current tabs while Farm and Queue were labels, with its layout stored.
 
-    The ROP's queue update stored the layout with the Conda folder, so the labels are shown.
+    The ROP's queue update stored the layout with the Conda folder, so the labels are kept.
     """
-    # The current tabs with both labels shown, and the Conda folder above Submit.
-    stored: List[FakeTemplate] = _current_tabs(set())
+    # The current tabs with the two labels, and the Conda folder above Submit.
+    stored: List[FakeTemplate] = _current_tabs()
     shared: Optional[FakeTemplate] = _find_folder(stored, "Shared Job Settings")
     assert shared is not None and shared.children is not None
     shared.children.insert(2, _conda())
@@ -449,43 +464,44 @@ def _stored_current_tabs_node() -> FakeLayoutNode:
     return node
 
 
+_SHOWN_MENUS: Dict[str, Tuple[bool, bool]] = {"farm": (False, True), "queue": (False, True)}
+
+
 @pytest.mark.parametrize(
     "make_node",
     [_frozen_submit_below_tabs_node, _stored_current_tabs_node],
     ids=["submit below the tabs", "current tabs"],
 )
-def test_an_old_node_loads_with_the_farm_and_queue_labels_hidden(
-    scene: FakeHou, make_node: Any
-) -> None:
-    """A node saved with the labels shown keeps its own layout, so the rebuild must hide them."""
+def test_an_old_node_loads_with_the_farm_and_queue_menus(scene: FakeHou, make_node: Any) -> None:
+    """A node saved with the labels keeps its own layout, so the rebuild must bring the menus."""
     node: FakeLayoutNode = make_node()
-    assert _label_flags(node) == {"farm": False, "queue": False}
-    # After the rebuild the labels are hidden, and they keep their values.
+    assert _farm_and_queue(node) == {"farm": (False, False), "queue": (False, False)}
+    # After the rebuild the menus are shown, and they keep their values.
     rebuild_layout_from_definition(node)
-    assert _label_flags(node) == {"farm": True, "queue": True}
+    assert _farm_and_queue(node) == _SHOWN_MENUS
     assert node.parm("farm").eval() == ("farm-1",)
     assert node.parm("queue").eval() == ("queue-1",)
 
 
-def test_the_rops_queue_update_after_the_rebuild_keeps_the_labels_hidden_and_settable(
+def test_the_rops_queue_update_after_the_rebuild_keeps_the_menus_and_can_set_them(
     scene: FakeHou,
 ) -> None:
-    """The ROP's update sets the labels and rewrites the layout, and must not show them again."""
+    """The ROP's update sets Farm and Queue and rewrites the layout, and must keep the menus."""
     from deadline.houdini_submitter.python.deadline_cloud_for_houdini.queue_parameters import (
         remove_queue_parameters_from_node,
     )
 
     node: FakeLayoutNode = _stored_current_tabs_node()
     rebuild_layout_from_definition(node)
-    # As the ROP's update does: set the labels, drop the queue folder, add it back, then move it.
+    # As the ROP's update does: set the parms, drop the queue folder, add it back, then move it.
     node.parm("farm").set("Farm One")
     node.parm("queue").set("Queue One")
     remove_queue_parameters_from_node(node)  # type: ignore[arg-type]
     node.addSpareParmTuple(_conda(), ("Shared Job Settings",))
     move_queue_folders_above_submit(node)
-    # The labels are still hidden, still there, and read back what was set.
+    # The menus are still shown and read back what was set.
     assert node.stores_layout
-    assert _label_flags(node) == {"farm": True, "queue": True}
+    assert _farm_and_queue(node) == _SHOWN_MENUS
     assert node.parm("farm").eval() == "Farm One"
     assert node.parm("queue").eval() == "Queue One"
     assert node.folder("Shared Job Settings") == [

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pytest
 
@@ -30,9 +30,15 @@ def _read(folder: str, section: str) -> str:
 def _parms(dialog_script: str) -> Dict[str, str]:
     """Each parm's name, with the text of its block."""
     blocks: Dict[str, str] = {}
-    # A parm block starts at ``parm {`` and its name is the next ``name`` line.
-    for match in re.finditer(r"\bparm\s*\{\s*name\s+\"?(\w+)\"?(.*?)\n\s*\}", dialog_script, re.S):
-        blocks[match.group(1)] = match.group(2)
+    # A parm block starts at ``parm {`` and its name is the next ``name`` line. It ends at its
+    # own closing brace, so a nested block, such as a menu script, stays inside it.
+    for match in re.finditer(r"\bparm\s*\{\s*name\s+\"?(\w+)\"?", dialog_script):
+        depth: int = 1
+        end: int = match.end()
+        while depth:
+            depth += {"{": 1, "}": -1}.get(dialog_script[end], 0)
+            end += 1
+        blocks[match.group(1)] = dialog_script[match.end() : end - 1]
     return blocks
 
 
@@ -111,12 +117,17 @@ def _settings_folder() -> str:
 
 
 @pytest.mark.parametrize("parm", ["farm", "queue"])
-def test_the_farm_and_queue_labels_are_hidden_but_kept(parm: str) -> None:
-    """The panel shows the choice, and scripts still read the labels, so they're hidden, not removed."""
-    # Each label is still a label parm in the Deadline Cloud Settings folder, with the hidden flag.
+def test_farm_and_queue_are_visible_menus_in_the_deadline_cloud_settings_folder(parm: str) -> None:
+    """The ROP's update sets these parms by name, so the menus keep the names and stay strings."""
+    # Each is a shown string parm in the folder, with a Python menu script and the node's callback.
     block: str = _parms(_settings_folder())[parm]
-    assert re.search(r"type\s+label", block), parm
-    assert _flag(block, "invisible"), parm
+    assert re.search(r"type\s+string", block), parm
+    assert not _flag(block, "invisible"), parm
+    menu: Optional["re.Match[str]"] = re.search(r"\bmenu\s*\{(.*?)\n\s*\}", block, re.S)
+    assert menu is not None, parm
+    assert re.search(r"language\s+python", menu.group(1)), parm
+    assert f"farm_and_queue_menus.list_menu_items('{parm}')" in menu.group(1), parm
+    assert 'parmtag { "script_callback" "hou.phm().callback(kwargs)" }' in block, parm
 
 
 @pytest.mark.parametrize("parm", ["settings", "update_queue_parameters", "submit"])
@@ -139,9 +150,14 @@ def _visible_rows() -> List[List[str]]:
 
 def test_settings_and_update_queue_parameters_share_one_row_after_farm_and_queue() -> None:
     """The two buttons sat on one row before, and hiding Login and Logout must not split them."""
+    # The Farm and Queue menus share the row above them.
     rows: List[List[str]] = _visible_rows()
-    start: int = rows.index(["settings", "update_queue_parameters"])
-    assert rows[start : start + 2] == [["settings", "update_queue_parameters"], ["submit"]]
+    start: int = rows.index(["farm", "queue"])
+    assert rows[start : start + 3] == [
+        ["farm", "queue"],
+        ["settings", "update_queue_parameters"],
+        ["submit"],
+    ]
 
 
 def test_no_visible_parm_joins_a_hidden_one() -> None:
@@ -199,3 +215,67 @@ def test_the_help_does_not_say_settings_changes_the_farm_or_queue() -> None:
     entry: str = help_text[start:end]
     assert "farm" not in entry and "queue" not in entry
     assert "click __Settings__" not in help_text
+
+
+def _function(name: str) -> str:
+    """The text of one function in the node's PythonModule."""
+    # A function ends where the next top-level one starts, or at the end of the module.
+    module: str = _read(_NODE, "PythonModule")
+    start: int = module.index(f"def {name}(")
+    end: int = module.find("\ndef ", start + 1)
+    return module[start : end if end >= 0 else len(module)]
+
+
+@pytest.mark.parametrize(
+    "function, rop_call",
+    [("callback", "rop_callback(kwargs)"), ("update_queue_parameters_callback", "rop(kwargs)")],
+)
+def test_the_farm_and_queue_ids_go_back_after_every_rop_update(
+    function: str, rop_call: str
+) -> None:
+    """The ROP writes names or "<refreshing>" into the menus, which must store the IDs."""
+    # The IDs go back in a ``finally``, so a failed update doesn't leave "<refreshing>" stored.
+    body: str = _function(function)
+    rop: int = body.index(rop_call)
+    assert (
+        rop < body.index("finally:", rop) < body.index("farm_and_queue_menus.show_saved_ids(", rop)
+    )
+
+
+def test_a_farm_or_queue_pick_goes_to_the_menus_and_then_to_the_queue_update() -> None:
+    """A pick saves the choice and refreshes the node, and never runs the ROP's own button code."""
+    # The pick branch builds the update, hands it to the menus, and returns before the ROP's call.
+    body: str = _function("callback")
+    pick: int = body.index('if name in ("farm", "queue"):')
+    update: int = body.index("functools.partial(update_queue_parameters_callback, kwargs)", pick)
+    call: int = body.index('farm_and_queue_menus.save_pick(kwargs["node"], name, update)', update)
+    assert call < body.index("return", call) < body.index("rop_callback(kwargs)")
+
+
+def test_the_buttons_read_the_lists_again_and_create_and_load_start_them() -> None:
+    """After a login or a settings change, the lists must be fetched again, not kept."""
+    assert "farm_and_queue_menus.load_lists(reload=True)" in _function("callback")
+    wrapper: str = _function("update_queue_parameters_callback")
+    assert 0 <= wrapper.index("farm_and_queue_menus.load_lists()") < wrapper.index("rop(kwargs)")
+
+
+def _scheduler_texts() -> Dict[str, str]:
+    """Every text file the scheduler ships, by its path under ``houdini_pdg``."""
+    root: str = os.path.join(_SRC, "houdini_pdg")
+    texts: Dict[str, str] = {}
+    for folder, _, files in os.walk(root):
+        # Compiled files are skipped, because they can be left over from older sources.
+        if "__pycache__" in folder:
+            continue
+        for name in files:
+            path: str = os.path.join(folder, name)
+            with open(path, encoding="utf8", errors="replace") as f:
+                texts[os.path.relpath(path, root)] = f.read()
+    return texts
+
+
+def test_nothing_in_the_scheduler_imports_the_login_dialog() -> None:
+    """The login dialog can crash Houdini on macOS, so the scheduler never opens it."""
+    assert [
+        path for path, text in _scheduler_texts().items() if "DeadlineLoginDialog" in text
+    ] == []
