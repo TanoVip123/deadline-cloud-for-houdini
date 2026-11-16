@@ -1365,6 +1365,13 @@ def _start_daemon_thread(job: Callable[[], None]) -> None:
     threading.Thread(target=job, daemon=True).start()
 
 
+def _run_later_on_main_thread(job: Callable[[], None]) -> None:
+    """Queue ``job`` for Houdini's main thread, and return at once."""
+    import hdefereval  # type: ignore[import-not-found]
+
+    hdefereval.executeDeferred(job)
+
+
 class FarmAndQueueMenus:
     """The lists behind the node's Farm and Queue menus, kept for the Houdini session.
 
@@ -1377,10 +1384,14 @@ class FarmAndQueueMenus:
         api: Any = deadline_api,
         config: Any = deadline_config,
         start_thread: Callable[[Callable[[], None]], None] = _start_daemon_thread,
+        run_later_on_main_thread: Callable[[Callable[[], None]], None] = _run_later_on_main_thread,
     ) -> None:
         self._api: Any = api
         self._config: Any = config
         self._start_thread: Callable[[Callable[[], None]], None] = start_thread
+        self._run_later_on_main_thread: Callable[[Callable[[], None]], None] = (
+            run_later_on_main_thread
+        )
         # The lists, the ones loading, and each listed farm's region, shared with the threads.
         self._lock: threading.Lock = threading.Lock()
         self._lists: Dict[str, List[Tuple[str, str]]] = {}
@@ -1446,15 +1457,17 @@ class FarmAndQueueMenus:
             node.parm(parm_name).set(saved)
             return
         # The same settings, in the same order, as deadline-cloud's select_farm and select_queue,
-        # whose controller needs Qt. A farm pick also reloads that farm's queues.
+        # whose controller needs Qt.
         set_setting: Callable[[str, str], None] = self._config.set_setting
         if parm_name == "farm":
             set_setting("defaults.farm_id", picked)
             if region:
                 set_setting("defaults.farm_region", region)
             set_setting("defaults.queue_id", "")
+            # The new farm's queues load again at once, so Queue doesn't wait for a click.
             with self._lock:
                 self._lists.pop(picked, None)
+            self._start_loading(picked)
         else:
             set_setting("defaults.queue_id", picked)
         set_setting("settings.storage_profile_id", "")
@@ -1466,6 +1479,28 @@ class FarmAndQueueMenus:
             node.parm(parm_name).set(
                 get_workstation_setting(f"defaults.{parm_name}_id", self._config)
             )
+
+    def _show_saved_queue(self, farm_id: str) -> None:
+        """Set each scheduler node's Queue to the saved queue, or to none selected if it isn't listed.
+
+        Runs on Houdini's main thread once ``farm_id``'s queues load, so Queue stops showing Loading.
+        """
+        from deadline.houdini_submitter.python.deadline_cloud_for_houdini.submitter import (
+            _NONE_SELECTED_TEXT,
+        )
+
+        saved_farm: str = get_workstation_setting("defaults.farm_id", self._config)
+        saved: str = get_workstation_setting("defaults.queue_id", self._config)
+        with self._lock:
+            entries: Optional[List[Tuple[str, str]]] = self._lists.get(farm_id)
+        # A list for another farm isn't the one Queue shows, and a reload's own list comes later.
+        if farm_id != saved_farm or entries is None:
+            return
+        # The login and error entries keep the saved ID as their token, as in the menu.
+        tokens: Set[str] = {entry_id or saved for entry_id, _ in entries}
+        shown: str = saved if saved in tokens else _NONE_SELECTED_TEXT
+        for node in hou.nodeType(hou.topNodeTypeCategory(), _NODE_TYPE).instances():
+            node.parm("queue").set(shown)
 
     def _load_for_selected_scheduler(self, selection: List[Any]) -> None:
         """Start the lists when a scheduler node is selected, so they're ready when its parms show."""
@@ -1521,6 +1556,9 @@ class FarmAndQueueMenus:
             self._lists[key] = entries
             self._farm_regions.update(regions)
             self._loading.discard(key)
+        # Only the main thread may set a parm, so Queue shows the loaded queues from there.
+        if key != _FARMS:
+            self._run_later_on_main_thread(functools.partial(self._show_saved_queue, key))
 
 
 #: The node's menus, shared by every scheduler node in the session.

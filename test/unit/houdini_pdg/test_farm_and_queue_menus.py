@@ -110,9 +110,14 @@ class Menus:
     def __init__(self, settings: Dict[str, str]) -> None:
         self.api: FakeApi = FakeApi()
         self.config: FakeConfig = FakeConfig(settings)
+        # The jobs stand in for the threads, and the deferred ones for Houdini's main thread.
         self.jobs: List[Callable[[], None]] = []
+        self.deferred: List[Callable[[], None]] = []
         self.menus: FarmAndQueueMenus = FarmAndQueueMenus(
-            api=self.api, config=self.config, start_thread=self.jobs.append
+            api=self.api,
+            config=self.config,
+            start_thread=self.jobs.append,
+            run_later_on_main_thread=self.deferred.append,
         )
 
     def run_jobs(self) -> None:
@@ -121,6 +126,13 @@ class Menus:
         jobs: List[Callable[[], None]] = list(self.jobs)
         self.jobs.clear()
         for job in jobs:
+            job()
+
+    def run_deferred(self) -> None:
+        """Run what the jobs queued for Houdini's main thread, in the order they queued it."""
+        deferred: List[Callable[[], None]] = list(self.deferred)
+        self.deferred.clear()
+        for job in deferred:
             job()
 
 
@@ -246,11 +258,12 @@ def test_with_no_farm_the_queue_menu_asks_for_one_and_fetches_nothing(scene: Fak
 
 def _loaded(settings: Dict[str, str]) -> Menus:
     """Menus with the farm list and the saved farm's queue list loaded."""
-    # Each menu starts its list, and the jobs fill them.
+    # Each menu starts its list, the jobs fill them, and the main thread takes what they queued.
     menus: Menus = Menus(settings)
     menus.menus.list_menu_items("farm")
     menus.menus.list_menu_items("queue")
     menus.run_jobs()
+    menus.run_deferred()
     return menus
 
 
@@ -389,3 +402,136 @@ def test_selecting_a_scheduler_node_starts_the_fetch(scene: FakeHou) -> None:
     assert len(menus.jobs) == 1
     menus.run_jobs()
     assert menus.menus.list_menu_items("queue") == ["queue-y", "Comp", "queue-z", "Sims"]
+
+
+_NONE_SELECTED: str = "<none selected>"
+
+
+def _shown_queue(menus: Menus, node: FakeNode) -> str:
+    """The Queue label Houdini shows: the label of the entry whose token the parm holds, else the value."""
+    # Houdini's menu list alternates tokens and labels.
+    items: List[str] = menus.menus.list_menu_items("queue")
+    labels: Dict[str, str] = dict(zip(items[::2], items[1::2]))
+    value: str = node.parm("queue").evalAsString()
+    return labels.get(value, value)
+
+
+def _pick_farm(menus: Menus, node: FakeNode, farm_id: str) -> None:
+    """Pick ``farm_id`` in the node's Farm menu, with the update putting the saved IDs back."""
+    node.parm("farm").set(farm_id)
+    menus.menus.save_pick(node, "farm", lambda: menus.menus.show_saved_ids(node))
+
+
+def test_a_farm_pick_starts_its_queue_fetch_at_once(scene: FakeHou) -> None:
+    """The Queue menu showed Loading... until clicked, because nothing fetched the new farm's queues."""
+    # Pick farm-b with both lists loaded, and no menu call after the pick.
+    menus: Menus = _loaded(_SAVED)
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    scene.instances = [node]
+    _pick_farm(menus, node, "farm-b")
+    assert len(menus.jobs) == 1
+    menus.run_jobs()
+    assert menus.api.calls[-1] == ("list_queues", {"farmId": "farm-b", "region": "us-west-2"})
+
+
+@pytest.mark.parametrize(
+    "saved_queue, shown", [("", _NONE_SELECTED), ("queue-y", "queue-y")], ids=["none", "listed"]
+)
+def test_a_loaded_queue_list_sets_the_queue_on_the_main_thread_only(
+    scene: FakeHou, saved_queue: str, shown: str
+) -> None:
+    """Houdini's parms are safe to set only on its main thread, so the fetch thread hands it over."""
+    # Pick farm-b, then save a queue as another tool would, before its queues load.
+    menus: Menus = _loaded(_SAVED)
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    scene.instances = [node]
+    _pick_farm(menus, node, "farm-b")
+    menus.config.settings["defaults.queue_id"] = saved_queue
+    # The fetch thread sets nothing itself, and the main thread then shows the saved queue.
+    menus.run_jobs()
+    assert node.parm("queue").evalAsString() == ""
+    assert len(menus.deferred) == 1
+    menus.run_deferred()
+    assert node.parm("queue").evalAsString() == shown
+
+
+def test_without_a_ui_a_farm_pick_fetches_and_defers_nothing(scene: FakeHou) -> None:
+    """hython has no menus to show, and hdefereval exists only with a UI."""
+    # Load the lists with a UI, then pick a farm with none.
+    menus: Menus = _loaded(_SAVED)
+    scene.ui = False
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    scene.instances = [node]
+    _pick_farm(menus, node, "farm-b")
+    assert menus.jobs == [] and menus.deferred == []
+
+
+def test_a_farm_and_back_shows_no_loading_once_the_queues_load(scene: FakeHou) -> None:
+    """The artist saw Queue stuck on Loading... after picking a farm and then the first one again."""
+    # Pick farm-b, let its queues load, then pick farm-a again and let its queues load.
+    menus: Menus = _loaded(_SAVED)
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    scene.instances = [node]
+    for farm_id in ("farm-b", "farm-a"):
+        _pick_farm(menus, node, farm_id)
+        menus.run_jobs()
+        menus.run_deferred()
+    # select_farm cleared the queue, so Queue shows none selected, as the ROP does.
+    assert _shown_queue(menus, node) == _NONE_SELECTED
+
+
+def test_a_list_for_a_farm_no_longer_saved_leaves_the_queue_alone(scene: FakeHou) -> None:
+    """A fetch can land after the next farm pick, and its queues aren't the ones the menu shows."""
+    # Pick farm-b, then farm-a before farm-b's queues land, then save farm-a's queue.
+    menus: Menus = _loaded(_SAVED)
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    scene.instances = [node]
+    _pick_farm(menus, node, "farm-b")
+    _pick_farm(menus, node, "farm-a")
+    menus.config.settings["defaults.queue_id"] = "queue-a"
+    menus.run_jobs()
+    # farm-a's list sets the queue first, and farm-b's, landing last, changes nothing.
+    menus.deferred.reverse()
+    menus.run_deferred()
+    assert node.parm("queue").evalAsString() == "queue-a"
+
+
+def test_a_login_entry_keeps_the_saved_queue_once_the_list_loads(scene: FakeHou) -> None:
+    """The login entry's token is the saved queue, so none selected would hide the way to log in."""
+    # Pick farm-b, log out, and save a queue before its list loads.
+    menus: Menus = _loaded(_SAVED)
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    scene.instances = [node]
+    _pick_farm(menus, node, "farm-b")
+    menus.api.status = FakeAuthenticationStatus.NEEDS_LOGIN
+    menus.config.settings["defaults.queue_id"] = "queue-z"
+    menus.run_jobs()
+    menus.run_deferred()
+    assert _shown_queue(menus, node) == _LOG_IN
+
+
+def test_with_no_farm_the_farm_list_leaves_the_queue_alone(scene: FakeHou) -> None:
+    """With no farm, Queue shows Choose a farm first, and the farm list has no queues to show."""
+    # Load the farm list with no farm saved.
+    menus: Menus = Menus({})
+    node: FakeNode = FakeNode("", "")
+    scene.instances = [node]
+    menus.menus.list_menu_items("farm")
+    menus.run_jobs()
+    menus.run_deferred()
+    assert _shown_queue(menus, node) == "Choose a farm first"
+
+
+def test_a_reload_before_the_main_thread_runs_leaves_the_queue_for_the_next_list(
+    scene: FakeHou,
+) -> None:
+    """A reload drops the list, so the queue waits for the next one instead of showing none selected."""
+    # Pick farm-b, let its queues load, then reload before the main thread sets the queue.
+    menus: Menus = _loaded(_SAVED)
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    scene.instances = [node]
+    _pick_farm(menus, node, "farm-b")
+    menus.run_jobs()
+    menus.menus.load_lists(reload=True)
+    menus.run_deferred()
+    assert node.parm("queue").evalAsString() == ""

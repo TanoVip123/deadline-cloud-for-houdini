@@ -83,7 +83,6 @@
                 name    "farm"
                 label   "Farm"
                 type    string
-                joinnext
                 default { "" }
                 menu {
                     [ "from deadline.houdini_pdg.houdini.host import farm_and_queue_menus" ]

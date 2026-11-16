@@ -150,11 +150,12 @@ def _visible_rows() -> List[List[str]]:
 
 def test_settings_and_update_queue_parameters_share_one_row_after_farm_and_queue() -> None:
     """The two buttons sat on one row before, and hiding Login and Logout must not split them."""
-    # The Farm and Queue menus share the row above them.
+    # Farm and Queue each have their own row above them, so each shows its own label.
     rows: List[List[str]] = _visible_rows()
-    start: int = rows.index(["farm", "queue"])
-    assert rows[start : start + 3] == [
-        ["farm", "queue"],
+    start: int = rows.index(["farm"])
+    assert rows[start : start + 4] == [
+        ["farm"],
+        ["queue"],
         ["settings", "update_queue_parameters"],
         ["submit"],
     ]
