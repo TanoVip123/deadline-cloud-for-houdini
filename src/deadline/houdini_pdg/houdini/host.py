@@ -1499,8 +1499,11 @@ class FarmAndQueueMenus:
         # The login and error entries keep the saved ID as their token, as in the menu.
         tokens: Set[str] = {entry_id or saved for entry_id, _ in entries}
         shown: str = saved if saved in tokens else _NONE_SELECTED_TEXT
+        # Only a changed value is set, since a set may mark a scene that just opened as unsaved.
         for node in hou.nodeType(hou.topNodeTypeCategory(), _NODE_TYPE).instances():
-            node.parm("queue").set(shown)
+            queue: Any = node.parm("queue")
+            if queue.evalAsString() != shown:
+                queue.set(shown)
 
     def _load_for_selected_scheduler(self, selection: List[Any]) -> None:
         """Start the lists when a scheduler node is selected, so they're ready when its parms show."""

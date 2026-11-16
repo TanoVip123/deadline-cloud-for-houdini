@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import types
 from pathlib import Path
@@ -86,11 +87,14 @@ class FakeParm:
 
     def __init__(self, value: str) -> None:
         self.value: str = value
+        # Each value set, since Houdini may mark the scene unsaved on any set.
+        self.sets: List[str] = []
 
     def evalAsString(self) -> str:
         return self.value
 
     def set(self, value: str) -> None:
+        self.sets.append(value)
         self.value = value
 
 
@@ -535,3 +539,51 @@ def test_a_reload_before_the_main_thread_runs_leaves_the_queue_for_the_next_list
     menus.menus.load_lists(reload=True)
     menus.run_deferred()
     assert node.parm("queue").evalAsString() == ""
+
+
+class FakeDeferEval:
+    """``hdefereval`` with only ``executeDeferred``, which keeps each job for the test to run."""
+
+    def __init__(self) -> None:
+        self.queued: List[Callable[[], None]] = []
+
+    def executeDeferred(self, job: Callable[[], None]) -> None:
+        self.queued.append(job)
+
+
+def test_the_default_hand_off_queues_the_queue_set_for_every_node_and_returns(
+    scene: FakeHou, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parm set from the fetch thread is unsafe in Houdini, and a wait on the main thread can hang it."""
+    # The fake has no executeInMainThreadWithResult, so a hand-off that waits fails here.
+    deferred: FakeDeferEval = FakeDeferEval()
+    monkeypatch.setitem(sys.modules, "hdefereval", deferred)
+    # Every scheduler node shares the saved farm and queue, so each one's Queue is set.
+    nodes: List[FakeNode] = [FakeNode("farm-a", ""), FakeNode("farm-a", "")]
+    scene.instances = list(nodes)
+    jobs: List[Callable[[], None]] = []
+    menus: FarmAndQueueMenus = FarmAndQueueMenus(
+        api=FakeApi(), config=FakeConfig(_SAVED), start_thread=jobs.append
+    )
+    menus.list_menu_items("queue")
+    for job in jobs:
+        job()
+    # The fetch only queued the set, and the main thread's run of it sets both nodes.
+    assert [node.parm("queue").evalAsString() for node in nodes] == ["", ""]
+    assert len(deferred.queued) == 1
+    deferred.queued[0]()
+    assert [node.parm("queue").evalAsString() for node in nodes] == ["queue-a", "queue-a"]
+
+
+def test_a_queue_that_already_shows_the_saved_queue_is_not_set_again(scene: FakeHou) -> None:
+    """Houdini may mark a scene unsaved on any parm set, so a scene that just opened stays saved."""
+    # One node already holds the saved queue, and the other an old one.
+    menus: Menus = Menus(_SAVED)
+    unchanged: FakeNode = FakeNode("farm-a", "queue-a")
+    changed: FakeNode = FakeNode("farm-a", "queue-old")
+    scene.instances = [unchanged, changed]
+    menus.menus.list_menu_items("queue")
+    menus.run_jobs()
+    menus.run_deferred()
+    assert unchanged.parm("queue").sets == []
+    assert changed.parm("queue").sets == ["queue-a"]
