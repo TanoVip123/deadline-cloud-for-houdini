@@ -30,7 +30,12 @@ You choose the farm, queue and default storage profile at the top of this
 node's parameters, in the same lists the Deadline Cloud ROP shows. A choice
 is saved to the AWS Deadline Cloud workstation configuration at once, so
 the ROP and every scheduler node use it too. After you pick a farm or a
-queue, the node's Farm and Queue labels and the queue's parameters update.
+queue, the queue's parameters update. The Conda Packages and Conda Channels
+fields appear only for a queue whose queue environments define them.
+
+The node's Farm and Queue labels are hidden, because the lists show your
+choice. They're still on the node, and __Update Queue Parameters__ still sets
+them, so scripts can read them.
 
 The lists load only while you're logged in. If you aren't, the line under
 the lists says so. Log in outside Houdini, with Deadline Cloud Monitor or by
@@ -142,12 +147,14 @@ Max Worker Count:
 Farm:
     #id: farm
     The default farm of the AWS Deadline Cloud workstation configuration.
-    Choose it in the Farm list at the top of the node's parameters.
+    This label is hidden, because the Farm list at the top of the node's
+    parameters shows the choice. Update Queue Parameters sets it for scripts.
 
 Queue:
     #id: queue
     The default queue of the AWS Deadline Cloud workstation configuration.
-    Choose it in the Queue list at the top of the node's parameters.
+    This label is hidden, because the Queue list at the top of the node's
+    parameters shows the choice. Update Queue Parameters sets it for scripts.
 
 Settings:
     #id: settings

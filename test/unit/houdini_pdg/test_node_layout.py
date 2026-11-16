@@ -13,6 +13,7 @@ import pytest
 
 # The fakes come first, because they install the fake ``hou`` the host module imports.
 from .houdini_fakes import FakeHou, install_hou
+from .test_scheduler_hda import NODE_SCRIPT, _flag, _parms
 
 from deadline.houdini_pdg.houdini.host import (
     move_queue_folders_above_submit,
@@ -117,6 +118,41 @@ class FakeParmTuple:
         self._node.values[self._name] = value
 
 
+class FakeSpareParm:
+    """A spare ``hou.Parm``, as the ROP's queue update reads it."""
+
+    def __init__(self, name: str, folders: Tuple[str, ...]) -> None:
+        self._name: str = name
+        self._folders: Tuple[str, ...] = folders
+
+    def name(self) -> str:
+        return self._name
+
+    def containingFolders(self) -> Tuple[str, ...]:
+        return self._folders
+
+
+def _labels_to(templates: Sequence[FakeTemplate], name: str) -> Optional[Tuple[str, ...]]:
+    """The labels of the folders holding the template named ``name``, outermost first."""
+    for template in templates:
+        if template.name() == name:
+            return ()
+        if template.children is not None:
+            inner: Optional[Tuple[str, ...]] = _labels_to(template.children, name)
+            if inner is not None:
+                return (template.label(),) + inner
+    return None
+
+
+def _all_templates(templates: Sequence[FakeTemplate]) -> List[FakeTemplate]:
+    """Every template in ``templates`` and inside its folders, depth first."""
+    found: List[FakeTemplate] = []
+    for template in templates:
+        found.append(template)
+        found += _all_templates(template.parmTemplates())
+    return found
+
+
 class FakeLayoutNode:
     """A node's layout as Houdini keeps it: the definition's, or one stored on the node.
 
@@ -144,6 +180,29 @@ class FakeLayoutNode:
     def parmTuple(self, name: str) -> FakeParmTuple:
         assert name in self.values, name
         return FakeParmTuple(self, name)
+
+    def parm(self, name: str) -> FakeParmTuple:
+        # One-value parms, such as the labels, are read and set as one-value tuples.
+        return self.parmTuple(name)
+
+    def spareParms(self) -> List[FakeSpareParm]:
+        # Houdini lists spare fields, not the simple folders that hold them.
+        folders: Set[str] = {
+            entry.name() for entry in _all_templates(self.layout) if entry.children is not None
+        }
+        return [
+            FakeSpareParm(name, _labels_to(self.layout, name) or ())
+            for name in sorted(self.spare - folders)
+        ]
+
+    def removeSpareParmFolder(self, folder: Tuple[str, ...]) -> None:
+        # The last label names the folder to remove, and the one before it names its holder.
+        holder: Optional[FakeTemplate] = _find_folder(self.layout, folder[-2])
+        assert holder is not None and holder.children is not None, folder
+        removed: List[FakeTemplate] = [e for e in holder.children if e.label() == folder[-1]]
+        assert removed, folder
+        holder.children[:] = [e for e in holder.children if e.label() != folder[-1]]
+        self.spare -= {name for entry in removed for name in entry.names()}
 
     def removeSpareParms(self) -> None:
         self.layout = copy.deepcopy(self.definition)
@@ -193,8 +252,16 @@ def _conda() -> FakeTemplate:
     )
 
 
-def _shared_tab(name: str, properties: str, settings: str) -> FakeTemplate:
-    """The Shared Job Settings tab, with its two inner folders of the definition's own parms."""
+def _shared_tab(
+    name: str, properties: str, settings: str, hidden: Optional[Set[str]] = None
+) -> FakeTemplate:
+    """The Shared Job Settings tab, with its two inner folders of the definition's own parms.
+
+    The Farm and Queue labels named in ``hidden`` carry the hidden flag.
+    """
+    labels: List[FakeTemplate] = [
+        FakeTemplate(name, hidden=name in (hidden or set())) for name in ("farm", "queue")
+    ]
     return FakeTemplate(
         name,
         "Shared Job Settings",
@@ -202,9 +269,7 @@ def _shared_tab(name: str, properties: str, settings: str) -> FakeTemplate:
             FakeTemplate(
                 properties, "Job Properties", [FakeTemplate("name"), FakeTemplate("priority")]
             ),
-            FakeTemplate(
-                settings, "Deadline Cloud Settings", [FakeTemplate("farm"), FakeTemplate("queue")]
-            ),
+            FakeTemplate(settings, "Deadline Cloud Settings", labels),
         ],
     )
 
@@ -219,12 +284,23 @@ def _four_tabs(shared: FakeTemplate, pdg: str, attachments: str, host: str) -> L
     ]
 
 
-def _definition() -> List[FakeTemplate]:
-    """The current definition's layout: four tabs, with Submit last in Shared Job Settings."""
-    shared: FakeTemplate = _shared_tab("job_settings", "folder0", "folder1")
+def _hidden_in_node_script() -> Set[str]:
+    """The Farm and Queue labels that the node's script marks hidden."""
+    blocks: Dict[str, str] = _parms(NODE_SCRIPT)
+    return {name for name in ("farm", "queue") if _flag(blocks[name], "invisible")}
+
+
+def _current_tabs(hidden: Set[str]) -> List[FakeTemplate]:
+    """The current four tabs, with Submit last in Shared Job Settings and ``hidden`` labels hidden."""
+    shared: FakeTemplate = _shared_tab("job_settings", "folder0", "folder1", hidden)
     assert shared.children is not None
     shared.children.append(FakeTemplate("submit"))
     return _four_tabs(shared, "job_settings_1", "job_settings_2", "host_requirements")
+
+
+def _definition() -> List[FakeTemplate]:
+    """The current definition's layout, with the labels' hidden flags read from the node's script."""
+    return _current_tabs(_hidden_in_node_script())
 
 
 #: The values of the definition's own parms, which must survive the rebuild.
@@ -340,10 +416,81 @@ def test_an_old_node_loads_with_login_and_logout_hidden_and_settings_shown(
     assert settings is not None
     hidden: Dict[str, bool] = {child.name(): child.isHidden() for child in settings.parmTemplates()}
     assert hidden == {
-        "farm": False,
-        "queue": False,
+        "farm": True,
+        "queue": True,
         "login": True,
         "logout": True,
         "settings": False,
     }
     assert {name: node.values[name] for name in _CONDA_VALUES} == _CONDA_VALUES
+
+
+def _label_flags(node: FakeLayoutNode) -> Dict[str, bool]:
+    """Whether each label in the node's Deadline Cloud Settings folder is hidden."""
+    settings: Optional[FakeTemplate] = _find_folder(node.layout, "Deadline Cloud Settings")
+    assert settings is not None
+    return {child.name(): child.isHidden() for child in settings.parmTemplates()}
+
+
+def _stored_current_tabs_node() -> FakeLayoutNode:
+    """A node made on the current tabs before the labels were hidden, with its layout stored.
+
+    The ROP's queue update stored the layout with the Conda folder, so the labels are shown.
+    """
+    # The current tabs with both labels shown, and the Conda folder above Submit.
+    stored: List[FakeTemplate] = _current_tabs(set())
+    shared: Optional[FakeTemplate] = _find_folder(stored, "Shared Job Settings")
+    assert shared is not None and shared.children is not None
+    shared.children.insert(2, _conda())
+    # The node follows the current definition, but its stored layout wins until it's rebuilt.
+    values: Dict[str, Any] = {**_REAL_VALUES, **_CONDA_VALUES, "queue_env_do_not_use_Conda": (0,)}
+    node: FakeLayoutNode = FakeLayoutNode(_definition(), stored, set(_conda().names()), values)
+    node.stores_layout = True
+    return node
+
+
+@pytest.mark.parametrize(
+    "make_node",
+    [_frozen_submit_below_tabs_node, _stored_current_tabs_node],
+    ids=["submit below the tabs", "current tabs"],
+)
+def test_an_old_node_loads_with_the_farm_and_queue_labels_hidden(
+    scene: FakeHou, make_node: Any
+) -> None:
+    """A node saved with the labels shown keeps its own layout, so the rebuild must hide them."""
+    node: FakeLayoutNode = make_node()
+    assert _label_flags(node) == {"farm": False, "queue": False}
+    # After the rebuild the labels are hidden, and they keep their values.
+    rebuild_layout_from_definition(node)
+    assert _label_flags(node) == {"farm": True, "queue": True}
+    assert node.parm("farm").eval() == ("farm-1",)
+    assert node.parm("queue").eval() == ("queue-1",)
+
+
+def test_the_rops_queue_update_after_the_rebuild_keeps_the_labels_hidden_and_settable(
+    scene: FakeHou,
+) -> None:
+    """The ROP's update sets the labels and rewrites the layout, and must not show them again."""
+    from deadline.houdini_submitter.python.deadline_cloud_for_houdini.queue_parameters import (
+        remove_queue_parameters_from_node,
+    )
+
+    node: FakeLayoutNode = _stored_current_tabs_node()
+    rebuild_layout_from_definition(node)
+    # As the ROP's update does: set the labels, drop the queue folder, add it back, then move it.
+    node.parm("farm").set("Farm One")
+    node.parm("queue").set("Queue One")
+    remove_queue_parameters_from_node(node)  # type: ignore[arg-type]
+    node.addSpareParmTuple(_conda(), ("Shared Job Settings",))
+    move_queue_folders_above_submit(node)
+    # The labels are still hidden, still there, and read back what was set.
+    assert node.stores_layout
+    assert _label_flags(node) == {"farm": True, "queue": True}
+    assert node.parm("farm").eval() == "Farm One"
+    assert node.parm("queue").eval() == "Queue One"
+    assert node.folder("Shared Job Settings") == [
+        "folder0",
+        "folder1",
+        "queue_env_do_not_use_Conda",
+        "submit",
+    ]

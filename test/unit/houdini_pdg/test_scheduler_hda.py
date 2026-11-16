@@ -104,6 +104,21 @@ def test_the_login_and_logout_buttons_are_hidden(parm: str) -> None:
     assert _flag(_parms(NODE_SCRIPT)[parm], "invisible"), parm
 
 
+def _settings_folder() -> str:
+    """The text of the Deadline Cloud Settings folder, ``folder1``, in the node's script."""
+    start: int = NODE_SCRIPT.index('name    "folder1"')
+    return NODE_SCRIPT[start : NODE_SCRIPT.index('name    "submit"', start)]
+
+
+@pytest.mark.parametrize("parm", ["farm", "queue"])
+def test_the_farm_and_queue_labels_are_hidden_but_kept(parm: str) -> None:
+    """The panel shows the choice, and scripts still read the labels, so they're hidden, not removed."""
+    # Each label is still a label parm in the Deadline Cloud Settings folder, with the hidden flag.
+    block: str = _parms(_settings_folder())[parm]
+    assert re.search(r"type\s+label", block), parm
+    assert _flag(block, "invisible"), parm
+
+
 @pytest.mark.parametrize("parm", ["settings", "update_queue_parameters", "submit"])
 def test_settings_update_queue_parameters_and_submit_stay_visible(parm: str) -> None:
     """Without Settings on the node, the farm and queue only change through the config file."""
@@ -125,13 +140,8 @@ def _visible_rows() -> List[List[str]]:
 def test_settings_and_update_queue_parameters_share_one_row_after_farm_and_queue() -> None:
     """The two buttons sat on one row before, and hiding Login and Logout must not split them."""
     rows: List[List[str]] = _visible_rows()
-    start: int = rows.index(["farm"])
-    assert rows[start : start + 4] == [
-        ["farm"],
-        ["queue"],
-        ["settings", "update_queue_parameters"],
-        ["submit"],
-    ]
+    start: int = rows.index(["settings", "update_queue_parameters"])
+    assert rows[start : start + 2] == [["settings", "update_queue_parameters"], ["submit"]]
 
 
 def test_no_visible_parm_joins_a_hidden_one() -> None:
