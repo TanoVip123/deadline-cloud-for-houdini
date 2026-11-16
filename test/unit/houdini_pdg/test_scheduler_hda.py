@@ -126,7 +126,9 @@ def test_farm_and_queue_are_visible_menus_in_the_deadline_cloud_settings_folder(
     menu: Optional["re.Match[str]"] = re.search(r"\bmenu\s*\{(.*?)\n\s*\}", block, re.S)
     assert menu is not None, parm
     assert re.search(r"language\s+python", menu.group(1)), parm
-    assert f"farm_and_queue_menus.list_menu_items('{parm}')" in menu.group(1), parm
+    # The menu gets the parm's value, so it can name the saved farm or queue before its list loads.
+    call: str = f"farm_and_queue_menus.list_menu_items('{parm}', kwargs['parm'].evalAsString())"
+    assert call in menu.group(1), parm
     assert 'parmtag { "script_callback" "hou.phm().callback(kwargs)" }' in block, parm
 
 

@@ -22,7 +22,8 @@ def callback(kwargs):
     from deadline_cloud_for_houdini.submitter import callback as rop_callback
 
     # Settings and Update Queue Parameters add the queue folders after Submit, and write the
-    # farm and queue names into the menus, which hold IDs. Either may change the login.
+    # farm and queue names into the menus, which hold IDs, so the names are kept and the IDs
+    # go back. Either may change the login.
     try:
         rop_callback(kwargs)
         move_queue_folders_above_submit(kwargs["node"])
@@ -41,7 +42,8 @@ def update_queue_parameters_callback(kwargs):
     from deadline_cloud_for_houdini.submitter import update_queue_parameters_callback as rop
 
     # The lists load in the background. The layout needs no login, so a failed one still leaves
-    # the right tabs. The queue folders then move back above Submit, and the IDs always go back.
+    # the right tabs. The queue folders then move back above Submit, and the names the ROP
+    # wrote are kept as the IDs always go back.
     farm_and_queue_menus.load_lists()
     rebuild_layout_from_definition(kwargs["node"])
     try:

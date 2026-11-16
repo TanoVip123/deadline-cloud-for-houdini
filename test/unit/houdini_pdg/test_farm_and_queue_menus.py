@@ -19,9 +19,12 @@ from .houdini_fakes import FakeHou, install_hou
 
 from deadline.houdini_pdg.houdini.host import FarmAndQueueMenus
 
-_LOADING: str = "Loading..."
 _NONE_SELECTED: str = "<none selected>"
 _LOG_IN: str = "Log in with Deadline Cloud Monitor or `deadline auth login`"
+#: The entries a menu shows after the current value while it has no list, token then label.
+_LOADING_ENTRY: List[str] = ["__loading__", "Loading..."]
+_LOG_IN_ENTRY: List[str] = ["__log_in__", _LOG_IN]
+_CHOOSE_A_FARM_ENTRY: List[str] = ["__choose_a_farm__", "Choose a farm first"]
 
 
 class FakeAuthenticationStatus:
@@ -109,45 +112,6 @@ class FakeNode:
     def parm(self, name: str) -> FakeParm:
         return self.parms[name]
 
-    def type(self) -> Any:
-        return types.SimpleNamespace(name=lambda: "deadlinecloudscheduler")
-
-    def path(self) -> str:
-        return "/obj/topnet1/scheduler1"
-
-    def parent(self) -> Any:
-        return _NETWORK
-
-
-#: The TOP network that holds every scheduler node in these tests.
-_NETWORK: Any = types.SimpleNamespace(path=lambda: "/obj/topnet1")
-
-
-class FakePaneTab:
-    """A ``hou.PaneTab`` of one type, showing one node, that records each node it's pointed at.
-
-    Each pointing is recorded with its ``pick_node``, since True would also select the node.
-    """
-
-    def __init__(self, pane_type: str, node: Any, name: str = "panetab1") -> None:
-        self.pane_type: str = pane_type
-        self.node: Any = node
-        self.pane_name: str = name
-        self.pointed_at: List[Tuple[Any, bool]] = []
-
-    def name(self) -> str:
-        return self.pane_name
-
-    def type(self) -> str:
-        return self.pane_type
-
-    def currentNode(self) -> Any:
-        return self.node
-
-    def setCurrentNode(self, node: Any, pick_node: bool = True) -> None:
-        self.pointed_at.append((node, pick_node))
-        self.node = node
-
 
 class Menus:
     """The menus under test, with the fakes they read and the background jobs they started."""
@@ -158,20 +122,12 @@ class Menus:
         # The jobs stand in for the threads, and the deferred ones for Houdini's main thread.
         self.jobs: List[Callable[[], None]] = []
         self.deferred: List[Callable[[], None]] = []
-        # Each redraw records the Queue values of the watched nodes, to show what was set before it.
-        self.watched: List[FakeNode] = []
-        self.redraws: List[List[str]] = []
         self.menus: FarmAndQueueMenus = FarmAndQueueMenus(
             api=self.api,
             config=self.config,
             start_thread=self.jobs.append,
             run_later_on_main_thread=self.deferred.append,
-            redraw_menus=self.record_redraw,
         )
-
-    def record_redraw(self) -> None:
-        """Record a redraw of the menus, with the Queue value each watched node had then."""
-        self.redraws.append([node.parm("queue").evalAsString() for node in self.watched])
 
     def run_jobs(self) -> None:
         """Run the started jobs, as their threads would."""
@@ -201,14 +157,17 @@ _SAVED: Dict[str, str] = {"defaults.farm_id": "farm-a", "defaults.queue_id": "qu
 
 
 @pytest.mark.parametrize("parm", ["farm", "queue"])
-def test_an_empty_list_shows_loading_starts_one_fetch_and_calls_nothing(
+def test_on_a_cold_load_a_menu_lists_the_saved_id_then_loading_and_calls_nothing(
     scene: FakeHou, parm: str
 ) -> None:
-    """A menu runs on Houdini's main thread, so an AWS call there would freeze the UI."""
+    """A menu runs on Houdini's main thread, so an AWS call there would freeze the UI.
+
+    With no name seen yet, the saved ID is its own label, so Houdini shows the ID, not Loading...
+    """
+    # A fresh session, as when a scene opens, reads the menu before any fetch has run.
     menus: Menus = Menus(_SAVED)
-    # The one entry keeps the saved ID as its token, so the stored value doesn't change.
     saved: str = _SAVED[f"defaults.{parm}_id"]
-    assert menus.menus.list_menu_items(parm) == [saved, _LOADING]
+    assert menus.menus.list_menu_items(parm, saved) == [saved, saved, *_LOADING_ENTRY]
     assert menus.api.calls == []
     assert len(menus.jobs) == 1
 
@@ -217,13 +176,13 @@ def test_two_menu_calls_start_one_fetch_per_list(scene: FakeHou) -> None:
     """Houdini runs a menu script on every redraw, so each one must not start another fetch."""
     menus: Menus = Menus(_SAVED)
     for _ in range(2):
-        menus.menus.list_menu_items("farm")
-        menus.menus.list_menu_items("queue")
+        menus.menus.list_menu_items("farm", "farm-a")
+        menus.menus.list_menu_items("queue", "queue-a")
     assert len(menus.jobs) == 2
     # Once a list is loaded, the menu reads it and starts nothing.
     menus.run_jobs()
-    menus.menus.list_menu_items("farm")
-    menus.menus.list_menu_items("queue")
+    menus.menus.list_menu_items("farm", "farm-a")
+    menus.menus.list_menu_items("queue", "queue-a")
     assert menus.jobs == []
 
 
@@ -232,12 +191,12 @@ def test_the_fetch_fills_the_lists_and_the_menus_list_names_with_id_tokens(
 ) -> None:
     """Houdini stores a menu's token, so the token is the ID and the label is the name."""
     menus: Menus = Menus({"defaults.farm_id": "farm-b", "defaults.queue_id": "queue-z"})
-    menus.menus.list_menu_items("farm")
+    menus.menus.list_menu_items("farm", "farm-b")
     menus.run_jobs()
-    menus.menus.list_menu_items("queue")
+    menus.menus.list_menu_items("queue", "queue-z")
     menus.run_jobs()
     # The names are sorted without case, and the queues are read in the farm's own region.
-    assert menus.menus.list_menu_items("farm") == [
+    assert menus.menus.list_menu_items("farm", "farm-b") == [
         "",
         _NONE_SELECTED,
         "farm-a",
@@ -245,7 +204,7 @@ def test_the_fetch_fills_the_lists_and_the_menus_list_names_with_id_tokens(
         "farm-b",
         "Beta",
     ]
-    assert menus.menus.list_menu_items("queue") == [
+    assert menus.menus.list_menu_items("queue", "queue-z") == [
         "",
         _NONE_SELECTED,
         "queue-y",
@@ -264,9 +223,14 @@ def test_farms_with_the_same_name_are_listed_in_id_order(scene: FakeHou) -> None
         {"farmId": "farm-2", "displayName": "Main", "region": "us-west-2"},
         {"farmId": "farm-1", "displayName": "Main", "region": "us-east-1"},
     ]
-    menus.menus.list_menu_items("farm")
+    menus.menus.list_menu_items("farm", "farm-a")
     menus.run_jobs()
-    assert menus.menus.list_menu_items("farm")[2:] == ["farm-1", "Main", "farm-2", "Main"]
+    assert menus.menus.list_menu_items("farm", "farm-a")[2:] == [
+        "farm-1",
+        "Main",
+        "farm-2",
+        "Main",
+    ]
 
 
 def test_the_default_fetch_runs_in_a_background_daemon_thread(scene: FakeHou) -> None:
@@ -286,7 +250,7 @@ def test_the_default_fetch_runs_in_a_background_daemon_thread(scene: FakeHou) ->
     menus: FarmAndQueueMenus = FarmAndQueueMenus(
         api=RecordingApi(), config=FakeConfig(_SAVED), run_later_on_main_thread=deferred.append
     )
-    menus.list_menu_items("farm")
+    menus.list_menu_items("farm", "farm-a")
     assert ran.wait(timeout=10)
     assert threads[0] is not threading.main_thread() and threads[0].daemon
 
@@ -300,30 +264,34 @@ def test_logged_out_each_menu_shows_the_login_entry(scene: FakeHou, parm: str, s
     # Load the list with no working login, then read the menu again.
     menus: Menus = Menus(_SAVED)
     menus.api.status = status
-    menus.menus.list_menu_items(parm)
-    menus.run_jobs()
-    # The one entry keeps the saved ID, and no list call was made without a login.
     saved: str = _SAVED[f"defaults.{parm}_id"]
-    assert menus.menus.list_menu_items(parm) == [saved, _LOG_IN]
+    menus.menus.list_menu_items(parm, saved)
+    menus.run_jobs()
+    # The saved ID still comes first, and no list call was made without a login.
+    assert menus.menus.list_menu_items(parm, saved) == [saved, saved, *_LOG_IN_ENTRY]
     assert [name for name, _ in menus.api.calls] == ["check_authentication_status"]
 
 
 def test_a_failed_fetch_shows_its_error_in_the_menu(scene: FakeHou) -> None:
     """A list that fails in the background has nowhere else to show its error."""
-    # The farm list fails, then the menu shows one entry naming the error.
+    # The farm list fails, then the menu shows the saved farm and one entry naming the error.
     menus: Menus = Menus(_SAVED)
     menus.api.error = RuntimeError("throttled")
-    menus.menus.list_menu_items("farm")
+    menus.menus.list_menu_items("farm", "farm-a")
     menus.run_jobs()
-    entry: List[str] = menus.menus.list_menu_items("farm")
-    assert entry[0] == "farm-a" and len(entry) == 2
-    assert "throttled" in entry[1]
+    entry: List[str] = menus.menus.list_menu_items("farm", "farm-a")
+    assert entry[:3] == ["farm-a", "farm-a", "__list_error__"] and len(entry) == 4
+    assert "throttled" in entry[3]
 
 
 def test_with_no_farm_the_queue_menu_asks_for_one_and_fetches_nothing(scene: FakeHou) -> None:
     """Queues are listed per farm, so with no farm there is nothing to list."""
     menus: Menus = Menus({})
-    assert menus.menus.list_menu_items("queue") == ["", "Choose a farm first"]
+    assert menus.menus.list_menu_items("queue", "") == [
+        "",
+        _NONE_SELECTED,
+        *_CHOOSE_A_FARM_ENTRY,
+    ]
     assert menus.jobs == []
 
 
@@ -331,8 +299,8 @@ def _loaded(settings: Dict[str, str]) -> Menus:
     """Menus with the farm list and the saved farm's queue list loaded."""
     # Each menu starts its list, the jobs fill them, and the main thread takes what they queued.
     menus: Menus = Menus(settings)
-    menus.menus.list_menu_items("farm")
-    menus.menus.list_menu_items("queue")
+    menus.menus.list_menu_items("farm", "")
+    menus.menus.list_menu_items("queue", "")
     menus.run_jobs()
     menus.run_deferred()
     return menus
@@ -345,7 +313,7 @@ def test_a_farm_pick_saves_as_select_farm_does_clears_its_queues_then_updates(
     menus: Menus = _loaded(_SAVED)
     # Load farm-b's queues too, so the pick has a list to clear.
     menus.config.settings["defaults.farm_id"] = "farm-b"
-    menus.menus.list_menu_items("queue")
+    menus.menus.list_menu_items("queue", "")
     menus.run_jobs()
     # Pick farm-b, recording what was saved when the update runs.
     menus.config.settings["defaults.farm_id"] = "farm-a"
@@ -362,7 +330,7 @@ def test_a_farm_pick_saves_as_select_farm_does_clears_its_queues_then_updates(
     ]
     # The update ran once, after every write, and the new farm's queues load again.
     assert saved_before_update == [menus.config.writes]
-    assert menus.menus.list_menu_items("queue") == ["", _LOADING]
+    assert menus.menus.list_menu_items("queue", "") == ["", _NONE_SELECTED, *_LOADING_ENTRY]
     assert len(menus.jobs) == 1
 
 
@@ -381,30 +349,51 @@ def test_a_queue_pick_saves_as_select_queue_does_then_updates(scene: FakeHou) ->
     assert updates == [expected]
 
 
-@pytest.mark.parametrize("logged_in", [True, False], ids=["loading", "login entry"])
-@pytest.mark.parametrize("parm", ["farm", "queue"])
-def test_picking_a_loading_or_login_entry_does_nothing(
-    scene: FakeHou, parm: str, logged_in: bool
+@pytest.mark.parametrize(
+    "parm, settings, status, error, token",
+    [
+        ("farm", _SAVED, FakeAuthenticationStatus.AUTHENTICATED, None, "__loading__"),
+        ("queue", _SAVED, FakeAuthenticationStatus.AUTHENTICATED, None, "__loading__"),
+        ("farm", _SAVED, FakeAuthenticationStatus.NEEDS_LOGIN, None, "__log_in__"),
+        ("queue", _SAVED, FakeAuthenticationStatus.NEEDS_LOGIN, None, "__log_in__"),
+        (
+            "farm",
+            _SAVED,
+            FakeAuthenticationStatus.AUTHENTICATED,
+            RuntimeError("x"),
+            "__list_error__",
+        ),
+        ("queue", {}, FakeAuthenticationStatus.AUTHENTICATED, None, "__choose_a_farm__"),
+    ],
+    ids=["farm loading", "queue loading", "farm login", "queue login", "error", "no farm"],
+)
+def test_picking_a_placeholder_entry_saves_nothing(
+    scene: FakeHou,
+    parm: str,
+    settings: Dict[str, str],
+    status: str,
+    error: Optional[Exception],
+    token: str,
 ) -> None:
     """Those entries aren't a farm or queue, so a pick must not save them or run the update."""
-    # Show the Loading entry, or load the list without a login to show the login entry.
-    menus: Menus = Menus(_SAVED)
-    menus.api.status = (
-        FakeAuthenticationStatus.AUTHENTICATED
-        if logged_in
-        else FakeAuthenticationStatus.NEEDS_LOGIN
-    )
-    menus.menus.list_menu_items(parm)
-    if not logged_in:
+    # Show the Loading entry, or load the list first to show the login or error entry.
+    menus: Menus = Menus(settings)
+    menus.api.status = status
+    menus.api.error = error
+    saved: str = settings.get(f"defaults.{parm}_id", "")
+    menus.menus.list_menu_items(parm, saved)
+    if token != "__loading__":
         menus.run_jobs()
+    items: List[str] = menus.menus.list_menu_items(parm, saved)
+    assert items[2] == token
     # Houdini sets the parm to the entry's token, then runs the callback.
-    node: FakeNode = FakeNode("farm-a", "queue-a")
-    node.parm(parm).set(menus.menus.list_menu_items(parm)[0])
-    # Nothing is saved or updated, and the parm holds the saved ID.
+    node: FakeNode = FakeNode(settings.get("defaults.farm_id", ""), saved)
+    node.parm(parm).set(token)
     updates: List[str] = []
     menus.menus.save_pick(node, parm, lambda: updates.append("update"))
+    # Nothing is saved or updated, and the parm holds the saved ID again.
     assert menus.config.writes == [] and updates == []
-    assert node.parm(parm).evalAsString() == _SAVED[f"defaults.{parm}_id"]
+    assert node.parm(parm).evalAsString() == saved
 
 
 def test_picking_the_saved_farm_again_keeps_its_queue(scene: FakeHou) -> None:
@@ -437,6 +426,79 @@ def test_show_saved_ids_puts_back_an_empty_queue_after_the_rop_wrote_none_select
     assert node.parm("queue").evalAsString() == ""
 
 
+@pytest.mark.parametrize("parm", ["farm", "queue"])
+def test_the_rops_update_names_the_saved_ids_in_the_menus(scene: FakeHou, parm: str) -> None:
+    """The ROP's update reads each name, so a menu can show it before its own list loads."""
+    # The ROP's update wrote both names, then the IDs go back, before any list has loaded.
+    menus: Menus = Menus(_SAVED)
+    menus.menus.show_saved_ids(FakeNode("Main Farm", "Renders Queue"))
+    saved: str = _SAVED[f"defaults.{parm}_id"]
+    name: str = "Main Farm" if parm == "farm" else "Renders Queue"
+    assert menus.menus.list_menu_items(parm, saved)[:2] == [saved, name]
+
+
+@pytest.mark.parametrize(
+    "written",
+    ["<refreshing>", _NONE_SELECTED, "farm-a", ""],
+    ids=["refreshing", "none selected", "the id", "empty"],
+)
+def test_the_rops_own_text_or_the_id_is_never_taken_as_a_name(scene: FakeHou, written: str) -> None:
+    """The ROP writes these when it can't read the name or its update stopped early.
+
+    Taken as a name, the menu would show "<refreshing>" for the saved farm until its list loads.
+    """
+    menus: Menus = Menus(_SAVED)
+    menus.menus.show_saved_ids(FakeNode(written, ""))
+    assert menus.menus.list_menu_items("farm", "farm-a")[:2] == ["farm-a", "farm-a"]
+
+
+def test_after_a_reload_each_menu_names_the_saved_ids_before_the_new_lists_land(
+    scene: FakeHou,
+) -> None:
+    """After Update Queue Parameters, both menus stayed on Loading... once their lists landed.
+
+    Houdini doesn't run the menu script again when a list lands, so its first run must already
+    show the saved farm and queue by name.
+    """
+    # Both lists loaded once, then Update Queue Parameters reloads them, and they haven't landed.
+    menus: Menus = _loaded(_SAVED)
+    menus.menus.load_lists(reload=True)
+    assert len(menus.jobs) == 2
+    assert menus.menus.list_menu_items("farm", "farm-a") == ["farm-a", "alpha", *_LOADING_ENTRY]
+    assert menus.menus.list_menu_items("queue", "queue-a") == [
+        "queue-a",
+        "Renders",
+        *_LOADING_ENTRY,
+    ]
+
+
+def test_a_reload_keeps_the_names_the_rops_update_wrote(scene: FakeHou) -> None:
+    """A reload drops the lists for a new login, but a name seen for an ID is still that ID's name."""
+    # The ROP's update names both IDs, then the lists reload before any fetch lands.
+    menus: Menus = Menus(_SAVED)
+    menus.menus.show_saved_ids(FakeNode("Main Farm", "Renders Queue"))
+    menus.menus.load_lists(reload=True)
+    assert menus.menus.list_menu_items("farm", "farm-a")[:2] == ["farm-a", "Main Farm"]
+
+
+def test_after_a_farm_pick_the_queue_menu_shows_none_selected_while_it_loads(
+    scene: FakeHou,
+) -> None:
+    """After a farm pick, Queue stayed on Loading... once the new farm's queues landed."""
+    # Pick farm-b with both lists loaded. Its queues are loading, and Queue holds no queue.
+    menus: Menus = _loaded(_SAVED)
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    scene.instances = [node]
+    _pick_farm(menus, node, "farm-b")
+    assert len(menus.jobs) == 1
+    assert menus.menus.list_menu_items("queue", node.parm("queue").evalAsString()) == [
+        "",
+        _NONE_SELECTED,
+        *_LOADING_ENTRY,
+    ]
+    assert _shown_queue(menus, node) == _NONE_SELECTED
+
+
 def test_load_starts_both_fetches_and_reload_starts_them_again(scene: FakeHou) -> None:
     """Create and load start the lists early, and Update Queue Parameters reads them again."""
     # The first load starts the farm list and the saved farm's queue list.
@@ -449,7 +511,7 @@ def test_load_starts_both_fetches_and_reload_starts_them_again(scene: FakeHou) -
     assert menus.jobs == []
     menus.menus.load_lists(reload=True)
     assert len(menus.jobs) == 2
-    assert menus.menus.list_menu_items("farm") == ["farm-a", _LOADING]
+    assert menus.menus.list_menu_items("farm", "farm-a")[2:] == _LOADING_ENTRY
 
 
 def test_without_a_ui_nothing_is_fetched_or_watched(scene: FakeHou) -> None:
@@ -458,9 +520,9 @@ def test_without_a_ui_nothing_is_fetched_or_watched(scene: FakeHou) -> None:
     scene.ui = False
     menus: Menus = Menus(_SAVED)
     menus.menus.load_lists()
-    menus.menus.list_menu_items("farm")
+    menus.menus.list_menu_items("farm", "farm-a")
     assert menus.jobs == [] and scene.selection_callbacks == []
-    assert menus.deferred == [] and menus.redraws == []
+    assert menus.deferred == []
 
 
 def _item(type_name: str) -> Any:
@@ -484,16 +546,16 @@ def test_selecting_a_scheduler_node_starts_the_fetch(scene: FakeHou) -> None:
     scene.selection_callbacks[0]([_item("geo"), _item("deadlinecloudscheduler")])
     assert len(menus.jobs) == 1
     menus.run_jobs()
-    assert menus.menus.list_menu_items("queue")[2:] == ["queue-y", "Comp", "queue-z", "Sims"]
+    assert menus.menus.list_menu_items("queue", "")[2:] == ["queue-y", "Comp", "queue-z", "Sims"]
 
 
 def _shown_queue(menus: Menus, node: FakeNode) -> str:
     """The Queue label Houdini shows: the entry whose token the parm holds, else the first entry."""
     # Houdini's menu list alternates tokens and labels, and a value that is no token shows the
     # first label, which made Queue look set to the first queue when it held none.
-    items: List[str] = menus.menus.list_menu_items("queue")
-    labels: Dict[str, str] = dict(zip(items[::2], items[1::2]))
     value: str = node.parm("queue").evalAsString()
+    items: List[str] = menus.menus.list_menu_items("queue", value)
+    labels: Dict[str, str] = dict(zip(items[::2], items[1::2]))
     return labels.get(value, items[1])
 
 
@@ -539,6 +601,18 @@ def test_a_loaded_queue_list_sets_the_queue_on_the_main_thread_only(
     assert _shown_queue(menus, node) == label
 
 
+def test_a_landed_farm_list_queues_no_main_thread_job(scene: FakeHou) -> None:
+    """The farm menu shows the saved farm by itself, so the farm list has nothing to set."""
+    # Only the farm list loads, and only a queue list would queue a job.
+    menus: Menus = Menus(_SAVED)
+    menus.menus.list_menu_items("farm", "farm-a")
+    menus.run_jobs()
+    assert menus.deferred == []
+    menus.menus.list_menu_items("queue", "queue-a")
+    menus.run_jobs()
+    assert len(menus.deferred) == 1
+
+
 def test_without_a_ui_a_farm_pick_fetches_and_defers_nothing(scene: FakeHou) -> None:
     """hython has no menus to show, and hdefereval exists only with a UI."""
     # Load the lists with a UI, then pick a farm with none.
@@ -581,7 +655,7 @@ def test_a_list_for_a_farm_no_longer_saved_leaves_the_queue_alone(scene: FakeHou
 
 
 def test_a_login_entry_keeps_the_saved_queue_once_the_list_loads(scene: FakeHou) -> None:
-    """The login entry's token is the saved queue, so none selected would hide the way to log in."""
+    """A login entry is no list, so Queue keeps the saved queue and lists the login entry after it."""
     # Pick farm-b, log out, and save a queue before its list loads.
     menus: Menus = _loaded(_SAVED)
     node: FakeNode = FakeNode("farm-a", "queue-a")
@@ -591,19 +665,21 @@ def test_a_login_entry_keeps_the_saved_queue_once_the_list_loads(scene: FakeHou)
     menus.config.settings["defaults.queue_id"] = "queue-z"
     menus.run_jobs()
     menus.run_deferred()
-    assert _shown_queue(menus, node) == _LOG_IN
+    assert node.parm("queue").evalAsString() == "queue-z"
+    assert menus.menus.list_menu_items("queue", "queue-z") == ["queue-z", "queue-z", *_LOG_IN_ENTRY]
 
 
 def test_with_no_farm_the_farm_list_leaves_the_queue_alone(scene: FakeHou) -> None:
-    """With no farm, Queue shows Choose a farm first, and the farm list has no queues to show."""
+    """With no farm, Queue shows none selected and offers Choose a farm first, and nothing sets it."""
     # Load the farm list with no farm saved.
     menus: Menus = Menus({})
     node: FakeNode = FakeNode("", "")
     scene.instances = [node]
-    menus.menus.list_menu_items("farm")
+    menus.menus.list_menu_items("farm", "")
     menus.run_jobs()
     menus.run_deferred()
-    assert _shown_queue(menus, node) == "Choose a farm first"
+    assert node.parm("queue").sets == []
+    assert _shown_queue(menus, node) == _NONE_SELECTED
 
 
 def test_a_reload_before_the_main_thread_runs_leaves_the_queue_for_the_next_list(
@@ -645,7 +721,7 @@ def test_the_default_hand_off_queues_the_queue_set_for_every_node_and_returns(
     menus: FarmAndQueueMenus = FarmAndQueueMenus(
         api=FakeApi(), config=FakeConfig(_SAVED), start_thread=jobs.append
     )
-    menus.list_menu_items("queue")
+    menus.list_menu_items("queue", "")
     for job in jobs:
         job()
     # The fetch only queued the set, and the main thread's run of it sets both nodes.
@@ -662,122 +738,11 @@ def test_a_queue_that_already_shows_the_saved_queue_is_not_set_again(scene: Fake
     unchanged: FakeNode = FakeNode("farm-a", "queue-a")
     changed: FakeNode = FakeNode("farm-a", "queue-old")
     scene.instances = [unchanged, changed]
-    menus.menus.list_menu_items("queue")
+    menus.menus.list_menu_items("queue", "queue-a")
     menus.run_jobs()
     menus.run_deferred()
     assert unchanged.parm("queue").sets == []
     assert changed.parm("queue").sets == ["queue-a"]
-
-
-@pytest.mark.parametrize("parm", ["farm", "queue"])
-def test_a_loaded_list_queues_one_main_thread_job_that_redraws_the_menus_once(
-    scene: FakeHou, parm: str
-) -> None:
-    """Queue showed Loading... until clicked, since a list landing never told Houdini to redraw."""
-    # The fetch thread only queues the job, and the main thread's run of it redraws once.
-    menus: Menus = Menus(_SAVED)
-    menus.menus.list_menu_items(parm)
-    menus.run_jobs()
-    assert len(menus.deferred) == 1 and menus.redraws == []
-    menus.run_deferred()
-    assert len(menus.redraws) == 1
-
-
-def test_an_unchanged_queue_is_not_set_and_the_menus_still_redraw(scene: FakeHou) -> None:
-    """A set may mark a scene unsaved, so the label must update by a redraw, not by a set."""
-    # The node already holds the saved queue when its list lands.
-    menus: Menus = Menus(_SAVED)
-    node: FakeNode = FakeNode("farm-a", "queue-a")
-    scene.instances = [node]
-    menus.watched = [node]
-    menus.menus.list_menu_items("queue")
-    menus.run_jobs()
-    menus.run_deferred()
-    assert node.parm("queue").sets == []
-    assert menus.redraws == [["queue-a"]]
-
-
-def test_a_changed_queue_is_set_before_the_menus_redraw(scene: FakeHou) -> None:
-    """A redraw before the set would draw the old queue's label until the next redraw."""
-    # The node holds an old queue, so the job sets the saved one, then redraws.
-    menus: Menus = Menus(_SAVED)
-    node: FakeNode = FakeNode("farm-a", "queue-old")
-    scene.instances = [node]
-    menus.watched = [node]
-    menus.menus.list_menu_items("queue")
-    menus.run_jobs()
-    menus.run_deferred()
-    assert node.parm("queue").sets == ["queue-a"]
-    assert menus.redraws == [["queue-a"]]
-
-
-def _default_redraw_menus(scene: FakeHou) -> Tuple[FarmAndQueueMenus, List[Callable[[], None]]]:
-    """Menus with the default redraw, both lists loaded, and their main-thread jobs not yet run."""
-    # The fetch jobs run here, and the main-thread jobs are returned for the test to run.
-    jobs: List[Callable[[], None]] = []
-    deferred: List[Callable[[], None]] = []
-    menus: FarmAndQueueMenus = FarmAndQueueMenus(
-        api=FakeApi(),
-        config=FakeConfig(_SAVED),
-        start_thread=jobs.append,
-        run_later_on_main_thread=deferred.append,
-    )
-    menus.load_lists()
-    for job in jobs:
-        job()
-    return menus, deferred
-
-
-def test_the_default_redraw_points_a_parameters_pane_at_the_network_then_back_at_its_node(
-    scene: FakeHou,
-) -> None:
-    """Pointing a Parameters pane at the node it already shows didn't redraw the menu labels.
-
-    Pointing it away and back rebuilds the pane. ``pick_node=False`` keeps the selection, and
-    no parm is set, since a set could mark the scene unsaved.
-    """
-    # The node already shows the saved queue, so nothing but the redraws should happen.
-    node: FakeNode = FakeNode("farm-a", "queue-a")
-    scene.instances = [node]
-    pane: FakePaneTab = FakePaneTab("Parm", node)
-    scene.pane_tabs = [pane]
-    _, deferred = _default_redraw_menus(scene)
-    for job in deferred:
-        job()
-    # One redraw for each of the two lists, each away to the network and back to the node.
-    away_and_back: List[Tuple[Any, bool]] = [(_NETWORK, False), (node, False)]
-    assert pane.pointed_at == away_and_back * 2 and pane.currentNode() is node
-    assert node.parm("farm").sets == [] and node.parm("queue").sets == []
-
-
-@pytest.mark.parametrize(
-    "pane_type, shown",
-    [("Parm", _item("geo")), ("Parm", None), ("NetworkEditor", FakeNode("farm-a", "queue-a"))],
-    ids=["another node", "no node", "not a parameters pane"],
-)
-def test_the_default_redraw_leaves_other_panes_alone(
-    scene: FakeHou, pane_type: str, shown: Any
-) -> None:
-    """Re-pointing any other pane would reset what the artist was looking at in it."""
-    # A pane showing another node, or nothing, or a network, next to the lists loading.
-    pane: FakePaneTab = FakePaneTab(pane_type, shown)
-    scene.pane_tabs = [pane]
-    _, deferred = _default_redraw_menus(scene)
-    for job in deferred:
-        job()
-    assert pane.pointed_at == [] and pane.currentNode() is shown
-
-
-def test_the_default_redraw_does_nothing_without_a_ui(scene: FakeHou) -> None:
-    """hython has no menus to redraw, and its hou.ui may be missing."""
-    # The lists load with a UI, and the UI is gone when the main-thread jobs run.
-    pane: FakePaneTab = FakePaneTab("Parm", FakeNode("farm-a", "queue-a"))
-    scene.pane_tabs = [pane]
-    _, deferred = _default_redraw_menus(scene)
-    scene.ui = False
-    for job in deferred:
-        job()
-    assert pane.pointed_at == []
 
 
 @pytest.mark.parametrize("parm", ["farm", "queue"])
@@ -786,7 +751,7 @@ def test_a_loaded_menu_starts_with_a_none_selected_entry_whose_token_is_empty(
 ) -> None:
     """With no entry for an empty value, Houdini showed the first farm or queue as if it were set."""
     menus: Menus = _loaded(_SAVED)
-    assert menus.menus.list_menu_items(parm)[:2] == ["", _NONE_SELECTED]
+    assert menus.menus.list_menu_items(parm, "")[:2] == ["", _NONE_SELECTED]
 
 
 def test_a_farm_with_no_queues_lists_only_the_none_selected_entry(scene: FakeHou) -> None:
@@ -794,9 +759,9 @@ def test_a_farm_with_no_queues_lists_only_the_none_selected_entry(scene: FakeHou
     # farm-a lists no queues, and its empty list loads.
     menus: Menus = Menus({"defaults.farm_id": "farm-a"})
     menus.api.queues["farm-a"] = []
-    menus.menus.list_menu_items("queue")
+    menus.menus.list_menu_items("queue", "")
     menus.run_jobs()
-    assert menus.menus.list_menu_items("queue") == ["", _NONE_SELECTED]
+    assert menus.menus.list_menu_items("queue", "") == ["", _NONE_SELECTED]
 
 
 @pytest.mark.parametrize("farms", [["farm-b"], ["farm-b", "farm-a"]], ids=["farm", "and back"])
@@ -855,45 +820,47 @@ def test_picking_none_selected_saves_nothing(scene: FakeHou, parm: str, saved_qu
     assert node.parm(parm).evalAsString() == settings[f"defaults.{parm}_id"]
 
 
-# -- the menus' INFO log lines ---------------------------------------------------
+# -- the menus' log lines --------------------------------------------------------
 
 #: The package logger the artist sets to INFO in Houdini's Python Shell to see these lines.
 _PACKAGE_LOGGER: str = "deadline.houdini_pdg"
 _PREFIX: str = "Farm and Queue menus: "
 
 
-def _menu_lines(caplog: pytest.LogCaptureFixture, part: str = "") -> List[str]:
-    """The menus' INFO lines, without their prefix, that contain ``part``."""
-    # Only INFO lines from the host module's logger count, as the console would show them.
+def _menu_lines(
+    caplog: pytest.LogCaptureFixture, part: str = "", level: int = logging.INFO
+) -> List[str]:
+    """The menus' lines at ``level``, without their prefix, that contain ``part``."""
+    # Only lines from the host module's logger count, as the console would show them.
     lines: List[str] = [
         record.getMessage()[len(_PREFIX) :]
         for record in caplog.records
         if record.name == "deadline.houdini_pdg.houdini.host"
-        and record.levelno == logging.INFO
+        and record.levelno == level
         and record.getMessage().startswith(_PREFIX)
     ]
     return [line for line in lines if part in line]
 
 
-def test_starting_and_landing_a_fetch_log_the_list_and_its_count(
+def test_a_fetch_logs_one_info_line_when_it_lands_and_its_start_only_at_debug(
     scene: FakeHou, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The artist's console must show whether each fetch started and landed, to find where it stops.
+    """The console must show each fetch that landed, without a line for every step around it.
 
     Setting only the package logger to INFO must be enough, as in the Python Shell.
     """
-    # Both lists start and land, with the package logger at INFO and nothing else set.
-    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    # Both lists start and land, with the package logger at DEBUG and nothing else set.
+    caplog.set_level(logging.DEBUG, logger=_PACKAGE_LOGGER)
     menus: Menus = Menus(_SAVED)
     menus.menus.load_lists()
     menus.run_jobs()
-    assert _menu_lines(caplog, "loading the") == [
-        "started loading the farms.",
-        "started loading the queues of farm farm-a.",
-    ]
-    assert _menu_lines(caplog, "loaded the") == [
+    assert _menu_lines(caplog) == [
         "loaded the farms: 2 item(s).",
         "loaded the queues of farm farm-a: 1 item(s).",
+    ]
+    assert _menu_lines(caplog, "loading the", logging.DEBUG) == [
+        "started loading the farms.",
+        "started loading the queues of farm farm-a.",
     ]
 
 
@@ -902,11 +869,11 @@ def test_a_fetch_already_loading_logs_no_second_start(
 ) -> None:
     """A start line for a fetch that never ran would point the search at the wrong place."""
     # The second load finds both lists loading, so it starts nothing and logs nothing.
-    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    caplog.set_level(logging.DEBUG, logger=_PACKAGE_LOGGER)
     menus: Menus = Menus(_SAVED)
     menus.menus.load_lists()
     menus.menus.load_lists()
-    assert len(_menu_lines(caplog, "started loading")) == 2
+    assert len(_menu_lines(caplog, "started loading", logging.DEBUG)) == 2
 
 
 @pytest.mark.parametrize(
@@ -931,36 +898,12 @@ def test_a_landed_fetch_logs_the_login_or_error_entry(
     if not logged_in:
         menus.api.status = FakeAuthenticationStatus.NEEDS_LOGIN
     menus.api.error = error
-    menus.menus.list_menu_items("farm")
+    menus.menus.list_menu_items("farm", "farm-a")
     menus.run_jobs()
     assert _menu_lines(caplog, "loaded the") == [f"loaded the farms: {landed}."]
 
 
-def test_the_main_thread_job_logs_its_list_and_what_the_cache_holds(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A job that runs while the cache is empty again would leave the menus on Loading..."""
-    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
-    # Only the queue menu asks, so the farm list was never started.
-    menus: Menus = Menus(_SAVED)
-    scene.instances = [FakeNode("farm-a", "queue-a")]
-    menus.menus.list_menu_items("queue")
-    menus.run_jobs()
-    menus.run_deferred()
-    # Then both lists reload, and only the farm list lands before its main-thread job runs.
-    menus.menus.load_lists(reload=True)
-    farms_job: Callable[[], None] = menus.jobs[0]
-    farms_job()
-    menus.run_deferred()
-    assert _menu_lines(caplog, "main thread") == [
-        "the main thread shows the queues of farm farm-a. The cache holds farms missing,"
-        " and queues of farm 'farm-a' loaded with 1 item(s).",
-        "the main thread shows the farms. The cache holds farms loaded with 2 item(s),"
-        " and queues of farm 'farm-a' loading.",
-    ]
-
-
-def test_showing_the_saved_queue_logs_the_value_and_the_nodes_it_set(
+def test_showing_the_saved_queue_logs_the_value_and_the_nodes_it_set_at_debug(
     scene: FakeHou, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The line must tell a Queue left unset apart from one set, and from a list that was skipped."""
@@ -972,13 +915,14 @@ def test_showing_the_saved_queue_logs_the_value_and_the_nodes_it_set(
     _pick_farm(menus, changed, "farm-b")
     menus.config.settings["defaults.queue_id"] = "queue-y"
     unchanged.parm("queue").set("queue-y")
-    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    caplog.set_level(logging.DEBUG, logger=_PACKAGE_LOGGER)
     caplog.clear()
     menus.run_jobs()
     menus.run_deferred()
-    assert _menu_lines(caplog, "saved farm") == [
+    assert _menu_lines(caplog, "saved farm", logging.DEBUG) == [
         "saved farm 'farm-b', queue 'queue-y'. Queue shows 'queue-y', set on 1 node(s)."
     ]
+    assert _menu_lines(caplog, "saved farm") == []
 
 
 @pytest.mark.parametrize(
@@ -1003,154 +947,84 @@ def test_a_skipped_queue_list_logs_why_no_node_is_set(
         menus.menus.load_lists(reload=True)
     else:
         _pick_farm(menus, node, "farm-a")
-    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    caplog.set_level(logging.DEBUG, logger=_PACKAGE_LOGGER)
     caplog.clear()
     menus.run_deferred()
     saved_farm: str = "farm-b" if reload else "farm-a"
-    assert _menu_lines(caplog, "saved farm") == [f"saved farm '{saved_farm}', queue ''. {line}"]
+    assert _menu_lines(caplog, "saved farm", logging.DEBUG) == [
+        f"saved farm '{saved_farm}', queue ''. {line}"
+    ]
 
 
-def test_the_redraw_logs_the_panes_it_saw_and_the_one_it_re_pointed(
+def _logged_menu(
+    menus: Menus, parm: str, current: str, caplog: pytest.LogCaptureFixture
+) -> List[str]:
+    """The INFO lines that one call of ``parm``'s menu logs."""
+    caplog.clear()
+    menus.menus.list_menu_items(parm, current)
+    return _menu_lines(caplog)
+
+
+def test_each_menu_call_logs_one_line_naming_its_entries_and_the_shown_label(
     scene: FakeHou, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The console must show whether the redraw found the artist's Parameters pane at all."""
-    # A Parameters pane on the scheduler node, and a network editor, for one list landing.
-    node: FakeNode = FakeNode("farm-a", "queue-a")
-    scene.instances = [node]
-    scene.pane_tabs = [
-        FakePaneTab("Parm", node, "parameditor1"),
-        FakePaneTab("NetworkEditor", node, "networkeditor1"),
-    ]
-    _, deferred = _default_redraw_menus(scene)
+    """A menu that shows the wrong label for its value would show here, with what it listed."""
     caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
-    caplog.clear()
-    deferred[0]()
-    assert _menu_lines(caplog, "pane") == [
-        "the redraw sees 2 pane tabs.",
-        "pane parameditor1 shows /obj/topnet1/scheduler1, so the redraw calls"
-        " setCurrentNode(/obj/topnet1, pick_node=False), then"
-        " setCurrentNode(/obj/topnet1/scheduler1, pick_node=False).",
-        "1 of 2 pane tabs show a scheduler node.",
-    ]
-    # setCurrentNode returns None when it works, so that alone is not logged.
-    assert _menu_lines(caplog, "returned None") == []
-
-
-def test_the_redraw_logs_each_call_that_failed_or_returned_none(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A redraw call that fails is otherwise only a debug line, so the console would show nothing."""
-    # A Parameters pane with no node, one whose type fails, and one whose setCurrentNode fails.
-    node: FakeNode = FakeNode("farm-a", "queue-a")
-    empty: FakePaneTab = FakePaneTab("Parm", None)
-    no_type: FakePaneTab = FakePaneTab("Parm", node)
-    no_redraw: FakePaneTab = FakePaneTab("Parm", node)
-
-    # A pane call that raises, as Houdini's does for a pane that was closed.
-    def fail(*_args: Any, **_kwargs: Any) -> Any:
-        raise RuntimeError("pane closed")
-
-    # The failing calls replace the fakes' methods, and one list lands.
-    setattr(no_type, "type", fail)
-    setattr(no_redraw, "setCurrentNode", fail)
-    scene.pane_tabs = [empty, no_type, no_redraw]
-    _, deferred = _default_redraw_menus(scene)
-    caplog.set_level(logging.DEBUG, logger=_PACKAGE_LOGGER)
-    caplog.clear()
-    deferred[0]()
-    # Each failure also keeps its traceback at DEBUG, as every other pane call's does.
-    assert any(r.levelno == logging.DEBUG and r.exc_info for r in caplog.records)
-    problems: List[str] = [
-        line for line in _menu_lines(caplog) if " failed: " in line or "returned None" in line
-    ]
-    assert problems == [
-        "pane.currentNode() returned None.",
-        "node.type() failed: 'NoneType' object has no attribute 'type'",
-        "node.type().name() failed: 'NoneType' object has no attribute 'name'",
-        "pane.type() failed: pane closed",
-        "pane.setCurrentNode(parent) failed: pane closed",
-        "pane.setCurrentNode(node) failed: pane closed",
-    ]
-
-
-def test_the_redraw_logs_when_hou_ui_cannot_list_the_panes(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture
-) -> None:
-    """With no pane list nothing is redrawn, and the console must show why."""
-    # The fake's paneTabs raises on a missing list, as a broken hou.ui would.
-    _, deferred = _default_redraw_menus(scene)
-    setattr(scene, "pane_tabs", None)
-    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
-    caplog.clear()
-    deferred[0]()
-    assert _menu_lines(caplog, "hou.ui") == [
-        "hou.ui.paneTabs() failed: 'NoneType' object is not iterable"
-    ]
-    assert _menu_lines(caplog, "pane tabs") == [
-        "the redraw sees 0 pane tabs.",
-        "0 of 0 pane tabs show a scheduler node.",
-    ]
-
-
-def test_the_redraw_logs_that_hython_has_nothing_to_redraw(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A session that lost its UI redraws nothing, and the line says so instead of a pane count."""
-    # The lists load with a UI, and the UI is gone when the first main-thread job runs.
-    _, deferred = _default_redraw_menus(scene)
-    scene.ui = False
-    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
-    caplog.clear()
-    deferred[0]()
-    assert _menu_lines(caplog, "redraw") == ["no UI, so nothing to redraw."]
-
-
-def _logged_menu(menus: Menus, parm: str, caplog: pytest.LogCaptureFixture) -> List[str]:
-    """The menu lines that one call of ``parm``'s menu logs."""
-    caplog.clear()
-    menus.menus.list_menu_items(parm)
-    return _menu_lines(caplog, "menu returned")
-
-
-def test_each_menu_call_logs_one_line_naming_what_it_returned(
-    scene: FakeHou, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A menu stuck on Loading... while its list is loaded would show here as the placeholder."""
-    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
-    # Before and after the lists load, and with no farm saved.
+    # Before and after the lists load, with a value no entry has, and with no farm saved.
     menus: Menus = Menus(_SAVED)
-    assert _logged_menu(menus, "farm", caplog) == [
-        'the farm menu returned the placeholder "Loading...".'
+    assert _logged_menu(menus, "farm", "farm-a", caplog) == [
+        "the farm menu shows \"Loading...\", and its value 'farm-a' shows as 'farm-a'."
     ]
     menus.run_jobs()
-    assert _logged_menu(menus, "farm", caplog) == [
-        "the farm menu returned the loaded list of 2 item(s)."
+    assert _logged_menu(menus, "farm", "farm-a", caplog) == [
+        "the farm menu shows the loaded list of 2 item(s), and its value 'farm-a' shows as 'alpha'."
+    ]
+    assert _logged_menu(menus, "farm", "farm-gone", caplog) == [
+        "the farm menu shows the loaded list of 2 item(s), and its value 'farm-gone' shows as"
+        " no entry."
     ]
     menus.config.settings["defaults.farm_id"] = ""
-    assert _logged_menu(menus, "queue", caplog) == [
-        'the queue menu returned the placeholder "Choose a farm first".'
+    assert _logged_menu(menus, "queue", "", caplog) == [
+        "the queue menu shows \"Choose a farm first\", and its value '' shows as"
+        " '<none selected>'."
     ]
 
 
-@pytest.mark.parametrize(
-    "logged_in, error, shown",
-    [(False, None, "the login entry"), (True, RuntimeError("no network"), "the error entry")],
-    ids=["login", "error"],
-)
-def test_a_menu_call_logs_the_login_or_error_entry(
-    scene: FakeHou,
-    caplog: pytest.LogCaptureFixture,
-    logged_in: bool,
-    error: Optional[Exception],
-    shown: str,
-) -> None:
-    """A loaded login or error entry is one entry, like a placeholder, and the line tells them apart."""
-    # Log out or break the farm list, let it land, then call the farm menu once.
+def test_a_menu_call_logs_the_login_entry(scene: FakeHou, caplog: pytest.LogCaptureFixture) -> None:
+    """A login entry is one entry, like a placeholder, and the line names it."""
+    # Log out, let the farm list land, then call the farm menu once.
     caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
     menus: Menus = Menus(_SAVED)
-    if not logged_in:
-        menus.api.status = FakeAuthenticationStatus.NEEDS_LOGIN
-    menus.api.error = error
-    menus.menus.list_menu_items("farm")
+    menus.api.status = FakeAuthenticationStatus.NEEDS_LOGIN
+    menus.menus.list_menu_items("farm", "farm-a")
     menus.run_jobs()
-    assert _logged_menu(menus, "farm", caplog) == [f"the farm menu returned {shown}."]
+    assert _logged_menu(menus, "farm", "farm-a", caplog) == [
+        f"the farm menu shows \"{_LOG_IN}\", and its value 'farm-a' shows as 'farm-a'."
+    ]
+
+
+def test_an_update_queue_parameters_click_logs_one_info_line_per_landing_and_menu_call(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every other line was diagnostic, and an INFO line on each step buried the ones that matter."""
+    # Both lists loaded, then the ROP's update writes the names, the IDs go back, and the lists
+    # reload. Houdini reads each menu once before the lists land and once after.
+    menus: Menus = _loaded(_SAVED)
+    node: FakeNode = FakeNode("Main Farm", "Main Queue")
+    scene.instances = [node]
+    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    caplog.clear()
+    menus.menus.show_saved_ids(node)
+    menus.menus.load_lists(reload=True)
+    menus.menus.list_menu_items("farm", "farm-a")
+    menus.menus.list_menu_items("queue", "queue-a")
+    menus.run_jobs()
+    menus.run_deferred()
+    menus.menus.list_menu_items("farm", "farm-a")
+    assert _menu_lines(caplog) == [
+        "the farm menu shows \"Loading...\", and its value 'farm-a' shows as 'Main Farm'.",
+        "the queue menu shows \"Loading...\", and its value 'queue-a' shows as 'Main Queue'.",
+        "loaded the farms: 2 item(s).",
+        "loaded the queues of farm farm-a: 1 item(s).",
+        "the farm menu shows the loaded list of 2 item(s), and its value 'farm-a' shows as 'alpha'.",
+    ]

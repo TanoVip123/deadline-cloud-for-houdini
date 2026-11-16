@@ -36,8 +36,10 @@ changes nothing. The Conda Packages and Conda Channels fields appear only for
 a queue whose queue environments define them.
 
 The menus load their lists in the background, when you select the node or
-open a menu, and show __Loading...__ until the lists arrive. They load only
-while you're logged in. If you aren't, each menu says to log in. Log in
+open a menu. Until its list arrives, a menu shows the saved farm or queue and
+lists __Loading...__ under it. It shows the saved one by name, or by its ID
+when neither a list nor the node's update has read the name yet. The lists
+load only while you're logged in. If you aren't, each menu says to log in. Log in
 outside Houdini, with Deadline Cloud Monitor or by running
 `deadline auth login` in a terminal, then click __Update Queue Parameters__
 to load the lists again. A list that fails to load shows its error in the

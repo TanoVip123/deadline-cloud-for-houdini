@@ -86,7 +86,7 @@
                 default { "" }
                 menu {
                     [ "from deadline.houdini_pdg.houdini.host import farm_and_queue_menus" ]
-                    [ "return farm_and_queue_menus.list_menu_items('farm')" ]
+                    [ "return farm_and_queue_menus.list_menu_items('farm', kwargs['parm'].evalAsString())" ]
                     language python
                 }
                 parmtag { "script_callback" "hou.phm().callback(kwargs)" }
@@ -100,7 +100,7 @@
                 default { "" }
                 menu {
                     [ "from deadline.houdini_pdg.houdini.host import farm_and_queue_menus" ]
-                    [ "return farm_and_queue_menus.list_menu_items('queue')" ]
+                    [ "return farm_and_queue_menus.list_menu_items('queue', kwargs['parm'].evalAsString())" ]
                     language python
                 }
                 parmtag { "script_callback" "hou.phm().callback(kwargs)" }
