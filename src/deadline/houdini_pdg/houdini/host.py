@@ -1376,7 +1376,15 @@ def _redraw_menus() -> None:
     """Have Houdini draw the Farm and Queue menu labels again, without setting a parm."""
     # hython has no menus to draw.
     if hou.isUIAvailable():
-        _call(hou.ui, "triggerUpdate")
+        # Houdini redraws a Parameters pane's menus when the pane is pointed at its node again.
+        # Only a pane already showing a scheduler node is touched, so no pane shows another node.
+        for pane in _call(hou.ui, "paneTabs") or ():
+            node: Any = _call(pane, "currentNode")
+            if (
+                _call(pane, "type") == hou.paneTabType.Parm
+                and _call(_call(node, "type"), "name") == _NODE_TYPE
+            ):
+                _call(pane, "setCurrentNode", node)
 
 
 class FarmAndQueueMenus:
@@ -1429,8 +1437,8 @@ class FarmAndQueueMenus:
         entries: List[Tuple[str, str]] = loaded if loaded is not None else [("", placeholder)]
         # A list of farms or queues starts with an entry for no choice, since Houdini shows the
         # first entry when the value matches no token, as an empty saved queue would.
-        listed: bool = loaded is not None and all(entry_id for entry_id, _ in loaded)
-        none_selected: List[str] = ["", _NONE_SELECTED_TEXT] if listed else []
+        has_choices: bool = loaded is not None and all(entry_id for entry_id, _ in loaded)
+        none_selected: List[str] = ["", _NONE_SELECTED_TEXT] if has_choices else []
         # An entry with no ID keeps the saved ID as its token, so showing it changes no value.
         saved: str = get_workstation_setting(f"defaults.{parm_name}_id", self._config)
         items: List[str] = none_selected + [

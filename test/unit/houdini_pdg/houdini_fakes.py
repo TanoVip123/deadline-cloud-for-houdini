@@ -428,8 +428,10 @@ class FakeHou:
     file_references: List[Tuple[Any, str]] = field(default_factory=list)
     instances: List[Any] = field(default_factory=list)
     libraries: Dict[str, str] = field(default_factory=dict)
-    #: The ``hou.ui.triggerUpdate`` calls. Only the Farm and Queue menus' redraw makes them.
+    #: The ``hou.ui.triggerUpdate`` calls, which nothing should make.
     updates: int = 0
+    #: The pane tabs ``hou.ui.paneTabs`` lists, in order.
+    pane_tabs: List[Any] = field(default_factory=list)
     #: The callbacks added with ``hou.ui.addSelectionCallback``, in order.
     selection_callbacks: List[Callable[[List[Any]], None]] = field(default_factory=list)
 
@@ -461,10 +463,12 @@ def install_hou(monkeypatch: pytest.MonkeyPatch, hip_file: str) -> FakeHou:
         "ui": types.SimpleNamespace(
             displayMessage=state.messages,
             triggerUpdate=state.trigger_update,
+            paneTabs=lambda: tuple(state.pane_tabs),
             addSelectionCallback=state.selection_callbacks.append,
             selectionCallbacks=lambda: tuple(state.selection_callbacks),
         ),
         "isUIAvailable": lambda: state.ui,
+        "paneTabType": types.SimpleNamespace(Parm="Parm", NetworkEditor="NetworkEditor"),
         "OperationFailed": OperationFailed,
         "fileReferences": lambda: list(state.file_references),
         "getenv": lambda name: os.environ.get(name),

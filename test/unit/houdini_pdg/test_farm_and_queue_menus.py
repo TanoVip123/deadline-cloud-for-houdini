@@ -108,6 +108,28 @@ class FakeNode:
     def parm(self, name: str) -> FakeParm:
         return self.parms[name]
 
+    def type(self) -> Any:
+        return types.SimpleNamespace(name=lambda: "deadlinecloudscheduler")
+
+
+class FakePaneTab:
+    """A ``hou.PaneTab`` of one type, showing one node, that records each node it's pointed at."""
+
+    def __init__(self, pane_type: str, node: Any) -> None:
+        self.pane_type: str = pane_type
+        self.node: Any = node
+        self.pointed_at: List[Any] = []
+
+    def type(self) -> str:
+        return self.pane_type
+
+    def currentNode(self) -> Any:
+        return self.node
+
+    def setCurrentNode(self, node: Any) -> None:
+        self.pointed_at.append(node)
+        self.node = node
+
 
 class Menus:
     """The menus under test, with the fakes they read and the background jobs they started."""
@@ -477,8 +499,8 @@ def test_a_farm_pick_starts_its_queue_fetch_at_once(scene: FakeHou) -> None:
 
 @pytest.mark.parametrize(
     "saved_queue, shown, label",
-    [("", "", _NONE_SELECTED), ("queue-y", "queue-y", "Comp")],
-    ids=["none", "listed"],
+    [("", "", _NONE_SELECTED), ("queue-y", "queue-y", "Comp"), ("queue-gone", "", _NONE_SELECTED)],
+    ids=["none", "listed", "unlisted"],
 )
 def test_a_loaded_queue_list_sets_the_queue_on_the_main_thread_only(
     scene: FakeHou, saved_queue: str, shown: str, label: str
@@ -688,28 +710,55 @@ def _default_redraw_menus(scene: FakeHou) -> Tuple[FarmAndQueueMenus, List[Calla
     return menus, deferred
 
 
-def test_the_default_redraw_asks_houdini_to_update_the_ui_and_sets_no_parm(
+def test_the_default_redraw_points_a_parameters_pane_at_its_scheduler_node_again(
     scene: FakeHou,
 ) -> None:
-    """The default must make Houdini redraw the labels, and a parm set could mark the scene unsaved."""
+    """Houdini redraws a menu label when its Parameters pane is pointed at the node again.
+
+    The label kept showing Loading... with only a UI update, and a parm set could mark the
+    scene unsaved, so the redraw re-points the pane at the same node and sets no parm.
+    """
     # The node already shows the saved queue, so nothing but the redraws should happen.
     node: FakeNode = FakeNode("farm-a", "queue-a")
     scene.instances = [node]
+    pane: FakePaneTab = FakePaneTab("Parm", node)
+    scene.pane_tabs = [pane]
     _, deferred = _default_redraw_menus(scene)
     for job in deferred:
         job()
-    assert scene.updates == 2
+    # One redraw for each of the two lists, each at the node the pane already showed.
+    assert pane.pointed_at == [node, node] and pane.currentNode() is node
     assert node.parm("farm").sets == [] and node.parm("queue").sets == []
+
+
+@pytest.mark.parametrize(
+    "pane_type, shown",
+    [("Parm", _item("geo")), ("Parm", None), ("NetworkEditor", FakeNode("farm-a", "queue-a"))],
+    ids=["another node", "no node", "not a parameters pane"],
+)
+def test_the_default_redraw_leaves_other_panes_alone(
+    scene: FakeHou, pane_type: str, shown: Any
+) -> None:
+    """Re-pointing any other pane would reset what the artist was looking at in it."""
+    # A pane showing another node, or nothing, or a network, next to the lists loading.
+    pane: FakePaneTab = FakePaneTab(pane_type, shown)
+    scene.pane_tabs = [pane]
+    _, deferred = _default_redraw_menus(scene)
+    for job in deferred:
+        job()
+    assert pane.pointed_at == [] and pane.currentNode() is shown
 
 
 def test_the_default_redraw_does_nothing_without_a_ui(scene: FakeHou) -> None:
     """hython has no menus to redraw, and its hou.ui may be missing."""
     # The lists load with a UI, and the UI is gone when the main-thread jobs run.
+    pane: FakePaneTab = FakePaneTab("Parm", FakeNode("farm-a", "queue-a"))
+    scene.pane_tabs = [pane]
     _, deferred = _default_redraw_menus(scene)
     scene.ui = False
     for job in deferred:
         job()
-    assert scene.updates == 0
+    assert pane.pointed_at == []
 
 
 @pytest.mark.parametrize("parm", ["farm", "queue"])
