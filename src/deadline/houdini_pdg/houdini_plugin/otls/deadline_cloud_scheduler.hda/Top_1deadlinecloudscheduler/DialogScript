@@ -83,12 +83,14 @@
                 name    "farm"
                 label   "Farm"
                 type    label
+                invisible
                 default { "<unknown>" }
             }
             parm {
                 name    "queue"
                 label   "Queue"
                 type    label
+                invisible
                 default { "<unknown>" }
             }
             parm {

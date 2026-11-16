@@ -91,3 +91,29 @@ def test_the_job_number_parms_are_plain_integer_fields(parm: str) -> None:
     block: str = _parms(NODE_SCRIPT)[parm]
     assert re.search(r"type\s+integer", block)
     assert re.search(r'parmtag\s*\{\s*"sidefx::slider"\s+"none"\s*\}', block), parm
+
+
+def _flag(block: str, flag: str) -> bool:
+    """Whether a parm block carries a bare flag line, such as ``invisible`` or ``joinnext``."""
+    return bool(re.search(rf"^\s*{flag}\s*$", block, re.M))
+
+
+def _settings_folder() -> str:
+    """The text of the Deadline Cloud Settings folder, ``folder1``, in the node's script."""
+    start: int = NODE_SCRIPT.index('name    "folder1"')
+    return NODE_SCRIPT[start : NODE_SCRIPT.index('name    "submit"', start)]
+
+
+@pytest.mark.parametrize("parm", ["farm", "queue"])
+def test_the_farm_and_queue_labels_are_hidden_but_kept(parm: str) -> None:
+    """The panel shows the choice, and scripts still read the labels, so they're hidden, not removed."""
+    # Each label is still a label parm in the Deadline Cloud Settings folder, with the hidden flag.
+    block: str = _parms(_settings_folder())[parm]
+    assert re.search(r"type\s+label", block), parm
+    assert _flag(block, "invisible"), parm
+
+
+@pytest.mark.parametrize("parm", ["settings", "update_queue_parameters", "submit"])
+def test_settings_update_queue_parameters_and_submit_stay_visible(parm: str) -> None:
+    """The panel has no Settings, update or Submit of its own, so the node keeps these shown."""
+    assert not _flag(_parms(NODE_SCRIPT)[parm], "invisible"), parm
