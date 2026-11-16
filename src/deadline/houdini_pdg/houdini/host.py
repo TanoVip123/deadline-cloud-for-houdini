@@ -1359,6 +1359,32 @@ _CHOOSE_A_FARM: str = "Choose a farm first"
 #: The key of the farm list. Each queue list is keyed by its farm's ID.
 _FARMS: str = ""
 
+#: The start of every log line about the menus, so a console search finds them all.
+_MENUS_LOG: str = "Farm and Queue menus:"
+
+
+def _list_name(key: str) -> str:
+    """How the log names the list for ``key``."""
+    return "farms" if key == _FARMS else f"queues of farm {key}"
+
+
+def _logged_call(
+    label: str, obj: Any, name: str, *args: Any, none_is_normal: bool = False, **kwargs: Any
+) -> Any:
+    """``_call`` for the redraw, logging ``label`` at INFO when the call fails or returns None.
+
+    ``none_is_normal`` is for a call such as ``setCurrentNode``, which returns None when it works.
+    """
+    try:
+        result: Any = getattr(obj, name)(*args, **kwargs)
+    except Exception as error:
+        _logger.debug("%s failed", name, exc_info=True)
+        _logger.info("%s %s failed: %s", _MENUS_LOG, label, error)
+        return None
+    if result is None and not none_is_normal:
+        _logger.info("%s %s returned None.", _MENUS_LOG, label)
+    return result
+
 
 def _start_daemon_thread(job: Callable[[], None]) -> None:
     """Run ``job`` in a thread that doesn't keep Houdini from exiting."""
@@ -1375,16 +1401,45 @@ def _run_later_on_main_thread(job: Callable[[], None]) -> None:
 def _redraw_menus() -> None:
     """Have Houdini draw the Farm and Queue menu labels again, without setting a parm."""
     # hython has no menus to draw.
-    if hou.isUIAvailable():
-        # Houdini redraws a Parameters pane's menus when the pane is pointed at its node again.
-        # Only a pane already showing a scheduler node is touched, so no pane shows another node.
-        for pane in _call(hou.ui, "paneTabs") or ():
-            node: Any = _call(pane, "currentNode")
-            if (
-                _call(pane, "type") == hou.paneTabType.Parm
-                and _call(_call(node, "type"), "name") == _NODE_TYPE
-            ):
-                _call(pane, "setCurrentNode", node)
+    if not hou.isUIAvailable():
+        _logger.info("%s no UI, so nothing to redraw.", _MENUS_LOG)
+        return
+    panes: Sequence[Any] = _logged_call("hou.ui.paneTabs()", hou.ui, "paneTabs") or ()
+    _logger.info("%s the redraw sees %d pane tabs.", _MENUS_LOG, len(panes))
+    # A Parameters pane pointed at its own node again doesn't redraw, so it goes away and back.
+    # Only a pane showing a scheduler node is touched, and pick_node=False keeps the selection.
+    matched: int = 0
+    for pane in panes:
+        node: Any = _logged_call("pane.currentNode()", pane, "currentNode")
+        if (
+            _logged_call("pane.type()", pane, "type") == hou.paneTabType.Parm
+            and _logged_call(
+                "node.type().name()", _logged_call("node.type()", node, "type"), "name"
+            )
+            == _NODE_TYPE
+        ):
+            matched += 1
+            parent: Any = _logged_call("node.parent()", node, "parent")
+            _logger.info(
+                "%s pane %s shows %s, so the redraw calls setCurrentNode(%s, pick_node=False),"
+                " then setCurrentNode(%s, pick_node=False).",
+                _MENUS_LOG,
+                _call(pane, "name"),
+                _path_of(node),
+                _path_of(parent),
+                _path_of(node),
+            )
+            # The pane goes to the node's network, then back to the node, as two plain calls.
+            for label, target in (("parent", parent), ("node", node)):
+                _logged_call(
+                    f"pane.setCurrentNode({label})",
+                    pane,
+                    "setCurrentNode",
+                    target,
+                    none_is_normal=True,
+                    pick_node=False,
+                )
+    _logger.info("%s %d of %d pane tabs show a scheduler node.", _MENUS_LOG, matched, len(panes))
 
 
 class FarmAndQueueMenus:
@@ -1444,6 +1499,17 @@ class FarmAndQueueMenus:
         items: List[str] = none_selected + [
             text for entry_id, label in entries for text in (entry_id or saved, label)
         ]
+        # Houdini may call this on every redraw, so it logs one line.
+        shown: str = (
+            f"the loaded list of {len(entries)} item(s)"
+            if has_choices
+            else (
+                f'the placeholder "{entries[0][1]}"'
+                if loaded is None
+                else "the login entry" if entries[0][1] == _LOG_IN else "the error entry"
+            )
+        )
+        _logger.info("%s the %s menu returned %s.", _MENUS_LOG, parm_name, shown)
         return items
 
     def load_lists(self, reload: bool = False) -> None:
@@ -1517,15 +1583,43 @@ class FarmAndQueueMenus:
             entries: Optional[List[Tuple[str, str]]] = self._lists.get(farm_id)
         # A list for another farm isn't the one Queue shows, and a reload's own list comes later.
         if farm_id != saved_farm or entries is None:
+            reason: str = "aren't the saved farm's" if farm_id != saved_farm else "aren't loaded"
+            _logger.info(
+                "%s saved farm %r, queue %r. The queues of farm %r %s, so no node is set.",
+                _MENUS_LOG,
+                saved_farm,
+                saved,
+                farm_id,
+                reason,
+            )
             return
         # The login and error entries keep the saved ID as their token, as in the menu.
         tokens: Set[str] = {entry_id or saved for entry_id, _ in entries}
         shown: str = saved if saved in tokens else ""
         # Only a changed value is set, since a set may mark a scene that just opened as unsaved.
+        set_count: int = 0
         for node in hou.nodeType(hou.topNodeTypeCategory(), _NODE_TYPE).instances():
             queue: Any = node.parm("queue")
             if queue.evalAsString() != shown:
                 queue.set(shown)
+                set_count += 1
+        _logger.info(
+            "%s saved farm %r, queue %r. Queue shows %r, set on %d node(s).",
+            _MENUS_LOG,
+            saved_farm,
+            saved,
+            shown,
+            set_count,
+        )
+
+    def _cached(self, key: str) -> str:
+        """What the cache holds for ``key``, for the log: loaded with N items, loading, or missing."""
+        with self._lock:
+            entries: Optional[List[Tuple[str, str]]] = self._lists.get(key)
+            loading: bool = key in self._loading
+        if entries is not None:
+            return f"loaded with {len(entries)} item(s)"
+        return "loading" if loading else "missing"
 
     def _load_for_selected_scheduler(self, selection: List[Any]) -> None:
         """Start the lists when a scheduler node is selected, so they're ready when its parms show."""
@@ -1544,6 +1638,7 @@ class FarmAndQueueMenus:
             if key in self._loading:
                 return
             self._loading.add(key)
+        _logger.info("%s started loading the %s.", _MENUS_LOG, _list_name(key))
         if not self._watching_selection:
             hou.ui.addSelectionCallback(self._load_for_selected_scheduler)
             self._watching_selection = True
@@ -1552,17 +1647,20 @@ class FarmAndQueueMenus:
     def _load_list(self, key: str) -> None:
         """Load the farm list, or the queues of farm ``key``. Runs in a background thread."""
         # Any error is shown as the menu's one entry, since a thread has nowhere to raise it.
+        # ``landed`` names a login or error entry for the log, and is empty for a real list.
         entries: List[Tuple[str, str]]
         regions: Dict[str, str]
+        landed: str
         try:
             status: Any = self._api.check_authentication_status()
             if status != self._api.AwsAuthenticationStatus.AUTHENTICATED:
-                entries, regions = [("", _LOG_IN)], {}
+                entries, regions, landed = [("", _LOG_IN)], {}, "the login entry"
             elif key == _FARMS:
                 farms: List[Dict[str, Any]] = self._api.list_farms()["farms"]
-                entries, regions = (
+                entries, regions, landed = (
                     [(farm["farmId"], farm["displayName"]) for farm in farms],
                     {farm["farmId"]: farm["region"] for farm in farms},
+                    "",
                 )
             else:
                 with self._lock:
@@ -1570,17 +1668,29 @@ class FarmAndQueueMenus:
                 queues: List[Dict[str, Any]] = self._api.list_queues(farmId=key, region=region)[
                     "queues"
                 ]
-                entries, regions = [
-                    (queue["queueId"], queue["displayName"]) for queue in queues
-                ], {}
+                entries, regions, landed = (
+                    [(queue["queueId"], queue["displayName"]) for queue in queues],
+                    {},
+                    "",
+                )
         except Exception as error:
-            entries, regions = [("", f"The list couldn't load: {error}")], {}
+            entries, regions, landed = (
+                [("", f"The list couldn't load: {error}")],
+                {},
+                f"the error entry ({error})",
+            )
         # The lists are sorted by name, ignoring case, as deadline-cloud's own lists are.
         entries.sort(key=lambda entry: (entry[1].casefold(), entry[0]))
         with self._lock:
             self._lists[key] = entries
             self._farm_regions.update(regions)
             self._loading.discard(key)
+        _logger.info(
+            "%s loaded the %s: %s.",
+            _MENUS_LOG,
+            _list_name(key),
+            landed or f"{len(entries)} item(s)",
+        )
         # Only the main thread may set a parm or redraw, so the menus show the list from there.
         self._run_later_on_main_thread(functools.partial(self._show_loaded_list, key))
 
@@ -1589,6 +1699,16 @@ class FarmAndQueueMenus:
 
         An unchanged parm doesn't redraw its menu's label, so the menus are redrawn here.
         """
+        # The log says what the cache holds now, since a reload may have emptied it again.
+        saved_farm: str = get_workstation_setting("defaults.farm_id", self._config)
+        _logger.info(
+            "%s the main thread shows the %s. The cache holds farms %s, and queues of farm %r %s.",
+            _MENUS_LOG,
+            _list_name(key),
+            self._cached(_FARMS),
+            saved_farm,
+            self._cached(saved_farm),
+        )
         if key != _FARMS:
             self._show_saved_queue(key)
         self._redraw_menus()

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import threading
@@ -111,14 +112,31 @@ class FakeNode:
     def type(self) -> Any:
         return types.SimpleNamespace(name=lambda: "deadlinecloudscheduler")
 
+    def path(self) -> str:
+        return "/obj/topnet1/scheduler1"
+
+    def parent(self) -> Any:
+        return _NETWORK
+
+
+#: The TOP network that holds every scheduler node in these tests.
+_NETWORK: Any = types.SimpleNamespace(path=lambda: "/obj/topnet1")
+
 
 class FakePaneTab:
-    """A ``hou.PaneTab`` of one type, showing one node, that records each node it's pointed at."""
+    """A ``hou.PaneTab`` of one type, showing one node, that records each node it's pointed at.
 
-    def __init__(self, pane_type: str, node: Any) -> None:
+    Each pointing is recorded with its ``pick_node``, since True would also select the node.
+    """
+
+    def __init__(self, pane_type: str, node: Any, name: str = "panetab1") -> None:
         self.pane_type: str = pane_type
         self.node: Any = node
-        self.pointed_at: List[Any] = []
+        self.pane_name: str = name
+        self.pointed_at: List[Tuple[Any, bool]] = []
+
+    def name(self) -> str:
+        return self.pane_name
 
     def type(self) -> str:
         return self.pane_type
@@ -126,8 +144,8 @@ class FakePaneTab:
     def currentNode(self) -> Any:
         return self.node
 
-    def setCurrentNode(self, node: Any) -> None:
-        self.pointed_at.append(node)
+    def setCurrentNode(self, node: Any, pick_node: bool = True) -> None:
+        self.pointed_at.append((node, pick_node))
         self.node = node
 
 
@@ -710,13 +728,13 @@ def _default_redraw_menus(scene: FakeHou) -> Tuple[FarmAndQueueMenus, List[Calla
     return menus, deferred
 
 
-def test_the_default_redraw_points_a_parameters_pane_at_its_scheduler_node_again(
+def test_the_default_redraw_points_a_parameters_pane_at_the_network_then_back_at_its_node(
     scene: FakeHou,
 ) -> None:
-    """Houdini redraws a menu label when its Parameters pane is pointed at the node again.
+    """Pointing a Parameters pane at the node it already shows didn't redraw the menu labels.
 
-    The label kept showing Loading... with only a UI update, and a parm set could mark the
-    scene unsaved, so the redraw re-points the pane at the same node and sets no parm.
+    Pointing it away and back rebuilds the pane. ``pick_node=False`` keeps the selection, and
+    no parm is set, since a set could mark the scene unsaved.
     """
     # The node already shows the saved queue, so nothing but the redraws should happen.
     node: FakeNode = FakeNode("farm-a", "queue-a")
@@ -726,8 +744,9 @@ def test_the_default_redraw_points_a_parameters_pane_at_its_scheduler_node_again
     _, deferred = _default_redraw_menus(scene)
     for job in deferred:
         job()
-    # One redraw for each of the two lists, each at the node the pane already showed.
-    assert pane.pointed_at == [node, node] and pane.currentNode() is node
+    # One redraw for each of the two lists, each away to the network and back to the node.
+    away_and_back: List[Tuple[Any, bool]] = [(_NETWORK, False), (node, False)]
+    assert pane.pointed_at == away_and_back * 2 and pane.currentNode() is node
     assert node.parm("farm").sets == [] and node.parm("queue").sets == []
 
 
@@ -834,3 +853,304 @@ def test_picking_none_selected_saves_nothing(scene: FakeHou, parm: str, saved_qu
     # Nothing is saved or updated, and the parm holds the saved ID again.
     assert menus.config.writes == [] and updates == []
     assert node.parm(parm).evalAsString() == settings[f"defaults.{parm}_id"]
+
+
+# -- the menus' INFO log lines ---------------------------------------------------
+
+#: The package logger the artist sets to INFO in Houdini's Python Shell to see these lines.
+_PACKAGE_LOGGER: str = "deadline.houdini_pdg"
+_PREFIX: str = "Farm and Queue menus: "
+
+
+def _menu_lines(caplog: pytest.LogCaptureFixture, part: str = "") -> List[str]:
+    """The menus' INFO lines, without their prefix, that contain ``part``."""
+    # Only INFO lines from the host module's logger count, as the console would show them.
+    lines: List[str] = [
+        record.getMessage()[len(_PREFIX) :]
+        for record in caplog.records
+        if record.name == "deadline.houdini_pdg.houdini.host"
+        and record.levelno == logging.INFO
+        and record.getMessage().startswith(_PREFIX)
+    ]
+    return [line for line in lines if part in line]
+
+
+def test_starting_and_landing_a_fetch_log_the_list_and_its_count(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The artist's console must show whether each fetch started and landed, to find where it stops.
+
+    Setting only the package logger to INFO must be enough, as in the Python Shell.
+    """
+    # Both lists start and land, with the package logger at INFO and nothing else set.
+    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    menus: Menus = Menus(_SAVED)
+    menus.menus.load_lists()
+    menus.run_jobs()
+    assert _menu_lines(caplog, "loading the") == [
+        "started loading the farms.",
+        "started loading the queues of farm farm-a.",
+    ]
+    assert _menu_lines(caplog, "loaded the") == [
+        "loaded the farms: 2 item(s).",
+        "loaded the queues of farm farm-a: 1 item(s).",
+    ]
+
+
+def test_a_fetch_already_loading_logs_no_second_start(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A start line for a fetch that never ran would point the search at the wrong place."""
+    # The second load finds both lists loading, so it starts nothing and logs nothing.
+    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    menus: Menus = Menus(_SAVED)
+    menus.menus.load_lists()
+    menus.menus.load_lists()
+    assert len(_menu_lines(caplog, "started loading")) == 2
+
+
+@pytest.mark.parametrize(
+    "logged_in, error, landed",
+    [
+        (False, None, "the login entry"),
+        (True, RuntimeError("no network"), "the error entry (no network)"),
+    ],
+    ids=["login", "error"],
+)
+def test_a_landed_fetch_logs_the_login_or_error_entry(
+    scene: FakeHou,
+    caplog: pytest.LogCaptureFixture,
+    logged_in: bool,
+    error: Optional[Exception],
+    landed: str,
+) -> None:
+    """A fetch that lands with one entry is no list, so the line must say which entry it shows."""
+    # Log out or break the farm list, then let the farm fetch land.
+    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    menus: Menus = Menus(_SAVED)
+    if not logged_in:
+        menus.api.status = FakeAuthenticationStatus.NEEDS_LOGIN
+    menus.api.error = error
+    menus.menus.list_menu_items("farm")
+    menus.run_jobs()
+    assert _menu_lines(caplog, "loaded the") == [f"loaded the farms: {landed}."]
+
+
+def test_the_main_thread_job_logs_its_list_and_what_the_cache_holds(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A job that runs while the cache is empty again would leave the menus on Loading..."""
+    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    # Only the queue menu asks, so the farm list was never started.
+    menus: Menus = Menus(_SAVED)
+    scene.instances = [FakeNode("farm-a", "queue-a")]
+    menus.menus.list_menu_items("queue")
+    menus.run_jobs()
+    menus.run_deferred()
+    # Then both lists reload, and only the farm list lands before its main-thread job runs.
+    menus.menus.load_lists(reload=True)
+    farms_job: Callable[[], None] = menus.jobs[0]
+    farms_job()
+    menus.run_deferred()
+    assert _menu_lines(caplog, "main thread") == [
+        "the main thread shows the queues of farm farm-a. The cache holds farms missing,"
+        " and queues of farm 'farm-a' loaded with 1 item(s).",
+        "the main thread shows the farms. The cache holds farms loaded with 2 item(s),"
+        " and queues of farm 'farm-a' loading.",
+    ]
+
+
+def test_showing_the_saved_queue_logs_the_value_and_the_nodes_it_set(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The line must tell a Queue left unset apart from one set, and from a list that was skipped."""
+    # Pick farm-b, save its queue-y, and let the list land: one node changes, one already shows it.
+    menus: Menus = _loaded(_SAVED)
+    changed: FakeNode = FakeNode("farm-a", "queue-a")
+    unchanged: FakeNode = FakeNode("farm-b", "queue-y")
+    scene.instances = [changed, unchanged]
+    _pick_farm(menus, changed, "farm-b")
+    menus.config.settings["defaults.queue_id"] = "queue-y"
+    unchanged.parm("queue").set("queue-y")
+    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    caplog.clear()
+    menus.run_jobs()
+    menus.run_deferred()
+    assert _menu_lines(caplog, "saved farm") == [
+        "saved farm 'farm-b', queue 'queue-y'. Queue shows 'queue-y', set on 1 node(s)."
+    ]
+
+
+@pytest.mark.parametrize(
+    "reload, line",
+    [
+        (False, "The queues of farm 'farm-b' aren't the saved farm's, so no node is set."),
+        (True, "The queues of farm 'farm-b' aren't loaded, so no node is set."),
+    ],
+    ids=["another farm", "reloaded"],
+)
+def test_a_skipped_queue_list_logs_why_no_node_is_set(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture, reload: bool, line: str
+) -> None:
+    """A list for another farm, or one a reload dropped, sets nothing, and the line says which."""
+    # Pick farm-b and let its queues land, then pick farm-a or reload before the main thread runs.
+    menus: Menus = _loaded(_SAVED)
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    scene.instances = [node]
+    _pick_farm(menus, node, "farm-b")
+    menus.run_jobs()
+    if reload:
+        menus.menus.load_lists(reload=True)
+    else:
+        _pick_farm(menus, node, "farm-a")
+    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    caplog.clear()
+    menus.run_deferred()
+    saved_farm: str = "farm-b" if reload else "farm-a"
+    assert _menu_lines(caplog, "saved farm") == [f"saved farm '{saved_farm}', queue ''. {line}"]
+
+
+def test_the_redraw_logs_the_panes_it_saw_and_the_one_it_re_pointed(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The console must show whether the redraw found the artist's Parameters pane at all."""
+    # A Parameters pane on the scheduler node, and a network editor, for one list landing.
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    scene.instances = [node]
+    scene.pane_tabs = [
+        FakePaneTab("Parm", node, "parameditor1"),
+        FakePaneTab("NetworkEditor", node, "networkeditor1"),
+    ]
+    _, deferred = _default_redraw_menus(scene)
+    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    caplog.clear()
+    deferred[0]()
+    assert _menu_lines(caplog, "pane") == [
+        "the redraw sees 2 pane tabs.",
+        "pane parameditor1 shows /obj/topnet1/scheduler1, so the redraw calls"
+        " setCurrentNode(/obj/topnet1, pick_node=False), then"
+        " setCurrentNode(/obj/topnet1/scheduler1, pick_node=False).",
+        "1 of 2 pane tabs show a scheduler node.",
+    ]
+    # setCurrentNode returns None when it works, so that alone is not logged.
+    assert _menu_lines(caplog, "returned None") == []
+
+
+def test_the_redraw_logs_each_call_that_failed_or_returned_none(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A redraw call that fails is otherwise only a debug line, so the console would show nothing."""
+    # A Parameters pane with no node, one whose type fails, and one whose setCurrentNode fails.
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    empty: FakePaneTab = FakePaneTab("Parm", None)
+    no_type: FakePaneTab = FakePaneTab("Parm", node)
+    no_redraw: FakePaneTab = FakePaneTab("Parm", node)
+
+    # A pane call that raises, as Houdini's does for a pane that was closed.
+    def fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("pane closed")
+
+    # The failing calls replace the fakes' methods, and one list lands.
+    setattr(no_type, "type", fail)
+    setattr(no_redraw, "setCurrentNode", fail)
+    scene.pane_tabs = [empty, no_type, no_redraw]
+    _, deferred = _default_redraw_menus(scene)
+    caplog.set_level(logging.DEBUG, logger=_PACKAGE_LOGGER)
+    caplog.clear()
+    deferred[0]()
+    # Each failure also keeps its traceback at DEBUG, as every other pane call's does.
+    assert any(r.levelno == logging.DEBUG and r.exc_info for r in caplog.records)
+    problems: List[str] = [
+        line for line in _menu_lines(caplog) if " failed: " in line or "returned None" in line
+    ]
+    assert problems == [
+        "pane.currentNode() returned None.",
+        "node.type() failed: 'NoneType' object has no attribute 'type'",
+        "node.type().name() failed: 'NoneType' object has no attribute 'name'",
+        "pane.type() failed: pane closed",
+        "pane.setCurrentNode(parent) failed: pane closed",
+        "pane.setCurrentNode(node) failed: pane closed",
+    ]
+
+
+def test_the_redraw_logs_when_hou_ui_cannot_list_the_panes(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """With no pane list nothing is redrawn, and the console must show why."""
+    # The fake's paneTabs raises on a missing list, as a broken hou.ui would.
+    _, deferred = _default_redraw_menus(scene)
+    setattr(scene, "pane_tabs", None)
+    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    caplog.clear()
+    deferred[0]()
+    assert _menu_lines(caplog, "hou.ui") == [
+        "hou.ui.paneTabs() failed: 'NoneType' object is not iterable"
+    ]
+    assert _menu_lines(caplog, "pane tabs") == [
+        "the redraw sees 0 pane tabs.",
+        "0 of 0 pane tabs show a scheduler node.",
+    ]
+
+
+def test_the_redraw_logs_that_hython_has_nothing_to_redraw(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A session that lost its UI redraws nothing, and the line says so instead of a pane count."""
+    # The lists load with a UI, and the UI is gone when the first main-thread job runs.
+    _, deferred = _default_redraw_menus(scene)
+    scene.ui = False
+    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    caplog.clear()
+    deferred[0]()
+    assert _menu_lines(caplog, "redraw") == ["no UI, so nothing to redraw."]
+
+
+def _logged_menu(menus: Menus, parm: str, caplog: pytest.LogCaptureFixture) -> List[str]:
+    """The menu lines that one call of ``parm``'s menu logs."""
+    caplog.clear()
+    menus.menus.list_menu_items(parm)
+    return _menu_lines(caplog, "menu returned")
+
+
+def test_each_menu_call_logs_one_line_naming_what_it_returned(
+    scene: FakeHou, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A menu stuck on Loading... while its list is loaded would show here as the placeholder."""
+    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    # Before and after the lists load, and with no farm saved.
+    menus: Menus = Menus(_SAVED)
+    assert _logged_menu(menus, "farm", caplog) == [
+        'the farm menu returned the placeholder "Loading...".'
+    ]
+    menus.run_jobs()
+    assert _logged_menu(menus, "farm", caplog) == [
+        "the farm menu returned the loaded list of 2 item(s)."
+    ]
+    menus.config.settings["defaults.farm_id"] = ""
+    assert _logged_menu(menus, "queue", caplog) == [
+        'the queue menu returned the placeholder "Choose a farm first".'
+    ]
+
+
+@pytest.mark.parametrize(
+    "logged_in, error, shown",
+    [(False, None, "the login entry"), (True, RuntimeError("no network"), "the error entry")],
+    ids=["login", "error"],
+)
+def test_a_menu_call_logs_the_login_or_error_entry(
+    scene: FakeHou,
+    caplog: pytest.LogCaptureFixture,
+    logged_in: bool,
+    error: Optional[Exception],
+    shown: str,
+) -> None:
+    """A loaded login or error entry is one entry, like a placeholder, and the line tells them apart."""
+    # Log out or break the farm list, let it land, then call the farm menu once.
+    caplog.set_level(logging.INFO, logger=_PACKAGE_LOGGER)
+    menus: Menus = Menus(_SAVED)
+    if not logged_in:
+        menus.api.status = FakeAuthenticationStatus.NEEDS_LOGIN
+    menus.api.error = error
+    menus.menus.list_menu_items("farm")
+    menus.run_jobs()
+    assert _logged_menu(menus, "farm", caplog) == [f"the farm menu returned {shown}."]
