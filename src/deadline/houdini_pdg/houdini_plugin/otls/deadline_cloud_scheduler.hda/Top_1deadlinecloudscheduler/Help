@@ -30,8 +30,10 @@ Pick the farm and queue in the __Farm__ and __Queue__ menus on the Shared
 Job Settings tab. A pick is saved to the AWS Deadline Cloud workstation
 configuration at once, so the ROP and every scheduler node use it too. After
 you pick a farm or a queue, the queue's parameters update. Picking a farm
-clears the queue, so pick a queue next. The Conda Packages and Conda Channels
-fields appear only for a queue whose queue environments define them.
+clears the queue, so Queue shows __<none selected>__ until you pick one. Each
+menu lists __<none selected>__ first, and picking it changes nothing. The
+Conda Packages and Conda Channels fields appear only for a queue whose queue
+environments define them.
 
 The menus load their lists in the background, when you select the node or
 open a menu, and show __Loading...__ until the lists arrive. They load only

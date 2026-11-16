@@ -1413,6 +1413,10 @@ class FarmAndQueueMenus:
 
         A list that isn't loaded yet starts loading, and shows one entry until it is.
         """
+        from deadline.houdini_submitter.python.deadline_cloud_for_houdini.submitter import (
+            _NONE_SELECTED_TEXT,
+        )
+
         farm_id: str = get_workstation_setting("defaults.farm_id", self._config)
         key: str = _FARMS if parm_name == "farm" else farm_id
         # Queues are listed per farm, so with no farm there is nothing to load.
@@ -1423,9 +1427,13 @@ class FarmAndQueueMenus:
             self._start_loading(key)
         placeholder: str = _CHOOSE_A_FARM if no_farm else _LOADING
         entries: List[Tuple[str, str]] = loaded if loaded is not None else [("", placeholder)]
+        # A list of farms or queues starts with an entry for no choice, since Houdini shows the
+        # first entry when the value matches no token, as an empty saved queue would.
+        listed: bool = loaded is not None and all(entry_id for entry_id, _ in loaded)
+        none_selected: List[str] = ["", _NONE_SELECTED_TEXT] if listed else []
         # An entry with no ID keeps the saved ID as its token, so showing it changes no value.
         saved: str = get_workstation_setting(f"defaults.{parm_name}_id", self._config)
-        items: List[str] = [
+        items: List[str] = none_selected + [
             text for entry_id, label in entries for text in (entry_id or saved, label)
         ]
         return items
@@ -1490,14 +1498,11 @@ class FarmAndQueueMenus:
             )
 
     def _show_saved_queue(self, farm_id: str) -> None:
-        """Set each scheduler node's Queue to the saved queue, or to none selected if it isn't listed.
+        """Set each scheduler node's Queue to the saved queue, or to empty if it isn't listed.
 
         Runs on Houdini's main thread once ``farm_id``'s queues load, so Queue stops showing Loading.
+        Empty is the token of the menu's none selected entry.
         """
-        from deadline.houdini_submitter.python.deadline_cloud_for_houdini.submitter import (
-            _NONE_SELECTED_TEXT,
-        )
-
         saved_farm: str = get_workstation_setting("defaults.farm_id", self._config)
         saved: str = get_workstation_setting("defaults.queue_id", self._config)
         with self._lock:
@@ -1507,7 +1512,7 @@ class FarmAndQueueMenus:
             return
         # The login and error entries keep the saved ID as their token, as in the menu.
         tokens: Set[str] = {entry_id or saved for entry_id, _ in entries}
-        shown: str = saved if saved in tokens else _NONE_SELECTED_TEXT
+        shown: str = saved if saved in tokens else ""
         # Only a changed value is set, since a set may mark a scene that just opened as unsaved.
         for node in hou.nodeType(hou.topNodeTypeCategory(), _NODE_TYPE).instances():
             queue: Any = node.parm("queue")

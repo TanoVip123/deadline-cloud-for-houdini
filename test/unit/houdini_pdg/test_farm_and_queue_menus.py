@@ -19,6 +19,7 @@ from .houdini_fakes import FakeHou, install_hou
 from deadline.houdini_pdg.houdini.host import FarmAndQueueMenus
 
 _LOADING: str = "Loading..."
+_NONE_SELECTED: str = "<none selected>"
 _LOG_IN: str = "Log in with Deadline Cloud Monitor or `deadline auth login`"
 
 
@@ -196,8 +197,22 @@ def test_the_fetch_fills_the_lists_and_the_menus_list_names_with_id_tokens(
     menus.menus.list_menu_items("queue")
     menus.run_jobs()
     # The names are sorted without case, and the queues are read in the farm's own region.
-    assert menus.menus.list_menu_items("farm") == ["farm-a", "alpha", "farm-b", "Beta"]
-    assert menus.menus.list_menu_items("queue") == ["queue-y", "Comp", "queue-z", "Sims"]
+    assert menus.menus.list_menu_items("farm") == [
+        "",
+        _NONE_SELECTED,
+        "farm-a",
+        "alpha",
+        "farm-b",
+        "Beta",
+    ]
+    assert menus.menus.list_menu_items("queue") == [
+        "",
+        _NONE_SELECTED,
+        "queue-y",
+        "Comp",
+        "queue-z",
+        "Sims",
+    ]
     assert ("list_queues", {"farmId": "farm-b", "region": "us-west-2"}) in menus.api.calls
 
 
@@ -211,7 +226,7 @@ def test_farms_with_the_same_name_are_listed_in_id_order(scene: FakeHou) -> None
     ]
     menus.menus.list_menu_items("farm")
     menus.run_jobs()
-    assert menus.menus.list_menu_items("farm") == ["farm-1", "Main", "farm-2", "Main"]
+    assert menus.menus.list_menu_items("farm")[2:] == ["farm-1", "Main", "farm-2", "Main"]
 
 
 def test_the_default_fetch_runs_in_a_background_daemon_thread(scene: FakeHou) -> None:
@@ -371,6 +386,17 @@ def test_show_saved_ids_puts_the_ids_back_after_the_rop_wrote_names(scene: FakeH
     assert node.parm("queue").evalAsString() == "queue-a"
 
 
+def test_show_saved_ids_puts_back_an_empty_queue_after_the_rop_wrote_none_selected(
+    scene: FakeHou,
+) -> None:
+    """The ROP's none selected text is no menu token, so it would show the first queue's name."""
+    # A farm pick leaves no queue saved, and the ROP's update then writes its text into Queue.
+    menus: Menus = Menus({"defaults.farm_id": "farm-a"})
+    node: FakeNode = FakeNode("Farm One", _NONE_SELECTED)
+    menus.menus.show_saved_ids(node)
+    assert node.parm("queue").evalAsString() == ""
+
+
 def test_load_starts_both_fetches_and_reload_starts_them_again(scene: FakeHou) -> None:
     """Create and load start the lists early, and Update Queue Parameters reads them again."""
     # The first load starts the farm list and the saved farm's queue list.
@@ -418,19 +444,17 @@ def test_selecting_a_scheduler_node_starts_the_fetch(scene: FakeHou) -> None:
     scene.selection_callbacks[0]([_item("geo"), _item("deadlinecloudscheduler")])
     assert len(menus.jobs) == 1
     menus.run_jobs()
-    assert menus.menus.list_menu_items("queue") == ["queue-y", "Comp", "queue-z", "Sims"]
-
-
-_NONE_SELECTED: str = "<none selected>"
+    assert menus.menus.list_menu_items("queue")[2:] == ["queue-y", "Comp", "queue-z", "Sims"]
 
 
 def _shown_queue(menus: Menus, node: FakeNode) -> str:
-    """The Queue label Houdini shows: the label of the entry whose token the parm holds, else the value."""
-    # Houdini's menu list alternates tokens and labels.
+    """The Queue label Houdini shows: the entry whose token the parm holds, else the first entry."""
+    # Houdini's menu list alternates tokens and labels, and a value that is no token shows the
+    # first label, which made Queue look set to the first queue when it held none.
     items: List[str] = menus.menus.list_menu_items("queue")
     labels: Dict[str, str] = dict(zip(items[::2], items[1::2]))
     value: str = node.parm("queue").evalAsString()
-    return labels.get(value, value)
+    return labels.get(value, items[1])
 
 
 def _pick_farm(menus: Menus, node: FakeNode, farm_id: str) -> None:
@@ -452,10 +476,12 @@ def test_a_farm_pick_starts_its_queue_fetch_at_once(scene: FakeHou) -> None:
 
 
 @pytest.mark.parametrize(
-    "saved_queue, shown", [("", _NONE_SELECTED), ("queue-y", "queue-y")], ids=["none", "listed"]
+    "saved_queue, shown, label",
+    [("", "", _NONE_SELECTED), ("queue-y", "queue-y", "Comp")],
+    ids=["none", "listed"],
 )
 def test_a_loaded_queue_list_sets_the_queue_on_the_main_thread_only(
-    scene: FakeHou, saved_queue: str, shown: str
+    scene: FakeHou, saved_queue: str, shown: str, label: str
 ) -> None:
     """Houdini's parms are safe to set only on its main thread, so the fetch thread hands it over."""
     # Pick farm-b, then save a queue as another tool would, before its queues load.
@@ -470,6 +496,7 @@ def test_a_loaded_queue_list_sets_the_queue_on_the_main_thread_only(
     assert len(menus.deferred) == 1
     menus.run_deferred()
     assert node.parm("queue").evalAsString() == shown
+    assert _shown_queue(menus, node) == label
 
 
 def test_without_a_ui_a_farm_pick_fetches_and_defers_nothing(scene: FakeHou) -> None:
@@ -683,3 +710,78 @@ def test_the_default_redraw_does_nothing_without_a_ui(scene: FakeHou) -> None:
     for job in deferred:
         job()
     assert scene.updates == 0
+
+
+@pytest.mark.parametrize("parm", ["farm", "queue"])
+def test_a_loaded_menu_starts_with_a_none_selected_entry_whose_token_is_empty(
+    scene: FakeHou, parm: str
+) -> None:
+    """With no entry for an empty value, Houdini showed the first farm or queue as if it were set."""
+    menus: Menus = _loaded(_SAVED)
+    assert menus.menus.list_menu_items(parm)[:2] == ["", _NONE_SELECTED]
+
+
+def test_a_farm_with_no_queues_lists_only_the_none_selected_entry(scene: FakeHou) -> None:
+    """A farm with no queues still needs an entry the empty saved queue matches."""
+    # farm-a lists no queues, and its empty list loads.
+    menus: Menus = Menus({"defaults.farm_id": "farm-a"})
+    menus.api.queues["farm-a"] = []
+    menus.menus.list_menu_items("queue")
+    menus.run_jobs()
+    assert menus.menus.list_menu_items("queue") == ["", _NONE_SELECTED]
+
+
+@pytest.mark.parametrize("farms", [["farm-b"], ["farm-b", "farm-a"]], ids=["farm", "and back"])
+def test_after_a_farm_pick_and_its_queues_landing_the_queue_is_empty(
+    scene: FakeHou, farms: List[str]
+) -> None:
+    """The ROP's none selected text is no menu token, so Queue showed the first queue's name."""
+    # Pick each farm, and let its queues load and reach the main thread.
+    menus: Menus = _loaded(_SAVED)
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    scene.instances = [node]
+    for farm_id in farms:
+        _pick_farm(menus, node, farm_id)
+        menus.run_jobs()
+        menus.run_deferred()
+    assert node.parm("queue").evalAsString() == ""
+    assert _shown_queue(menus, node) == _NONE_SELECTED
+
+
+@pytest.mark.parametrize(
+    "farms", [["farm-b"], ["farm-b", "farm-a"], ["farm-a", "farm-b"]], ids=["b", "b, a", "a, b"]
+)
+def test_a_farm_pick_never_saves_or_shows_a_listed_queue(scene: FakeHou, farms: List[str]) -> None:
+    """A farm pick clears the queue, so a listed queue in the settings or in Queue would be wrong."""
+    # Pick the farms in turn, with every queue list landing, and the saved queue listed at first.
+    menus: Menus = _loaded(_SAVED)
+    node: FakeNode = FakeNode("farm-a", "queue-a")
+    scene.instances = [node]
+    for farm_id in farms:
+        _pick_farm(menus, node, farm_id)
+        menus.run_jobs()
+        menus.run_deferred()
+    listed: List[str] = [
+        queue["queueId"] for queues in menus.api.queues.values() for queue in queues
+    ]
+    saved_queues: List[str] = [
+        value for name, value in menus.config.writes if name == "defaults.queue_id"
+    ]
+    assert saved_queues and not set(saved_queues) & set(listed)
+    assert not set(node.parm("queue").sets) & set(listed)
+
+
+@pytest.mark.parametrize("saved_queue", ["queue-a", ""], ids=["queue saved", "no queue saved"])
+@pytest.mark.parametrize("parm", ["farm", "queue"])
+def test_picking_none_selected_saves_nothing(scene: FakeHou, parm: str, saved_queue: str) -> None:
+    """The entry is no farm or queue, so a pick of it must not clear or change the saved one."""
+    # Houdini sets the parm to the entry's empty token, then runs the callback.
+    settings: Dict[str, str] = {"defaults.farm_id": "farm-a", "defaults.queue_id": saved_queue}
+    menus: Menus = _loaded(settings)
+    node: FakeNode = FakeNode("farm-a", saved_queue)
+    node.parm(parm).set("")
+    updates: List[str] = []
+    menus.menus.save_pick(node, parm, lambda: updates.append("update"))
+    # Nothing is saved or updated, and the parm holds the saved ID again.
+    assert menus.config.writes == [] and updates == []
+    assert node.parm(parm).evalAsString() == settings[f"defaults.{parm}_id"]
