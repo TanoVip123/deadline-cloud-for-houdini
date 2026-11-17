@@ -125,6 +125,7 @@ addopts = [
     "--color=yes",
     "--cov=src/deadline/houdini_adaptor",
     "--cov=src/deadline/houdini_submitter",
+    "--cov=src/deadline/houdini_pdg",
     "--cov-report=html:build/coverage",
     "--cov-report=xml:build/coverage/coverage.xml",
     "--cov-report=term-missing",
@@ -147,14 +148,12 @@ markers = [
 ]
 
 [tool.coverage.run]
-source_pkgs = [ "deadline/houdini_adaptor", "deadline/houdini_submitter" ]
+source_pkgs = [ "deadline/houdini_adaptor", "deadline/houdini_submitter", "deadline/houdini_pdg" ]
 branch = true
 parallel = true
 omit = [
     "**/__main__.py",
     "**/_version.py",
-    # The experimental PDG worker actions stay out of coverage until the PDG scheduler can cook.
-    "**/houdini_adaptor/pdg_actions.py",
 ]
 
 [tool.coverage.paths]
