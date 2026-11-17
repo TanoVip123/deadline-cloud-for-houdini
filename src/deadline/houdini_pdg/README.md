@@ -13,32 +13,11 @@ The job is created suspended. The scheduler releases each task once its work ite
 
 Before anything is uploaded, the scheduler checks the network and refuses what it can't cook, for example a node that cooks in your Houdini session between two steps, a step set to cook In-Process, or a step whose results PDG would take from files already on your workstation. Each refusal names the node and says what to change. The node's **Validate Graph** toggle turns the refusals into warnings, except the one for an unsaved scene.
 
-## Registering the scheduler by hand
+## Installing
 
-The installer does not register the scheduler, so it does not appear in anyone's TOP menu by default. To try it in a development checkout:
+The Deadline Cloud submitter installer installs the scheduler with the ROP submitter. Restart Houdini after the install, and **Deadline Cloud Scheduler (Experimental)** appears under Schedulers in a TOP network's Tab menu. Uninstalling the submitter removes it.
 
-1. Run the dev install from the repository root:
-
-   ```sh
-   hatch run install
-   ```
-
-2. Create a Houdini package file, for example `deadline_pdg_for_houdini.json`, in your Houdini user preferences `packages/` directory. Replace `<repo>` with the absolute path of your checkout:
-
-   ```json
-   {
-       "hpath": "<repo>/src/deadline/houdini_pdg/houdini_plugin",
-       "env": [
-           {"PYTHONPATH": {"value": "<repo>/src", "method": "append"}}
-       ]
-   }
-   ```
-
-   `hpath` makes Houdini find the scheduler type and its HDA. `PYTHONPATH` makes `deadline.houdini_pdg` importable inside Houdini. The node's buttons use the Deadline Cloud ROP's code, so the ROP submitter must be installed too.
-
-3. Restart Houdini. In a TOP network, open the Tab menu and check that **Deadline Cloud Scheduler (Experimental)** appears under Schedulers.
-
-To remove the scheduler, delete the package file and restart Houdini.
+In a development checkout, `hatch run install` does the same. See [DEVELOPMENT.md](../../../DEVELOPMENT.md). If you made a `deadline_pdg_for_houdini.json` package file by hand, delete it.
 
 ## Cooking
 
@@ -75,7 +54,7 @@ The scheduler does not download outputs to your workstation. Steps hand files to
 | `cook.py` | Runs one cook, from PDG's start callback to its stop callback |
 | `diagnostics.py` | Writes each cook's debug directory and log |
 | `houdini/` | Reads PDG and Houdini objects, runs the checks before a cook starts, and runs the node's Submit button and its Farm and Queue menus |
-| `houdini_plugin/` | The scheduler registration, and the HDA that gives the node its parms, icon, help, and Tab menu entry. Added to `hpath` by hand |
+| `houdini_plugin/` | The scheduler registration, and the HDA that gives the node its parms, icon, help, and Tab menu entry. The installer copies it into the install folder, which is on `hpath` |
 
 The worker side lives in `src/deadline/houdini_adaptor/pdg_actions.py`. The Houdini adaptor starts Houdini once per worker session. A stock PDG job script cooks in that Houdini, with the item's scene loaded fresh, and any other command runs through a shell.
 

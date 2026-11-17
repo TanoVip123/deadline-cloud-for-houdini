@@ -3,7 +3,7 @@
 """Registers the Deadline Cloud scheduler with PDG. Experimental.
 
 PDG loads this module from ``$HOUDINI_PATH/pdg/types/deadlinecloud/``. The
-installer does not put it there; the PDG README explains how to add it by hand.
+submitter installer puts it there, and ``hatch run install`` does the same for a checkout.
 
 The node's icon, parameters, help, and Tab menu entry come from the HDA in
 ``otls/deadline_cloud_scheduler.hda``, which binds to this type by name, the same

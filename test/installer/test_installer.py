@@ -110,6 +110,13 @@ def _validate_files(installation_path: Path) -> None:
     submitter_module_dir = [f.name for f in (python_dir / "deadline_cloud_for_houdini").iterdir()]
     assert "_version.py" in submitter_module_dir
 
+    # Check the PDG scheduler's registration module and HDA are on hpath, and its package on PYTHONPATH.
+    assert (installation_path / "pdg" / "types" / "deadlinecloud" / "__init__.py").is_file()
+    assert (
+        installation_path / "otls" / "deadline_cloud_scheduler.hda" / "INDEX__SECTION"
+    ).is_file()
+    assert (python_dir / "deadline" / "houdini_pdg" / "_version.py").is_file()
+
 
 # TODO: Add a similar test to above for valiating the HOUDINI_PACKAGE_DIR env variable is set by the installer
 
