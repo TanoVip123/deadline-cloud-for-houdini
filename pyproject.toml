@@ -122,6 +122,7 @@ line-length = 100
 xfail_strict = true
 addopts = [
     "--durations=5",
+    "-rA",
     "--color=yes",
     "--cov=src/deadline/houdini_adaptor",
     "--cov=src/deadline/houdini_submitter",
